@@ -3,10 +3,16 @@ use recollect::Library;
 use recollect::cli::{self, Cli, Command};
 
 fn main() -> anyhow::Result<()> {
+    // Frame statistics are logged at info level; make them visible without extra setup.
+    let default_filter = if std::env::var_os("RECOLLECT_FRAME_STATS").is_some() {
+        "warn,recollect::ui::frame_stats=info"
+    } else {
+        "warn"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("RECOLLECT_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .with_writer(std::io::stderr)
         .init();

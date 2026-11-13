@@ -20,8 +20,8 @@ computer.
 - All / Images / Videos filter.
 - Background indexing with pause, resume and cancel; you can search while it runs.
 - Incremental rescans: new, changed and deleted files are picked up; unchanged files are skipped.
-- Keyboard: `Ctrl+F` focuses the search box, the arrow keys move the selection, `Enter` opens the
-  selected result, `Esc` clears the search.
+- Keyboard: `Ctrl+F` (`Cmd+F` on macOS) focuses the search box, the arrow keys move the selection, `Enter` opens the
+  selected result, `Esc` clears the selection.
 
 ## How it works
 
@@ -114,7 +114,7 @@ Without a subcommand (or with `gui`) the app starts. Global options, valid with 
 | `RECOLLECT_HOME` | keep all data under this directory (same as `--home`); useful for portable installs |
 | `RECOLLECT_NO_GPU` | if set (any value), never use the GPU (same as `--cpu`) |
 | `RECOLLECT_LOG` | log filter, e.g. `info` or `recollect=debug`; default `warn`; logs go to stderr |
-| `RECOLLECT_FRAME_STATS` | if set, the GUI logs frame-time statistics every 10 seconds (for diagnosing slowness) |
+| `RECOLLECT_FRAME_STATS` | if set, the GUI logs frame-time percentiles to stderr every 10 seconds and repaints continuously so the numbers reflect a busy UI (for diagnosing slowness) |
 | `RECOLLECT_SEGMENT_TAU` | tuning knob: cosine similarity (default `0.90`) above which consecutive video frames are merged into one moment |
 | `RECOLLECT_TEST_MODELS` | tests only; see [CONTRIBUTING.md](CONTRIBUTING.md) |
 

@@ -15,7 +15,7 @@ All notable changes to this project are documented here. The format is based on
 - Background indexing with pause, resume and cancel; search works while indexing runs.
 - Incremental rescans that pick up new, changed and deleted files; unmounted drives are kept.
 - Failed files are listed with a "Retry failed files" action.
-- Keyboard shortcuts: Ctrl+F focuses search, arrow keys move the selection, Enter opens, Esc clears.
+- Keyboard shortcuts: Ctrl+F (Cmd+F on macOS) focuses search, arrow keys move the selection, Enter opens, Esc clears the selection.
 - Two models, downloaded after your consent: SigLIP base/16 (default with a discrete GPU) and
   CLIP ViT-B/32 (default without a GPU); switchable in Settings or with `--model`.
 - GPU acceleration through WebGPU with automatic CPU fallback.

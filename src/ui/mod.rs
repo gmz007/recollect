@@ -87,6 +87,8 @@ pub struct App {
     /// Scroll offset to apply on the next frame so the keyboard selection stays visible.
     scroll_to: Option<f32>,
     keyboard_moved: bool,
+    /// Set by `results_grid`; read (and cleared) at the start of the next frame.
+    grid_shown: bool,
     frame_stats: Option<FrameStats>,
     folder_input: String,
     notice: Option<(String, Instant)>,
@@ -131,6 +133,7 @@ impl App {
             grid_cols: 1,
             scroll_to: None,
             keyboard_moved: false,
+            grid_shown: false,
             frame_stats: FrameStats::from_env(),
             folder_input: String::new(),
             notice: None,
@@ -147,7 +150,9 @@ impl App {
             settings_draft: settings,
         };
         app.snapshot = Snapshot::fetch(&app.lib);
-        if app.snapshot.model_installed {
+        // Unit tests fake an installed model with placeholder files; never feed those to
+        // ONNX Runtime.
+        if app.snapshot.model_installed && !cfg!(test) {
             // Load the text model in the background so the first search is fast.
             let lib = Arc::clone(&app.lib);
             std::thread::spawn(move || lib.embed_text("warm up").ok());
@@ -630,11 +635,14 @@ impl App {
         let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(TILE * 0.6);
         let rows = self.results.len().div_ceil(cols);
         self.grid_cols = cols;
+        self.grid_shown = true;
         let mut clicked: Option<(usize, bool)> = None;
         let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
         if let Some(y) = self.scroll_to.take() {
             area = area.vertical_scroll_offset(y);
         }
+        // `show_rows` spaces rows by the row height plus the item spacing of this `ui`.
+        let stride = tile + GAP + ui.spacing().item_spacing.y;
         let out = area.show_rows(ui, tile + GAP, rows, |ui, range| {
             for row in range {
                 ui.horizontal(|ui| {
@@ -655,15 +663,9 @@ impl App {
             // Rows are virtualized, so the selected tile may not exist on screen yet:
             // scroll by row arithmetic instead of asking the tile to scroll itself.
             self.keyboard_moved = false;
-            let stride = tile + GAP;
-            let top = (i / cols) as f32 * stride;
             let view = out.inner_rect.height();
             let offset = out.state.clamped_offset().y;
-            if top < offset {
-                self.scroll_to = Some(top);
-            } else if top + tile > offset + view {
-                self.scroll_to = Some(top + tile - view);
-            }
+            self.scroll_to = scroll_offset_for_row(i / cols, stride, tile, view, offset);
             if self.scroll_to.is_some() {
                 ui.ctx().request_repaint();
             }
@@ -692,7 +694,7 @@ impl App {
     fn tile(&mut self, ui: &mut egui::Ui, i: usize, size: f32) -> egui::Response {
         let hit = &self.results[i];
         let key = Self::thumb_key(hit, None);
-        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::CLICK);
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
@@ -760,6 +762,8 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        let label = format!("Result {name}");
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         resp.on_hover_text(format!("{name}\nmatch {:.3}", hit.score))
     }
 
@@ -1064,33 +1068,84 @@ fn step(selected: Option<usize>, len: usize, cols: usize, key: Nav) -> Option<us
     })
 }
 
+/// Removes and counts presses of `key` that carry no modifiers at all.
+fn consume_plain_key(i: &mut egui::InputState, key: egui::Key) -> usize {
+    let mut count = 0;
+    i.events.retain(|e| {
+        let hit = matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. }
+            if *k == key && !modifiers.any());
+        count += hit as usize;
+        !hit
+    });
+    count
+}
+
+/// Where the scroll offset should go so that `row` is fully visible, or `None` when it
+/// already is. `stride` is the distance between row tops, `tile` the row's height.
+fn scroll_offset_for_row(
+    row: usize,
+    stride: f32,
+    tile: f32,
+    view: f32,
+    offset: f32,
+) -> Option<f32> {
+    let top = row as f32 * stride;
+    if top < offset {
+        Some(top)
+    } else if top + tile > offset + view {
+        Some(top + tile - view)
+    } else {
+        None
+    }
+}
+
 impl App {
-    /// Arrow keys move the selection, Enter opens it. Skipped while a text field has focus
-    /// so typing in the search box is never hijacked.
-    fn handle_navigation_keys(&mut self, ctx: &egui::Context) {
-        if self.results.is_empty() || ctx.egui_wants_keyboard_input() {
+    /// Arrow keys move the selection, Enter opens it. Only active when the results grid was
+    /// drawn last frame, the Settings window is closed and no text field has keyboard focus,
+    /// so typing in the search box is never hijacked. Keys with any modifier are ignored.
+    fn handle_navigation_keys(&mut self, ctx: &egui::Context, grid_was_shown: bool) {
+        if !grid_was_shown
+            || self.settings_open
+            || self.results.is_empty()
+            || ctx.text_edit_focused()
+        {
             return;
         }
-        let (nav, enter) = ctx.input_mut(|i| {
-            let mut nav = None;
-            for (key, n) in [
-                (egui::Key::ArrowLeft, Nav::Left),
-                (egui::Key::ArrowRight, Nav::Right),
-                (egui::Key::ArrowUp, Nav::Up),
-                (egui::Key::ArrowDown, Nav::Down),
-            ] {
-                if i.consume_key(egui::Modifiers::NONE, key) {
-                    nav = Some(n);
-                }
+        let (counts, enter) = ctx.input_mut(|i| {
+            let mut counts = [
+                (Nav::Left, 0usize),
+                (Nav::Right, 0),
+                (Nav::Up, 0),
+                (Nav::Down, 0),
+            ];
+            for (n, c) in &mut counts {
+                let key = match n {
+                    Nav::Left => egui::Key::ArrowLeft,
+                    Nav::Right => egui::Key::ArrowRight,
+                    Nav::Up => egui::Key::ArrowUp,
+                    Nav::Down => egui::Key::ArrowDown,
+                };
+                *c = consume_plain_key(i, key);
             }
-            (nav, i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+            (counts, consume_plain_key(i, egui::Key::Enter) > 0)
         });
-        if let Some(n) = nav {
-            let next = step(self.selected, self.results.len(), self.grid_cols, n);
-            if next != self.selected {
-                self.selected = next;
-                self.selected_t = next.and_then(|i| self.results[i].t_start);
+        let mut next = self.selected;
+        let mut handled = false;
+        for (n, c) in counts {
+            for _ in 0..c {
+                next = step(next, self.results.len(), self.grid_cols, n);
+                handled = true;
             }
+        }
+        if handled {
+            // Focus on a button would otherwise also move with the arrows.
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        }
+        if next != self.selected {
+            self.selected = next;
+            self.selected_t = next.and_then(|i| self.results[i].t_start);
             self.keyboard_moved = true;
         }
         if enter && let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
@@ -1107,7 +1162,8 @@ impl App {
             ctx.request_repaint();
         }
         self.update_state(&ctx);
-        self.handle_navigation_keys(&ctx);
+        let grid_was_shown = std::mem::take(&mut self.grid_shown);
+        self.handle_navigation_keys(&ctx, grid_was_shown);
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             self.top_bar(ui);
@@ -1177,7 +1233,34 @@ mod tests;
 
 #[cfg(test)]
 mod nav_tests {
-    use super::{Nav, step};
+    use super::{Nav, scroll_offset_for_row, step};
+
+    #[test]
+    fn scroll_offset_keeps_rows_visible() {
+        // 100 rows, 200 px tiles, 4 px item spacing, 500 px viewport.
+        let (stride, tile, view) = (212.0, 200.0, 500.0);
+        assert_eq!(scroll_offset_for_row(0, stride, tile, view, 0.0), None);
+        assert_eq!(scroll_offset_for_row(1, stride, tile, view, 0.0), None);
+        // Row 2 ends at 624 > 500: scroll so its bottom edge meets the viewport bottom.
+        assert_eq!(
+            scroll_offset_for_row(2, stride, tile, view, 0.0),
+            Some(124.0)
+        );
+        // Far down the grid the offset uses the real stride.
+        let o = scroll_offset_for_row(99, stride, tile, view, 0.0).unwrap();
+        assert_eq!(o, 99.0 * stride + tile - view);
+        assert_eq!(scroll_offset_for_row(99, stride, tile, view, o), None);
+        // Scrolling back up aligns the row's top with the viewport top.
+        assert_eq!(
+            scroll_offset_for_row(50, stride, tile, view, o),
+            Some(50.0 * stride)
+        );
+        // Already fully visible in the middle of the list.
+        assert_eq!(
+            scroll_offset_for_row(50, stride, tile, view, 50.0 * stride - 100.0),
+            None
+        );
+    }
 
     #[test]
     fn steps_through_the_grid() {

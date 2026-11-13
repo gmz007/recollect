@@ -28,6 +28,7 @@ fn fake_install(lib: &Library) {
 
 fn harness(lib: Arc<Library>) -> Harness<'static> {
     let mut app = App::new(&egui::Context::default(), lib);
+    app.frame_stats = None;
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
         .build_ui(move |ui| app.show(ui));
@@ -112,6 +113,7 @@ fn results_and_video_detail_panel() {
     let lib = library(d.path());
     fake_install(&lib);
     let mut app = App::new(&egui::Context::default(), lib);
+    app.frame_stats = None;
     // No real folder: adding one would start a background rescan that races the test.
     app.snapshot.folders = vec![crate::store::db::Folder {
         id: 1,
@@ -145,6 +147,7 @@ fn arrow_keys_move_the_selection() {
     let lib = library(d.path());
     fake_install(&lib);
     let mut app = App::new(&egui::Context::default(), lib);
+    app.frame_stats = None;
     app.snapshot.folders = vec![crate::store::db::Folder {
         id: 1,
         path: "/nowhere".into(),
@@ -169,6 +172,89 @@ fn arrow_keys_move_the_selection() {
     h.run();
     h.get_by_label("c.jpg");
     h.key_press(egui::Key::ArrowLeft);
+    h.run();
+    h.get_by_label("b.jpg");
+}
+
+/// Three image results, nothing selected, ready for keyboard tests.
+fn grid_app(d: &std::path::Path) -> App {
+    use crate::media::MediaKind;
+    let lib = library(d);
+    fake_install(&lib);
+    let mut app = App::new(&egui::Context::default(), lib);
+    app.frame_stats = None;
+    app.snapshot.folders = vec![crate::store::db::Folder {
+        id: 1,
+        path: "/nowhere".into(),
+    }];
+    app.results = ["a.jpg", "b.jpg", "c.jpg"]
+        .iter()
+        .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
+        .collect();
+    app.current = Some(super::Query::Text("a dragon".into()));
+    app.result_label = "a dragon".into();
+    app
+}
+
+fn grid_harness(app: App) -> Harness<'static> {
+    let mut app = app;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| app.show(ui));
+    h.run();
+    h
+}
+
+#[test]
+fn typing_in_search_blocks_arrows_until_focus_leaves() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = grid_harness(grid_app(d.path()));
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .next()
+        .unwrap()
+        .click();
+    h.run();
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    assert!(h.query_by_label("a.jpg").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.get_by_label("a.jpg");
+}
+
+#[test]
+fn modified_arrows_do_not_move_the_selection() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = grid_harness(grid_app(d.path()));
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowRight);
+    h.run();
+    assert!(h.query_by_label("a.jpg").is_none());
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.get_by_label("a.jpg");
+}
+
+#[test]
+fn arrows_are_ignored_while_settings_is_open() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = grid_harness(grid_app(d.path()));
+    h.get_by_label("Settings").click();
+    h.run();
+    h.get_by_label("Search model");
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    assert!(h.query_by_label("a.jpg").is_none());
+}
+
+#[test]
+fn clicking_a_tile_keeps_arrows_working() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = grid_harness(grid_app(d.path()));
+    h.get_by_label("Result a.jpg").click();
+    h.run();
+    h.key_press(egui::Key::ArrowRight);
     h.run();
     h.get_by_label("b.jpg");
 }
