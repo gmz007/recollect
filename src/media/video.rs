@@ -132,6 +132,8 @@ struct Converter {
         (ff::format::Pixel, u32, u32),
     )>,
     out_dims: (u32, u32),
+    /// Original display size (sample aspect ratio applied, before rotation).
+    display: (u32, u32),
     rotation: u32,
     rotation_known: bool,
 }
@@ -142,6 +144,7 @@ impl Converter {
             min_side,
             scaler: None,
             out_dims: (0, 0),
+            display: (0, 0),
             rotation: 0,
             rotation_known: false,
         }
@@ -164,6 +167,7 @@ impl Converter {
                 1.0
             };
             let (dw, dh) = ((w as f64 * sar).max(1.0), h as f64);
+            self.display = (dw.round() as u32, h);
             let scale = (self.min_side as f64 / dw.min(dh)).min(1.0);
             let ow = ((dw * scale).round() as u32).max(2) & !1;
             let oh = ((dh * scale).round() as u32).max(2) & !1;
@@ -390,8 +394,12 @@ impl SampleState {
     ) -> Result<()> {
         let rgb = self.conv.convert(f)?;
         if self.emitted == 0 {
-            self.info.width = rgb.width;
-            self.info.height = rgb.height;
+            let (w, h) = self.conv.display;
+            (self.info.width, self.info.height) = if self.conv.rotation % 180 == 90 {
+                (h, w)
+            } else {
+                (w, h)
+            };
         }
         self.emitted += 1;
         self.next_t = t + self.cfg.interval;
@@ -580,7 +588,7 @@ pub(crate) mod tests {
         let p = make_clip(d.path(), "short.mp4", 20, 10, &[]); // keyframe every 1 s
         let (ts, info) = sample_all(&p, SamplerConfig::default());
         assert!((info.duration - 20.0).abs() < 0.5, "{}", info.duration);
-        assert_eq!((info.width, info.height), (228, 64), "{info:?}");
+        assert_eq!((info.width, info.height), (320, 90), "{info:?}");
         assert!(ts.len() >= 9 && ts.len() <= 11, "{ts:?}");
         assert!(
             ts.windows(2)
@@ -635,7 +643,7 @@ pub(crate) mod tests {
         let top_red = r.data[(5 * 90 + 45) * 3] > 128;
         assert_eq!(top_red, ref_top_red);
         let (_, info) = sample_all(&rot, SamplerConfig::default());
-        assert_eq!((info.width, info.height), (64, 228));
+        assert_eq!((info.width, info.height), (90, 320));
     }
 
     #[test]

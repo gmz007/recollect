@@ -9,7 +9,7 @@ use ndarray::{Array2, Array4};
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Where inference runs.
@@ -99,6 +99,10 @@ pub struct VisionEncoder {
     output: String,
     device: Device,
     batch: usize,
+    path: PathBuf,
+    threads: usize,
+    /// GPU inference failures so far (1st: rebuild the session, 2nd: fall back to CPU).
+    gpu_failures: u32,
 }
 
 impl VisionEncoder {
@@ -140,6 +144,9 @@ impl VisionEncoder {
             output,
             device,
             batch,
+            path: path.to_path_buf(),
+            threads,
+            gpu_failures: 0,
         };
         // Warm-up catches EPs that load but cannot run this graph.
         let px = vec![0u8; 3 * (spec.image_size * spec.image_size) as usize];
@@ -162,26 +169,61 @@ impl VisionEncoder {
     }
 
     /// Embeds RGB8 images of `image_size²` pixels; returns one unit vector per image.
+    ///
+    /// WebGPU occasionally fails a run ("Invalid Buffer"). The first failure rebuilds the GPU
+    /// session and retries; a second one switches this encoder to the CPU for good.
     pub fn embed(&mut self, images: &[&[u8]]) -> Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(images.len());
-        let batch = self.batch;
-        for chunk in images.chunks(batch) {
-            out.extend(self.embed_batch(chunk)?);
+        let mut start = 0;
+        while start < images.len() {
+            let chunk = &images[start..(start + self.batch).min(images.len())];
+            match self.embed_batch(chunk) {
+                Ok(v) => {
+                    out.extend(v);
+                    start += chunk.len();
+                }
+                Err(e) if self.device == Device::Gpu => self.recover_from_gpu_error(&e)?,
+                Err(e) => return Err(e),
+            }
         }
         Ok(out)
+    }
+
+    fn recover_from_gpu_error(&mut self, e: &anyhow::Error) -> Result<()> {
+        self.gpu_failures += 1;
+        let device = if self.gpu_failures == 1 {
+            tracing::warn!("GPU inference failed ({e:#}); rebuilding the GPU session");
+            Device::Gpu
+        } else {
+            tracing::warn!("GPU inference failed again ({e:#}); continuing on the CPU");
+            Device::Cpu
+        };
+        let failures = self.gpu_failures;
+        let fresh = Self::with_device(self.spec, &self.path, device, self.threads)
+            .or_else(|_| Self::with_device(self.spec, &self.path, Device::Cpu, self.threads))?;
+        *self = fresh;
+        self.gpu_failures = failures;
+        Ok(())
     }
 
     fn embed_batch(&mut self, images: &[&[u8]]) -> Result<Vec<Vec<f32>>> {
         let s = self.spec.image_size as usize;
         let per = 3 * s * s;
-        let mut flat = vec![0f32; images.len() * per];
+        // On the GPU always run full, fixed-size batches (zero padded): constant shapes let
+        // WebGPU reuse its buffers, which avoids sporadic allocation failures.
+        let rows = if self.device == Device::Gpu {
+            self.batch.max(images.len())
+        } else {
+            images.len()
+        };
+        let mut flat = vec![0f32; rows * per];
         for (img, dst) in images.iter().zip(flat.chunks_exact_mut(per)) {
             if img.len() != per {
                 bail!("image buffer has {} bytes, expected {per}", img.len());
             }
             rgb_to_chw(self.spec, img, dst);
         }
-        let arr = Array4::from_shape_vec((images.len(), 3, s, s), flat)?;
+        let arr = Array4::from_shape_vec((rows, 3, s, s), flat)?;
         let outputs = self
             .session
             .run(ort::inputs![self.input.as_str() => TensorRef::from_array_view(&arr)?])?;
@@ -192,6 +234,7 @@ impl VisionEncoder {
         }
         Ok(data
             .chunks_exact(d)
+            .take(images.len())
             .map(|c| {
                 let mut v = c.to_vec();
                 normalize(&mut v);
