@@ -137,3 +137,38 @@ fn results_and_video_detail_panel() {
     h.get_by_label("Find similar");
     h.get_by_label("Show in folder");
 }
+
+#[test]
+fn arrow_keys_move_the_selection() {
+    use crate::media::MediaKind;
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    fake_install(&lib);
+    let mut app = App::new(&egui::Context::default(), lib);
+    app.snapshot.folders = vec![crate::store::db::Folder {
+        id: 1,
+        path: "/nowhere".into(),
+    }];
+    app.results = ["a.jpg", "b.jpg", "c.jpg"]
+        .iter()
+        .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
+        .collect();
+    app.current = Some(super::Query::Text("a dragon".into()));
+    app.result_label = "a dragon".into();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| app.show(ui));
+    h.run();
+    assert!(h.query_by_label("c.jpg").is_none());
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.get_by_label("a.jpg");
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.get_by_label("c.jpg");
+    h.key_press(egui::Key::ArrowLeft);
+    h.run();
+    h.get_by_label("b.jpg");
+}

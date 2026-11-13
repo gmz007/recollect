@@ -1,6 +1,7 @@
 //! The egui desktop app. All work happens on background threads; this module only renders
 //! state and sends commands to the [`Library`].
 
+mod frame_stats;
 mod platform;
 mod workers;
 
@@ -13,6 +14,7 @@ use crate::search::{SearchHit, SearchOptions};
 use crate::store::db::{Folder, Stats};
 use crate::thumbs::ThumbKey;
 use egui::{Align, Color32, Layout, RichText, Sense, Vec2};
+use frame_stats::FrameStats;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -80,6 +82,12 @@ pub struct App {
     selected: Option<usize>,
     /// Selected moment (seconds) for the selected video.
     selected_t: Option<f64>,
+    /// Columns in the results grid as of the last layout (for up/down navigation).
+    grid_cols: usize,
+    /// Scroll offset to apply on the next frame so the keyboard selection stays visible.
+    scroll_to: Option<f32>,
+    keyboard_moved: bool,
+    frame_stats: Option<FrameStats>,
     folder_input: String,
     notice: Option<(String, Instant)>,
     snapshot: Snapshot,
@@ -120,6 +128,10 @@ impl App {
             last_search_at: None,
             selected: None,
             selected_t: None,
+            grid_cols: 1,
+            scroll_to: None,
+            keyboard_moved: false,
+            frame_stats: FrameStats::from_env(),
             folder_input: String::new(),
             notice: None,
             snapshot: Snapshot::default(),
@@ -617,25 +629,45 @@ impl App {
         let cols = (((avail + GAP) / (TILE + GAP)).floor() as usize).max(1);
         let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(TILE * 0.6);
         let rows = self.results.len().div_ceil(cols);
+        self.grid_cols = cols;
         let mut clicked: Option<(usize, bool)> = None;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, tile + GAP, rows, |ui, range| {
-                for row in range {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = GAP;
-                        for i in row * cols..((row + 1) * cols).min(self.results.len()) {
-                            let resp = self.tile(ui, i, tile);
-                            if resp.double_clicked() {
-                                clicked = Some((i, true));
-                            } else if resp.clicked() {
-                                clicked = Some((i, false));
-                            }
+        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(y) = self.scroll_to.take() {
+            area = area.vertical_scroll_offset(y);
+        }
+        let out = area.show_rows(ui, tile + GAP, rows, |ui, range| {
+            for row in range {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = GAP;
+                    for i in row * cols..((row + 1) * cols).min(self.results.len()) {
+                        let resp = self.tile(ui, i, tile);
+                        if resp.double_clicked() {
+                            clicked = Some((i, true));
+                        } else if resp.clicked() {
+                            clicked = Some((i, false));
                         }
-                    });
-                    ui.add_space(GAP - ui.spacing().item_spacing.y);
-                }
-            });
+                    }
+                });
+                ui.add_space(GAP - ui.spacing().item_spacing.y);
+            }
+        });
+        if let Some(i) = self.selected.filter(|_| self.keyboard_moved) {
+            // Rows are virtualized, so the selected tile may not exist on screen yet:
+            // scroll by row arithmetic instead of asking the tile to scroll itself.
+            self.keyboard_moved = false;
+            let stride = tile + GAP;
+            let top = (i / cols) as f32 * stride;
+            let view = out.inner_rect.height();
+            let offset = out.state.clamped_offset().y;
+            if top < offset {
+                self.scroll_to = Some(top);
+            } else if top + tile > offset + view {
+                self.scroll_to = Some(top + tile - view);
+            }
+            if self.scroll_to.is_some() {
+                ui.ctx().request_repaint();
+            }
+        }
         if let Some((i, open)) = clicked {
             self.selected = Some(i);
             self.selected_t = self.results[i].t_start;
@@ -1003,11 +1035,79 @@ impl eframe::App for App {
     }
 }
 
+/// Direction of a keyboard move through the results grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nav {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Where the selection goes after an arrow key. Moves clamp at the ends of the list;
+/// up/down stay put when there is no row above/below. With nothing selected, any arrow
+/// picks the first result.
+fn step(selected: Option<usize>, len: usize, cols: usize, key: Nav) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let Some(cur) = selected.filter(|&i| i < len) else {
+        return Some(0);
+    };
+    let cols = cols.max(1);
+    Some(match key {
+        Nav::Left => cur.saturating_sub(1),
+        Nav::Right => (cur + 1).min(len - 1),
+        Nav::Up if cur >= cols => cur - cols,
+        Nav::Down if cur / cols < (len - 1) / cols => (cur + cols).min(len - 1),
+        Nav::Up | Nav::Down => cur,
+    })
+}
+
 impl App {
+    /// Arrow keys move the selection, Enter opens it. Skipped while a text field has focus
+    /// so typing in the search box is never hijacked.
+    fn handle_navigation_keys(&mut self, ctx: &egui::Context) {
+        if self.results.is_empty() || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (nav, enter) = ctx.input_mut(|i| {
+            let mut nav = None;
+            for (key, n) in [
+                (egui::Key::ArrowLeft, Nav::Left),
+                (egui::Key::ArrowRight, Nav::Right),
+                (egui::Key::ArrowUp, Nav::Up),
+                (egui::Key::ArrowDown, Nav::Down),
+            ] {
+                if i.consume_key(egui::Modifiers::NONE, key) {
+                    nav = Some(n);
+                }
+            }
+            (nav, i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        });
+        if let Some(n) = nav {
+            let next = step(self.selected, self.results.len(), self.grid_cols, n);
+            if next != self.selected {
+                self.selected = next;
+                self.selected_t = next.and_then(|i| self.results[i].t_start);
+            }
+            self.keyboard_moved = true;
+        }
+        if enter && let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
+            self.open_hit(i);
+        }
+    }
+
     /// Draws the whole app into `ui` (separate from `eframe::App` for headless UI tests).
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if let Some(stats) = &mut self.frame_stats {
+            stats.frame(self.lib.is_busy());
+            // egui only repaints on events; keep frames coming so there is something to time.
+            ctx.request_repaint();
+        }
         self.update_state(&ctx);
+        self.handle_navigation_keys(&ctx);
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             self.top_bar(ui);
@@ -1074,3 +1174,25 @@ impl Drop for App {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod nav_tests {
+    use super::{Nav, step};
+
+    #[test]
+    fn steps_through_the_grid() {
+        assert_eq!(step(None, 0, 4, Nav::Right), None);
+        assert_eq!(step(None, 5, 4, Nav::Down), Some(0));
+        assert_eq!(step(Some(0), 5, 4, Nav::Left), Some(0));
+        assert_eq!(step(Some(4), 5, 4, Nav::Right), Some(4));
+        assert_eq!(step(Some(1), 5, 4, Nav::Right), Some(2));
+        assert_eq!(step(Some(2), 5, 4, Nav::Up), Some(2));
+        assert_eq!(step(Some(5), 9, 4, Nav::Up), Some(1));
+        // Down from a full row into a short last row clamps to its final tile.
+        assert_eq!(step(Some(3), 6, 4, Nav::Down), Some(5));
+        // No row below: stay.
+        assert_eq!(step(Some(5), 6, 4, Nav::Down), Some(5));
+        assert_eq!(step(Some(0), 1, 4, Nav::Down), Some(0));
+        assert_eq!(step(Some(9), 3, 0, Nav::Down), Some(0));
+    }
+}
