@@ -103,7 +103,7 @@ pub enum BenchCmd {
 #[derive(Subcommand, Debug)]
 pub enum ModelsCmd {
     List,
-    /// Download the selected model (about 0.6–0.8 GB from huggingface.co).
+    /// Download the selected model (about 0.5–0.6 GB from huggingface.co).
     Download {
         /// Don't ask for confirmation.
         #[arg(long)]
