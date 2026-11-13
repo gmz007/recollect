@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Album browsing: a timeline of all photos and videos grouped by day, month or year, sortable
+  newest or oldest first, with an adjustable tile size.
+- Date navigator in the sidebar to jump to a year or month.
+- Folder view and a "Recently added" list.
+- Browsing works before the search model is downloaded; the one-time download prompt is now a
+  banner above the album instead of a full-screen card.
+
 ## [0.1.0] - 2026-11-14
 
 ### Added

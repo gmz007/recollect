@@ -171,6 +171,8 @@ pub struct TimelineFilter {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineItem {
     pub file_id: i64,
+    /// One searchable item of the file (its first), if it has been indexed.
+    pub item_id: Option<i64>,
     pub path: PathBuf,
     pub kind: MediaKind,
     pub mtime: i64,
@@ -556,7 +558,8 @@ impl Db {
     pub fn timeline(&self, filter: &TimelineFilter) -> Result<Vec<TimelineItem>> {
         let mut sql = String::from(
             "SELECT id, path, kind, mtime, taken_at, date_source, duration, width, height,
-                    favorite, camera, COALESCE(added_at, 0)
+                    favorite, camera, COALESCE(added_at, 0),
+                    (SELECT MIN(id) FROM items WHERE items.file_id = files.id)
              FROM files WHERE 1 = 1",
         );
         let mut args: Vec<i64> = Vec::new();
@@ -585,6 +588,7 @@ impl Db {
                 r.get(11)?,
                 TimelineItem {
                     file_id: r.get(0)?,
+                    item_id: r.get(12)?,
                     path: PathBuf::from(r.get::<_, String>(1)?),
                     kind: MediaKind::from_i64(r.get(2)?),
                     mtime,

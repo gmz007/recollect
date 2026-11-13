@@ -3,6 +3,7 @@
 
 mod frame_stats;
 mod platform;
+mod timeline;
 mod workers;
 
 use crate::Library;
@@ -18,6 +19,7 @@ use frame_stats::FrameStats;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use timeline::{TimelineState, View};
 pub use workers::Query;
 use workers::{SearchWorker, ThumbCache};
 
@@ -69,6 +71,8 @@ pub struct App {
     lib: Arc<Library>,
     search: SearchWorker,
     thumbs: ThumbCache,
+    /// Album views (timeline, recently added, folder) shown while no search is active.
+    tl: TimelineState,
     query: String,
     query_changed_at: Option<Instant>,
     kind: Option<MediaKind>,
@@ -114,10 +118,12 @@ impl App {
         let thumbs = ThumbCache::new(ctx, lib.paths().thumbs_dir(), 3);
         let settings = lib.settings();
         prune_thumbnails(&lib);
+        let tl = TimelineState::new(Arc::clone(&lib), ctx);
         let mut app = Self {
             lib,
             search,
             thumbs,
+            tl,
             query: String::new(),
             query_changed_at: None,
             kind: None,
@@ -310,6 +316,7 @@ impl App {
         {
             self.notice = None;
         }
+        self.update_timeline();
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -317,11 +324,15 @@ impl App {
             ui.heading(RichText::new("Recollect").strong());
             ui.add_space(12.0);
             let width = (ui.available_width() - 300.0).max(200.0);
-            let resp = ui.add(
+            let hint = if self.snapshot.model_installed {
+                "Describe what you're looking for, e.g. \"kids on the beach at sunset\""
+            } else {
+                "Download the model to search"
+            };
+            let resp = ui.add_enabled(
+                self.snapshot.model_installed,
                 egui::TextEdit::singleline(&mut self.query)
-                    .hint_text(
-                        "Describe what you're looking for, e.g. \"kids on the beach at sunset\"",
-                    )
+                    .hint_text(hint)
                     .desired_width(width)
                     .id_salt("search"),
             );
@@ -357,7 +368,11 @@ impl App {
         ui.add_space(6.0);
         ui.heading("Library");
         ui.add_space(4.0);
+        self.view_selector(ui);
+        ui.add_space(6.0);
+        ui.label(RichText::new("Folders").strong());
         let mut remove = None;
+        let mut open_folder = None;
         if self.snapshot.folders.is_empty() {
             ui.label(RichText::new("No folders yet.").weak());
         }
@@ -375,8 +390,17 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| f.path.display().to_string());
-                ui.label(name).on_hover_text(f.path.display().to_string());
+                if ui
+                    .selectable_label(self.tl.view == View::Folder(f.id), name)
+                    .on_hover_text(f.path.display().to_string())
+                    .clicked()
+                {
+                    open_folder = Some(f.id);
+                }
             });
+        }
+        if let Some(id) = open_folder {
+            self.set_view(View::Folder(id));
         }
         if let Some(id) = remove {
             // Cancels any running job first; runs in the background.
@@ -423,8 +447,10 @@ impl App {
         ui.label(format!("{} images · {} videos", s.images, s.videos));
         ui.label(format!("{} indexed · {} waiting", s.indexed, s.pending));
         ui.label(RichText::new(format!("{} searchable items", self.lib.indexed_items())).weak());
-        if s.errors > 0 {
-            egui::CollapsingHeader::new(format!("{} files could not be read", s.errors))
+        let failed = s.errors;
+        self.date_navigator(ui);
+        if failed > 0 {
+            egui::CollapsingHeader::new(format!("{failed} files could not be read"))
                 .id_salt("errors")
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
@@ -556,13 +582,22 @@ impl App {
         });
     }
 
-    fn consent_card(&mut self, ui: &mut egui::Ui) {
+    /// Shown above the album while the search model is missing; browsing works without it.
+    fn model_banner(&mut self, ui: &mut egui::Ui) {
         let spec = self.lib.model();
         let downloading = matches!(self.status.activity, Activity::Downloading { .. });
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.18);
-            ui.heading("One-time setup: download the search model");
-            ui.add_space(10.0);
+        if self.consent_dismissed && !downloading {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Search is off until the model is downloaded.").weak());
+                if ui.button("Download model…").clicked() {
+                    self.consent_dismissed = false;
+                }
+            });
+            return;
+        }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("One-time setup: download the search model");
             ui.label(format!(
                 "Recollect needs an AI model that understands both pictures and text.\n\
                  {} — {} MB, license {}, from huggingface.co/{}.",
@@ -571,17 +606,14 @@ impl App {
                 spec.license,
                 spec.repo
             ));
-            ui.add_space(6.0);
             ui.label(RichText::new(
                 "This is the only time Recollect uses the internet. Your photos and videos never leave this computer.",
             ).weak());
-            ui.add_space(16.0);
+            ui.add_space(4.0);
             if downloading {
                 ui.spinner();
             } else {
                 ui.horizontal(|ui| {
-                    let w = 380.0;
-                    ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
                     if ui.add(egui::Button::new(RichText::new("Download model").strong())).clicked()
                         && let Err(e) = self.lib.start_download()
                     {
@@ -597,6 +629,7 @@ impl App {
                 });
             }
         });
+        ui.add_space(8.0);
     }
 
     fn empty_state(&self, ui: &mut egui::Ui, title: &str, body: &str) {
@@ -610,6 +643,9 @@ impl App {
 
     fn results_grid(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if ui.button("Clear search").clicked() {
+                self.clear_search();
+            }
             if self.awaiting.is_some() {
                 ui.spinner();
             }
@@ -703,66 +739,18 @@ impl App {
         let key = Self::thumb_key(hit, None);
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::CLICK);
         if ui.is_rect_visible(rect) {
-            let painter = ui.painter_at(rect);
-            painter.rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
-            let failed = self.thumbs.failed(&key);
-            if let Some(tex) = self.thumbs.get(&key) {
-                let size = tex.size_vec2();
-                let scale = (rect.width() / size.x).min(rect.height() / size.y);
-                let r = egui::Rect::from_center_size(rect.center(), size * scale);
-                painter.image(
-                    tex.id(),
-                    r,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            } else {
-                let text = if failed { "preview unavailable" } else { "…" };
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    text,
-                    egui::FontId::proportional(13.0),
-                    ui.visuals().weak_text_color(),
-                );
-            }
-            if hit.kind == MediaKind::Video {
-                // Badge: play triangle + timestamp of the matching moment.
-                let label = fmt_time(hit.t_start.unwrap_or(0.0));
-                let galley =
-                    painter.layout_no_wrap(label, egui::FontId::proportional(13.0), Color32::WHITE);
-                let h = galley.size().y;
-                let size = Vec2::new(galley.size().x + h + 4.0, h);
-                let min = rect.left_bottom() + Vec2::new(6.0, -6.0 - h);
-                let bg = egui::Rect::from_min_size(min, size).expand(3.0);
-                painter.rect_filled(bg, 4.0, Color32::from_black_alpha(170));
-                let tri = [
-                    min + Vec2::new(1.0, 2.0),
-                    min + Vec2::new(1.0, h - 2.0),
-                    min + Vec2::new(h - 3.0, h / 2.0),
-                ];
-                painter.add(egui::Shape::convex_polygon(
-                    tri.to_vec(),
-                    Color32::WHITE,
-                    egui::Stroke::NONE,
-                ));
-                painter.galley(min + Vec2::new(h + 2.0, 0.0), galley, Color32::WHITE);
-            }
-            if self.selected == Some(i) {
-                painter.rect_stroke(
-                    rect.shrink(1.0),
-                    6.0,
-                    egui::Stroke::new(3.0, ui.visuals().selection.bg_fill),
-                    egui::StrokeKind::Inside,
-                );
-            } else if resp.hovered() {
-                painter.rect_stroke(
-                    rect.shrink(1.0),
-                    6.0,
-                    egui::Stroke::new(1.5, ui.visuals().widgets.hovered.bg_stroke.color),
-                    egui::StrokeKind::Inside,
-                );
-            }
+            let badge =
+                (hit.kind == MediaKind::Video).then(|| fmt_time(hit.t_start.unwrap_or(0.0)));
+            let selected = self.selected == Some(i);
+            timeline::paint_tile(
+                ui,
+                &mut self.thumbs,
+                &key,
+                rect,
+                badge,
+                selected,
+                resp.hovered(),
+            );
         }
         let name = hit
             .path
@@ -1106,6 +1094,49 @@ fn scroll_offset_for_row(
     }
 }
 
+/// Reads this frame's plain arrow and Enter presses and applies the arrows to `selected`.
+/// Returns the new selection and whether Enter was pressed.
+fn apply_nav_keys(
+    ctx: &egui::Context,
+    selected: Option<usize>,
+    len: usize,
+    cols: usize,
+) -> (Option<usize>, bool) {
+    let (counts, enter) = ctx.input_mut(|i| {
+        let mut counts = [
+            (Nav::Left, 0usize),
+            (Nav::Right, 0),
+            (Nav::Up, 0),
+            (Nav::Down, 0),
+        ];
+        for (n, c) in &mut counts {
+            let key = match n {
+                Nav::Left => egui::Key::ArrowLeft,
+                Nav::Right => egui::Key::ArrowRight,
+                Nav::Up => egui::Key::ArrowUp,
+                Nav::Down => egui::Key::ArrowDown,
+            };
+            *c = consume_plain_key(i, key);
+        }
+        (counts, consume_plain_key(i, egui::Key::Enter) > 0)
+    });
+    let mut next = selected;
+    let mut handled = false;
+    for (n, c) in counts {
+        for _ in 0..c {
+            next = step(next, len, cols, n);
+            handled = true;
+        }
+    }
+    if handled {
+        // Focus on a button would otherwise also move with the arrows.
+        if let Some(id) = ctx.memory(|m| m.focused()) {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+    }
+    (next, enter)
+}
+
 impl App {
     /// Arrow keys move the selection, Enter opens it. Only active when the results grid was
     /// drawn last frame, the Settings window is closed and no text field has keyboard focus,
@@ -1118,38 +1149,7 @@ impl App {
         {
             return;
         }
-        let (counts, enter) = ctx.input_mut(|i| {
-            let mut counts = [
-                (Nav::Left, 0usize),
-                (Nav::Right, 0),
-                (Nav::Up, 0),
-                (Nav::Down, 0),
-            ];
-            for (n, c) in &mut counts {
-                let key = match n {
-                    Nav::Left => egui::Key::ArrowLeft,
-                    Nav::Right => egui::Key::ArrowRight,
-                    Nav::Up => egui::Key::ArrowUp,
-                    Nav::Down => egui::Key::ArrowDown,
-                };
-                *c = consume_plain_key(i, key);
-            }
-            (counts, consume_plain_key(i, egui::Key::Enter) > 0)
-        });
-        let mut next = self.selected;
-        let mut handled = false;
-        for (n, c) in counts {
-            for _ in 0..c {
-                next = step(next, self.results.len(), self.grid_cols, n);
-                handled = true;
-            }
-        }
-        if handled {
-            // Focus on a button would otherwise also move with the arrows.
-            if let Some(id) = ctx.memory(|m| m.focused()) {
-                ctx.memory_mut(|m| m.surrender_focus(id));
-            }
-        }
+        let (next, enter) = apply_nav_keys(ctx, self.selected, self.results.len(), self.grid_cols);
         if next != self.selected {
             self.selected = next;
             self.selected_t = next.and_then(|i| self.results[i].t_start);
@@ -1170,7 +1170,9 @@ impl App {
         }
         self.update_state(&ctx);
         let grid_was_shown = std::mem::take(&mut self.grid_shown);
+        let timeline_was_shown = std::mem::take(&mut self.tl.shown);
         self.handle_navigation_keys(&ctx, grid_was_shown);
+        self.handle_timeline_keys(&ctx, timeline_was_shown);
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             self.top_bar(ui);
@@ -1188,32 +1190,38 @@ impl App {
             .show(ui, |ui| {
                 self.library_panel(ui);
             });
-        if let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
+        let has_folders = !self.snapshot.folders.is_empty();
+        if self.searching() {
+            if let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
+                egui::Panel::right("detail")
+                    .resizable(true)
+                    .default_size(340.0)
+                    .min_size(260.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.detail_panel(ui, i));
+                    });
+            }
+        } else if let Some(i) = self.tl.selected.filter(|&i| i < self.tl.items.len())
+            && has_folders
+        {
             egui::Panel::right("detail")
                 .resizable(true)
                 .default_size(340.0)
                 .min_size(260.0)
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.detail_panel(ui, i));
+                    egui::ScrollArea::vertical().show(ui, |ui| self.timeline_detail(ui, i));
                 });
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            let needs_model = !self.snapshot.model_installed;
-            if needs_model && (!self.consent_dismissed || matches!(self.status.activity, Activity::Downloading { .. })) {
-                self.consent_card(ui);
-            } else if needs_model {
-                self.empty_state(ui, "No model yet", "Recollect needs to download a model once before it can search.");
-                ui.vertical_centered(|ui| {
-                    if ui.button("Download model…").clicked() {
-                        self.consent_dismissed = false;
-                    }
-                });
-            } else if self.snapshot.folders.is_empty() {
+            if !self.snapshot.model_installed {
+                self.model_banner(ui);
+            }
+            if !has_folders {
                 self.empty_state(ui, "Add a folder to get started", "Use “Add folder…” on the left. Recollect only reads your files; it never changes them.");
-            } else if self.current.is_none() && self.query.trim().is_empty() {
-                self.empty_state(ui, "What are you looking for?", "Describe a photo or a moment in a video: “a dog playing in the snow”, “birthday cake with candles”.");
-            } else {
+            } else if self.searching() {
                 self.results_grid(ui);
+            } else {
+                self.timeline_view(ui);
             }
         });
         if self.settings_open {
@@ -1221,6 +1229,7 @@ impl App {
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.selected = None;
+            self.clear_timeline_selection();
         }
     }
 }

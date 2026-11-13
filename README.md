@@ -13,11 +13,16 @@ computer.
 
 ## Features
 
+- **Album browsing:** a timeline of all your photos and videos grouped by day, month or year
+  (from the capture date in the file, falling back to the file date), newest or oldest first,
+  with an adjustable tile size. Browsing works before the search model is downloaded.
+- **Date navigator** in the sidebar: jump to any year or month.
+- **Folder view** (click a folder in the sidebar) and **Recently added**.
 - Text search over images and video moments ("a dog in the snow").
 - Video results show the moment's timestamp; **Play at** opens the video at that time in mpv or VLC
   when installed (otherwise in the default player).
 - **Find similar** to any result.
-- All / Images / Videos filter.
+- All / Images / Videos filter (applies to the album views too).
 - Background indexing with pause, resume and cancel; you can search while it runs.
 - Incremental rescans: new, changed and deleted files are picked up; unchanged files are skipped.
 - Keyboard: `Ctrl+F` (`Cmd+F` on macOS) focuses the search box, the arrow keys move the selection, `Enter` opens the
@@ -66,7 +71,8 @@ own directory, so **keep them together** with the executable when you copy the a
 
 1. Start Recollect and add a folder with photos or videos.
 2. Recollect asks before downloading a model from huggingface.co. Nothing is downloaded without
-   your consent.
+   your consent. Until the model is installed you can already browse your library in the
+   timeline; only search needs the model.
 3. Indexing runs in the background; you can search right away while it works.
 
 ### Models

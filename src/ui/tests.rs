@@ -51,7 +51,8 @@ fn declining_the_download_shows_a_hint() {
     let mut h = harness(library(d.path()));
     h.get_by_label("Not now").click();
     h.run();
-    h.get_by_label("No model yet");
+    h.get_by_label("Search is off until the model is downloaded.");
+    h.get_by_label("Download model…");
     assert!(h.query_by_label_contains("One-time setup").is_none());
 }
 
@@ -257,4 +258,150 @@ fn clicking_a_tile_keeps_arrows_working() {
     h.key_press(egui::Key::ArrowRight);
     h.run();
     h.get_by_label("b.jpg");
+}
+
+// ---- Album views -------------------------------------------------------------------------
+
+use super::timeline::{Group, View};
+use crate::media::MediaKind;
+use crate::media::metadata::DateSource;
+use crate::store::db::TimelineItem;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+fn titem(id: i64, y: i32, m: u32, d: u32) -> TimelineItem {
+    let taken_at = chrono::NaiveDate::from_ymd_opt(y, m, d)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    TimelineItem {
+        file_id: id,
+        item_id: Some(id),
+        path: format!("/nowhere/img{id}.jpg").into(),
+        kind: MediaKind::Image,
+        mtime: 0,
+        taken_at,
+        date_source: DateSource::Exif,
+        duration: None,
+        width: Some(4000),
+        height: Some(3000),
+        favorite: false,
+        camera: Some("Test Camera".into()),
+    }
+}
+
+/// One photo per month from 2000 through 2019, newest first.
+fn spread_items() -> Vec<TimelineItem> {
+    let mut v = Vec::new();
+    for y in (2000..2020).rev() {
+        for m in (1..=12).rev() {
+            v.push(titem(v.len() as i64 + 1, y, m, 15));
+        }
+    }
+    v
+}
+
+fn album_app(d: &std::path::Path, installed: bool) -> Rc<RefCell<App>> {
+    let lib = library(d);
+    if installed {
+        fake_install(&lib);
+    }
+    let mut app = App::new(&egui::Context::default(), lib);
+    app.frame_stats = None;
+    app.snapshot.folders = vec![crate::store::db::Folder {
+        id: 1,
+        path: "/nowhere".into(),
+    }];
+    app.inject_timeline(spread_items());
+    Rc::new(RefCell::new(app))
+}
+
+fn album_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
+    let app = Rc::clone(app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| app.borrow_mut().show(ui));
+    h.run();
+    h
+}
+
+#[test]
+fn timeline_shows_month_headers_and_regroups() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    h.get_by_label("December 2019 · 1");
+    h.get_by_label("240 items");
+    h.get_by_label("Group by");
+    h.get_by_label("Tile size");
+    h.get_by_label("Year").click();
+    h.run();
+    h.get_by_label("2019 · 12");
+    assert!(h.query_by_label("December 2019 · 1").is_none());
+    h.get_by_label("Day").click();
+    h.run();
+    h.get_by_label("Sunday 15 December 2019 · 1");
+}
+
+#[test]
+fn navigator_jumps_to_a_year() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    assert!(h.query_by_label("December 2005 · 1").is_none());
+    h.get_by_label("2005 (12)").click();
+    h.run();
+    h.run();
+    h.get_by_label("December 2005 · 1");
+    assert!(h.query_by_label("December 2019 · 1").is_none());
+    // The year stays expanded and its months are listed.
+    h.get_by_label("June (1)");
+}
+
+#[test]
+fn clicking_a_folder_opens_its_view() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    assert_eq!(app.borrow().tl.view, View::Timeline);
+    h.get_by_label("nowhere").click();
+    h.run();
+    assert_eq!(app.borrow().tl.view, View::Folder(1));
+    h.get_by_label("Recently added").click();
+    h.run();
+    assert_eq!(app.borrow().tl.view, View::RecentlyAdded);
+    // No grouping choice for the recently added list.
+    assert!(h.query_by_label("Group by").is_none());
+}
+
+#[test]
+fn banner_shows_while_the_timeline_stays_visible() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let h = album_harness(&app);
+    h.get_by_label_contains("One-time setup");
+    h.get_by_label("Download model");
+    h.get_by_label("Not now");
+    h.get_by_label("December 2019 · 1");
+    assert_eq!(app.borrow().tl.group, Group::Month);
+}
+
+#[test]
+fn selecting_a_timeline_item_shows_its_details() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    h.get_by_label("Item img1.jpg").click();
+    h.run();
+    h.get_by_label("img1.jpg");
+    h.get_by_label_contains("Sunday 15 December 2019");
+    h.get_by_label("Test Camera");
+    h.get_by_label("4000×3000");
+    h.get_by_label("Find similar");
+    h.get_by_label("Open");
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    assert_eq!(app.borrow().tl.selected, Some(1));
 }
