@@ -1,0 +1,80 @@
+//! Headless UI tests (egui_kittest). No model or GPU needed.
+
+use super::App;
+use crate::Library;
+use crate::config::Paths;
+use crate::model::{download, registry};
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+use std::sync::Arc;
+
+fn library(dir: &std::path::Path) -> Arc<Library> {
+    crate::gpu::force_cpu(true);
+    Library::open(Paths::under(dir), Some(registry::CLIP_B32.id)).unwrap()
+}
+
+/// Creates sparse placeholder model files so the app believes the model is installed.
+fn fake_install(lib: &Library) {
+    let dir = download::model_dir(&lib.paths().models_dir(), lib.model());
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in lib.model().files {
+        std::fs::File::create(dir.join(f.local))
+            .unwrap()
+            .set_len(f.size)
+            .unwrap();
+    }
+    assert!(lib.model_installed());
+}
+
+fn harness(lib: Arc<Library>) -> Harness<'static> {
+    let mut app = App::new(&egui::Context::default(), lib);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| app.show(ui));
+    h.run();
+    h
+}
+
+#[test]
+fn first_run_asks_before_downloading_the_model() {
+    let d = tempfile::tempdir().unwrap();
+    let h = harness(library(d.path()));
+    h.get_by_label_contains("One-time setup");
+    h.get_by_label("Download model");
+    h.get_by_label("Not now");
+}
+
+#[test]
+fn declining_the_download_shows_a_hint() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = harness(library(d.path()));
+    h.get_by_label("Not now").click();
+    h.run();
+    h.get_by_label("No model yet");
+    assert!(h.query_by_label_contains("One-time setup").is_none());
+}
+
+#[test]
+fn empty_library_invites_adding_a_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    fake_install(&lib);
+    let h = harness(lib);
+    h.get_by_label("Add a folder to get started");
+    h.get_by_label("Add folder…");
+}
+
+#[test]
+fn settings_window_lists_models() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    fake_install(&lib);
+    let mut h = harness(lib);
+    h.get_by_label("Settings").click();
+    h.run();
+    h.get_by_label("Search model");
+    for m in registry::MODELS {
+        h.get_by_label_contains(&format!("{}  (", m.name));
+    }
+    h.get_by_label("Use the GPU when available");
+}
