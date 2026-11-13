@@ -11,7 +11,7 @@ computer.
   (via WebGPU) when there is one, otherwise the CPU.
 - Linux, Windows and macOS.
 
-> Status: early development (v0.1). See the milestone plan in the project's planning notes.
+> Status: early development (v0.1). See [docs/design.md](docs/design.md) for how it works.
 
 ## How it works
 
