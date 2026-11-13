@@ -86,6 +86,10 @@ pub fn search(
     let lib = Library::open(paths.clone(), Some(model_id))?;
     let load = t.elapsed();
     let rss = rss_mb();
+    if !lib.loaded_from_cache() {
+        // Write the cache now (not during the measurements) so the next run can use it.
+        lib.save_index_cache();
+    }
     println!(
         "library: {} vectors ({images} images + {videos} videos × {segments}), dim {}",
         lib.indexed_items(),
