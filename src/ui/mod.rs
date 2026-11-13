@@ -496,6 +496,10 @@ impl App {
                     ui.spinner();
                     ui.label(format!("Scanning {}…", folder.display()));
                 }
+                Activity::ReadingDates { done, total } => {
+                    ui.spinner();
+                    ui.label(format!("Reading dates… {done} / {total}"));
+                }
                 Activity::LoadingModel => {
                     ui.spinner();
                     ui.label("Loading model…");
@@ -528,7 +532,10 @@ impl App {
             }
             let pausable = matches!(
                 self.status.activity,
-                Activity::Scanning { .. } | Activity::LoadingModel | Activity::Indexing(_)
+                Activity::Scanning { .. }
+                    | Activity::ReadingDates { .. }
+                    | Activity::LoadingModel
+                    | Activity::Indexing(_)
             );
             if pausable && self.lib.is_busy() {
                 let paused = self.status.paused;

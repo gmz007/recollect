@@ -7,6 +7,7 @@
 
 use crate::library::{Activity, IndexProgress, Library, RunSummary};
 use crate::media::image::{self as img, Fit};
+use crate::media::metadata::{Capture, read_capture};
 use crate::media::{MediaKind, scan};
 use crate::model::registry::Family;
 use crate::model::{Device, ModelSpec, VisionEncoder};
@@ -30,7 +31,14 @@ pub(crate) fn run(lib: &Library) -> Result<RunSummary> {
         if lib.control.is_cancelled() {
             break;
         }
-        index_pending(lib, &mut summary)?;
+        read_dates(lib, &mut summary)?;
+        if lib.control.is_cancelled() {
+            break;
+        }
+        // Without a model the library is still browsable by date; embedding waits for it.
+        if lib.model_installed() {
+            index_pending(lib, &mut summary)?;
+        }
         if lib.control.is_cancelled() || !lib.rescan_requested.swap(false, Ordering::AcqRel) {
             break;
         }
@@ -45,6 +53,51 @@ pub(crate) fn sync_only(lib: &Library) -> Result<RunSummary> {
     let mut summary = RunSummary::default();
     sync_folders(lib, &mut summary)?;
     Ok(summary)
+}
+
+/// Rows per transaction (and progress update) in the date pass.
+const DATE_BATCH: usize = 500;
+
+/// Reads capture dates for files that have none yet. Runs before embedding so the album is
+/// ordered correctly as soon as possible; it only reads headers, so it is fast even for large
+/// libraries (decode threads are used because network drives make the opens slow).
+fn read_dates(lib: &Library, summary: &mut RunSummary) -> Result<()> {
+    use rayon::prelude::*;
+    let pending = lib.db.lock().pending_dates()?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let total = pending.len();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(lib.settings().decode_threads())
+        .thread_name(|i| format!("recollect-dates-{i}"))
+        .build()?;
+    let mut done = 0;
+    for chunk in pending.chunks(DATE_BATCH) {
+        lib.update_status(|s| s.activity = Activity::ReadingDates { done, total });
+        if lib.control.checkpoint() {
+            return Ok(());
+        }
+        let caps: Vec<Option<(i64, Capture)>> = pool.install(|| {
+            chunk
+                .par_iter()
+                .map(|f| {
+                    if lib.control.checkpoint() {
+                        return None;
+                    }
+                    Some((f.id, read_capture(&f.path, f.kind, f.mtime)))
+                })
+                .collect()
+        });
+        if lib.control.is_cancelled() {
+            return Ok(()); // a partly read chunk is simply read again next time
+        }
+        let caps: Vec<(i64, Capture)> = caps.into_iter().flatten().collect();
+        lib.db.lock().set_captures(&caps)?;
+        done += chunk.len();
+        summary.dates_read += caps.len();
+    }
+    Ok(())
 }
 
 fn index_pending(lib: &Library, summary: &mut RunSummary) -> Result<()> {

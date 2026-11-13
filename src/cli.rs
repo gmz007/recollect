@@ -98,6 +98,11 @@ pub enum BenchCmd {
         #[arg(long, default_value_t = 200_000)]
         files: usize,
     },
+    /// Load time and memory of the album timeline for a synthetic library without vectors.
+    Timeline {
+        #[arg(long, default_value_t = 200_000)]
+        files: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -235,6 +240,11 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
             );
             println!("folders: {}", s.folders);
             println!("files:   {} images, {} videos", s.images, s.videos);
+            let d = lib.date_counts()?;
+            println!(
+                "dates:   {} from EXIF, {} from video metadata, {} from file time",
+                d.exif, d.video, d.file
+            );
             println!(
                 "indexed: {} files ({} vectors), {} pending, {} errors",
                 s.indexed, s.items, s.pending, s.errors
@@ -261,6 +271,9 @@ pub fn bench(cli: &Cli, cmd: &BenchCmd) -> Result<()> {
         } => {
             let id = cli.model.as_deref().unwrap_or(registry::DEFAULT_GPU_MODEL);
             crate::bench::search(&paths, id, *images, *videos, *segments, *queries)
+        }
+        BenchCmd::Timeline { files } => {
+            crate::bench::timeline(&Paths::under(&dir.join("timeline-home")), *files)
         }
         BenchCmd::Rescan { files } => {
             crate::bench::rescan(&Paths::under(&dir.join("rescan-home")), &dir, *files)
@@ -307,12 +320,18 @@ fn download_model(lib: &Arc<Library>, yes: bool) -> Result<()> {
 }
 
 fn index(lib: &Arc<Library>) -> Result<()> {
+    if !lib.model_installed() {
+        eprintln!("model not downloaded: only reading dates (run `recollect models download`)");
+    }
     lib.start_indexing()?;
     let mut last = String::new();
     while lib.is_busy() {
         std::thread::sleep(Duration::from_millis(500));
         let line = match lib.status().activity {
             Activity::Scanning { folder } => format!("scanning {}", folder.display()),
+            Activity::ReadingDates { done, total } => {
+                format!("reading dates {done}/{total}")
+            }
             Activity::LoadingModel => "loading model".into(),
             Activity::Indexing(p) => format!(
                 "indexed {}/{} files ({} errors), {:.1} items/s on {}",

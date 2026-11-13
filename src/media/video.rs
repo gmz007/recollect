@@ -74,14 +74,19 @@ struct Stream {
     dec: ff::decoder::Video,
 }
 
-/// Opens a local video file. Only the `file` protocol is allowed, so a crafted file (e.g. a
-/// playlist disguised as .mp4) can never make FFmpeg touch the network.
-fn open(path: &Path, threads: usize) -> Result<Stream> {
+/// Opens a local media file for demuxing. Only the `file` protocol is allowed, so a crafted
+/// file (e.g. a playlist disguised as .mp4) can never make FFmpeg touch the network.
+pub(crate) fn open_input(path: &Path) -> Result<ff::format::context::Input> {
     init();
     let mut opts = ff::Dictionary::new();
     opts.set("protocol_whitelist", "file");
-    let ictx = ff::format::input_with_dictionary(path, opts)
-        .with_context(|| format!("opening {}", path.display()))?;
+    ff::format::input_with_dictionary(path, opts)
+        .with_context(|| format!("opening {}", path.display()))
+}
+
+/// Opens a local video file and picks its best video stream.
+fn open(path: &Path, threads: usize) -> Result<Stream> {
+    let ictx = open_input(path)?;
     let st = ictx
         .streams()
         .best(ff::media::Type::Video)

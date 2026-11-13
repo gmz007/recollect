@@ -279,6 +279,84 @@ pub fn rescan(paths: &Paths, dir: &Path, files: usize) -> Result<()> {
     Ok(())
 }
 
+/// Builds (if needed) a synthetic library of `files` files with capture dates spread over 15
+/// years (no vectors), then measures loading the whole timeline.
+pub fn timeline(paths: &Paths, files: usize) -> Result<()> {
+    use crate::media::metadata::{Capture, DateSource};
+    use crate::store::db::TimelineFilter;
+    let marker = paths.data.join("bench-timeline.txt");
+    let wanted = files.to_string();
+    if std::fs::read_to_string(&marker).ok().as_deref() != Some(wanted.as_str()) {
+        let t = Instant::now();
+        paths.create_all()?;
+        let mut db = Db::open(&paths.db_path())?;
+        if db.stats("")?.folders > 0 {
+            bail!(
+                "{} already holds a different library; use an empty --home",
+                paths.data.display()
+            );
+        }
+        let root = Path::new("/bench-timeline");
+        let folder = db.add_folder(root)?;
+        let mut rng = Rng(0xDA7E);
+        // Uniform over 2010-01-01 .. 2025-01-01 (wall-clock seconds).
+        let (start, span) = (1_262_304_000i64, 15 * 365 * 86_400i64);
+        let when = |rng: &mut Rng| start + ((rng.next_f32() + 0.5) as f64 * span as f64) as i64;
+        let scanned: Vec<ScannedFile> = (0..files)
+            .map(|i| {
+                let video = i % 50 == 0;
+                ScannedFile {
+                    path: root.join(format!(
+                        "{:03}/f{i:07}.{}",
+                        i / 1000,
+                        if video { "mp4" } else { "jpg" }
+                    )),
+                    kind: if video {
+                        MediaKind::Video
+                    } else {
+                        MediaKind::Image
+                    },
+                    size: 3_000_000,
+                    mtime: when(&mut rng),
+                }
+            })
+            .collect();
+        db.sync_folder(folder, &scanned, &[])?;
+        drop(scanned);
+        let pending = db.pending_dates()?;
+        for chunk in pending.chunks(5000) {
+            let batch: Vec<(i64, Capture)> = chunk
+                .iter()
+                .map(|f| {
+                    (
+                        f.id,
+                        Capture {
+                            taken_at: when(&mut rng),
+                            source: DateSource::Exif,
+                            camera: Some("Bench Camera".into()),
+                        },
+                    )
+                })
+                .collect();
+            db.set_captures(&batch)?;
+        }
+        std::fs::write(&marker, &wanted)?;
+        eprintln!(
+            "generated {files} files in {:.1} s",
+            t.elapsed().as_secs_f64()
+        );
+    }
+    let lib = Library::open(paths.clone(), Some(registry::CLIP_B32.id))?;
+    let rss0 = rss_mb();
+    let t = Instant::now();
+    let items = lib.timeline(&TimelineFilter::default())?;
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    let rss1 = rss_mb();
+    println!("A1 timeline load: {ms:.0} ms, {} items", items.len());
+    println!("A5 timeline memory: +{} MB", rss1.saturating_sub(rss0));
+    Ok(())
+}
+
 /// Default bench home if none given: refuse, to never write GBs into the user's real library.
 pub fn require_scratch_home(home: Option<&PathBuf>) -> Result<()> {
     if home.is_none() {

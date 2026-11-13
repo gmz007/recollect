@@ -5,7 +5,7 @@ use crate::config::{Paths, Settings};
 use crate::indexer;
 use crate::model::{Device, ModelSpec, TextEncoder, download, registry};
 use crate::search::{self, SearchHit, SearchOptions};
-use crate::store::db::{Folder, Stats};
+use crate::store::db::{DateCounts, Folder, Stats, TimelineFilter, TimelineItem};
 use crate::store::{Db, VectorIndex};
 use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -28,6 +28,11 @@ pub enum Activity {
     },
     Scanning {
         folder: PathBuf,
+    },
+    /// Reading capture dates (EXIF / video metadata) of new files.
+    ReadingDates {
+        done: usize,
+        total: usize,
     },
     LoadingModel,
     Indexing(IndexProgress),
@@ -53,6 +58,8 @@ pub struct RunSummary {
     pub added: usize,
     pub changed: usize,
     pub removed: usize,
+    /// Files whose capture date was read during this run.
+    pub dates_read: usize,
     pub seconds: f32,
     pub cancelled: bool,
     pub device: Option<Device>,
@@ -324,6 +331,16 @@ impl Library {
         self.db.lock().retry_errors()
     }
 
+    /// Every file matching `filter` (indexed or not), in display order.
+    pub fn timeline(&self, filter: &TimelineFilter) -> Result<Vec<TimelineItem>> {
+        self.db.lock().timeline(filter)
+    }
+
+    /// Number of files per capture-date source.
+    pub fn date_counts(&self) -> Result<DateCounts> {
+        self.db.lock().date_counts()
+    }
+
     pub fn folders(&self) -> Result<Vec<Folder>> {
         self.db.lock().folders()
     }
@@ -354,7 +371,8 @@ impl Library {
             match lib.add_folder(&path) {
                 Ok(()) => {
                     // If a job is running it picks the folder up (rescan_requested).
-                    if !lib.is_busy() && lib.model_installed() {
+                    // Without a model the run still reads capture dates for the album.
+                    if !lib.is_busy() {
                         let _ = lib.start_indexing();
                     }
                 }
@@ -472,11 +490,9 @@ impl Library {
         })
     }
 
-    /// Starts a scan + indexing run in the background.
+    /// Starts a scan + indexing run in the background. Without an installed model it only
+    /// scans and reads capture dates (the album works before any model is downloaded).
     pub fn start_indexing(self: &Arc<Self>) -> Result<()> {
-        if !self.model_installed() {
-            bail!("the model is not downloaded yet");
-        }
         let lib = Arc::clone(self);
         self.spawn(move || {
             lib.update_status(|s| s.last_run = None);
@@ -576,11 +592,9 @@ impl Library {
         true
     }
 
-    /// Runs indexing on the calling thread (CLI).
+    /// Runs indexing on the calling thread (CLI); see [`Self::start_indexing`] for the case
+    /// of a missing model.
     pub fn index_blocking(&self) -> Result<RunSummary> {
-        if !self.model_installed() {
-            bail!("the model is not downloaded yet (run `recollect models download`)");
-        }
         self.control.reset();
         let r = indexer::run(self);
         self.update_status(|s| s.activity = Activity::Idle);
@@ -1029,5 +1043,30 @@ mod tests {
         lib.wait();
         assert!(lib.folders().unwrap().is_empty());
         assert_eq!(lib.indexed_items(), 0);
+    }
+
+    #[test]
+    fn indexing_without_a_model_reads_dates() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(&d.path().join("home"));
+        assert!(!lib.model_installed());
+        let photos = d.path().join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        image::RgbImage::new(4, 4)
+            .save(photos.join("a.png"))
+            .unwrap();
+        lib.add_folder(&photos).unwrap();
+        let sum = lib.index_blocking().unwrap();
+        assert_eq!((sum.added, sum.dates_read, sum.files), (1, 1, 0));
+        let tl = lib.timeline(&TimelineFilter::default()).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(
+            lib.stats().unwrap().pending,
+            1,
+            "embedding is still waiting"
+        );
+        assert_eq!(lib.date_counts().unwrap().file, 1);
+        // A second run has nothing left to read.
+        assert_eq!(lib.index_blocking().unwrap().dates_read, 0);
     }
 }
