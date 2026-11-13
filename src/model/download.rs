@@ -55,7 +55,24 @@ pub fn download(
         })?;
         done += f.size;
     }
+    remove_stale_files(&dir, spec);
     Ok(())
+}
+
+/// Deletes regular files in the model directory that the current spec doesn't list (e.g. the
+/// 441 MB fp32 `text_model.onnx` left by an older SigLIP install). Runs only after a complete,
+/// verified download, so a failed update never removes anything. Directories and symlinks are
+/// left alone.
+fn remove_stale_files(dir: &Path, spec: &ModelSpec) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let known = spec.files.iter().any(|f| e.file_name() == f.local);
+        if !known && e.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn fetch_file(
@@ -141,6 +158,23 @@ mod tests {
             std::fs::write(dir.join(f.local), b"short").unwrap();
         }
         assert!(!is_installed(root.path(), &CLIP_B32));
+    }
+
+    #[test]
+    fn cleanup_removes_only_unknown_regular_files() {
+        let d = tempfile::tempdir().unwrap();
+        for f in CLIP_B32.files {
+            std::fs::write(d.path().join(f.local), b"x").unwrap();
+        }
+        std::fs::write(d.path().join("old_fp32.onnx"), b"x").unwrap();
+        std::fs::create_dir(d.path().join("subdir")).unwrap();
+        std::fs::write(d.path().join("subdir/keep.txt"), b"x").unwrap();
+        remove_stale_files(d.path(), &CLIP_B32);
+        assert!(!d.path().join("old_fp32.onnx").exists());
+        assert!(d.path().join("subdir/keep.txt").exists());
+        for f in CLIP_B32.files {
+            assert!(d.path().join(f.local).exists());
+        }
     }
 
     #[test]

@@ -126,6 +126,13 @@ pub struct Library {
     self_ref: RwLock<std::sync::Weak<Library>>,
     text: Mutex<Option<TextEncoder>>,
     notifier: RwLock<Option<Notifier>>,
+    /// Held while an index cache is being written; a second saver simply skips.
+    save_lock: Mutex<()>,
+    /// (model id, epoch) the on-disk cache is known to match: set when the index was loaded
+    /// from the cache or after a successful save. Avoids rewriting hundreds of MB for nothing.
+    saved: Mutex<Option<(&'static str, u64)>>,
+    /// Whether `open` found a usable cache (instead of rebuilding from the database).
+    from_cache: bool,
 }
 
 /// Picks the default model by hardware: a discrete GPU gets the quality model.
@@ -173,13 +180,21 @@ impl Library {
         };
         let spec = registry::get(&id).ok_or_else(|| anyhow!("unknown model '{id}'"))?;
         let db = Db::open(&paths.db_path())?;
+        remove_stale_temp_files(&paths.data);
         let epoch = db.items_epoch()?;
+        let library_id = db.library_id()?;
         let cache = index_cache_path(&paths, spec);
-        let (index, from_cache) =
-            match VectorIndex::load(&cache, spec.id, spec.dim, spec.quant_scale, epoch) {
-                Some(i) => (i, true),
-                None => (load_index(&db, spec)?, false),
-            };
+        let (index, from_cache) = match VectorIndex::load(
+            &cache,
+            spec.id,
+            &library_id,
+            spec.dim,
+            spec.quant_scale,
+            epoch,
+        ) {
+            Some(i) => (i, true),
+            None => (load_index(&db, spec)?, false),
+        };
         let lib = Arc::new(Self {
             paths,
             settings: RwLock::new(settings),
@@ -195,40 +210,55 @@ impl Library {
             self_ref: RwLock::new(std::sync::Weak::new()),
             text: Mutex::new(None),
             notifier: RwLock::new(None),
+            save_lock: Mutex::new(()),
+            saved: Mutex::new(from_cache.then_some((spec.id, epoch))),
+            from_cache,
         });
         *lib.self_ref.write() = Arc::downgrade(&lib);
-        if !from_cache {
-            let l = Arc::clone(&lib);
-            std::thread::spawn(move || l.save_index_cache());
-        }
         Ok(lib)
     }
 
+    /// True if startup reused the on-disk index cache instead of rebuilding from the database.
+    pub fn loaded_from_cache(&self) -> bool {
+        self.from_cache
+    }
+
     /// Writes the in-memory index to disk so the next start can skip decoding every vector.
+    /// Does nothing if a save is already running or the cache is already current.
     pub fn save_index_cache(&self) {
-        let spec = self.model();
-        let path = index_cache_path(&self.paths, spec);
-        // Epoch and index are read consistently: writers update the index while holding the
-        // db lock (lock order db → index).
+        let Some(_saving) = self.save_lock.try_lock() else {
+            return;
+        };
+        // Lock order is db → index everywhere. Everything the header records (model, epoch,
+        // library id, expected count) is read under the db lock, and the index read lock is
+        // taken before the db lock is released, so the index we write is the one these describe.
         let db = self.db.lock();
-        let (epoch, count) = match db
-            .items_epoch()
-            .and_then(|e| Ok((e, db.item_count(spec.id)?)))
-        {
+        let spec = self.model();
+        let (epoch, count, library_id) = match db.items_epoch().and_then(|e| {
+            let n = db.item_count(spec.id)?;
+            Ok((e, n, db.library_id()?))
+        }) {
             Ok(v) => v,
             Err(e) => return tracing::warn!("index cache: {e:#}"),
         };
+        if *self.saved.lock() == Some((spec.id, epoch)) {
+            return;
+        }
         let index = self.index.read();
         drop(db);
-        if index.len() != count {
+        if index.dim() != spec.dim || index.len() != count {
             // Never persist an index that doesn't mirror the database.
             return tracing::debug!(
-                "index cache not written: {} vectors vs {count} items",
-                index.len()
+                "index cache not written: {} vectors (dim {}) vs {count} items (dim {})",
+                index.len(),
+                index.dim(),
+                spec.dim
             );
         }
-        if let Err(e) = index.save(&path, spec.id, epoch) {
-            tracing::warn!("could not write index cache {}: {e}", path.display());
+        let path = index_cache_path(&self.paths, spec);
+        match index.save(&path, spec.id, &library_id, epoch) {
+            Ok(()) => *self.saved.lock() = Some((spec.id, epoch)),
+            Err(e) => tracing::warn!("could not write index cache {}: {e}", path.display()),
         }
     }
 
@@ -332,6 +362,7 @@ impl Library {
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
+            lib.save_index_cache();
         });
     }
 
@@ -363,6 +394,7 @@ impl Library {
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
+            lib.save_index_cache();
         });
     }
 
@@ -396,11 +428,15 @@ impl Library {
     }
 
     fn switch_model(&self, spec: &'static ModelSpec, new: Settings) -> Result<()> {
-        let index = load_index(&self.db.lock(), spec)?;
+        // Index and model change together under the db lock (order db → index), so a cache save
+        // never sees one of them without the other.
+        let db = self.db.lock();
+        let index = load_index(&db, spec)?;
         new.save(&self.paths.settings_path())?;
         *self.settings.write() = new;
         *self.index.write() = index;
         *self.model.write() = spec;
+        drop(db);
         *self.text.lock() = None;
         Ok(())
     }
@@ -458,10 +494,14 @@ impl Library {
 
     fn spawn(&self, f: impl FnOnce() + Send + 'static) -> Result<()> {
         let mut w = self.worker.lock();
-        if self.busy.load(Ordering::Acquire) || w.as_ref().is_some_and(|h| !h.is_finished()) {
+        if self.busy.load(Ordering::Acquire) {
             bail!("another job is already running");
         }
-        if let Some(h) = w.take() {
+        // A previous job may still be writing the index cache (busy is already false then);
+        // detach it rather than refusing or waiting.
+        if let Some(h) = w.take()
+            && h.is_finished()
+        {
             let _ = h.join();
         }
         self.control.reset();
@@ -482,8 +522,10 @@ impl Library {
                     self.0.store(false, Ordering::Release);
                 }
             }
-            let _done = Done(busy, finished);
+            let done = Done(busy, finished);
             f();
+            // Release `busy` before the (slow) cache write so new jobs aren't refused meanwhile.
+            drop(done);
             if let Some(lib) = weak.upgrade() {
                 lib.save_index_cache();
             }
@@ -542,6 +584,7 @@ impl Library {
         self.control.reset();
         let r = indexer::run(self);
         self.update_status(|s| s.activity = Activity::Idle);
+        self.save_index_cache();
         r
     }
 
@@ -611,6 +654,30 @@ impl Drop for Library {
 
 fn index_cache_path(paths: &Paths, spec: &ModelSpec) -> PathBuf {
     paths.data.join(format!("index-{}.bin", spec.id))
+}
+
+/// Removes temp files a crashed index-cache save left behind.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn remove_stale_temp_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        // Another process may be saving right now; its file keeps being written, so only
+        // remove temp files nobody touched for a while (left by a killed save).
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_TEMP_AGE);
+        if name.starts_with("index-") && name.ends_with(".tmp") && stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn load_index(db: &Db, spec: &ModelSpec) -> Result<VectorIndex> {
@@ -884,12 +951,65 @@ mod tests {
         drop(lib);
         let lib = open(d.path());
         assert_eq!(lib.indexed_items(), 1, "loaded from the cache");
+        assert!(lib.loaded_from_cache());
+        let id = lib.db.lock().library_id().unwrap();
+        let load = |id: &str, epoch: u64| {
+            VectorIndex::load(
+                &cache,
+                lib.model().id,
+                id,
+                512,
+                lib.model().quant_scale,
+                epoch,
+            )
+        };
+        let epoch = lib.db.lock().items_epoch().unwrap();
+        assert!(load(&id, epoch).is_some());
+        assert!(load("another-library", epoch).is_none(), "library id");
         // Any database change makes the cache stale.
         lib.db.lock().set_meta("items_epoch", "999").unwrap();
         let epoch = lib.db.lock().items_epoch().unwrap();
+        assert!(load(&id, epoch).is_none());
+    }
+
+    #[test]
+    fn unchanged_index_is_not_rewritten_and_stale_temp_files_are_removed() {
+        let d = tempfile::tempdir().unwrap();
+        seed(&open(d.path()));
+        let lib = open(d.path());
+        assert!(!lib.loaded_from_cache());
+        let cache = index_cache_path(lib.paths(), lib.model());
+        assert!(!cache.exists(), "open must not write the cache");
+        lib.save_index_cache();
+        let first = std::fs::metadata(&cache).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        lib.save_index_cache();
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().modified().unwrap(),
+            first
+        );
+        // A change makes the next save write again.
+        lib.db.lock().set_meta("items_epoch", "999").unwrap();
+        lib.save_index_cache();
+        assert!(std::fs::metadata(&cache).unwrap().modified().unwrap() > first);
+        // Leftovers of a crashed save are cleaned at open.
+        let tmp = lib.paths().data.join("index-clip-vit-b32.1.2.tmp");
+        let fresh = lib.paths().data.join("index-clip-vit-b32.3.4.tmp");
+        std::fs::write(&tmp, b"x").unwrap();
+        std::fs::write(&fresh, b"x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&tmp)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        drop(lib);
+        let _lib = open(d.path());
+        assert!(!tmp.exists(), "abandoned temp file removed");
         assert!(
-            VectorIndex::load(&cache, lib.model().id, 512, lib.model().quant_scale, epoch)
-                .is_none()
+            fresh.exists(),
+            "a save in progress (fresh temp file) is left alone"
         );
     }
 

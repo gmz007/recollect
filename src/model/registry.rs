@@ -1,4 +1,4 @@
-//! The embedding models Recollect knows how to use. See ADR 0002 for how they were chosen.
+//! The embedding models Recollect knows how to use. See `docs/design.md` for how they were chosen.
 
 /// Architecture family; decides preprocessing and text handling details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,9 @@ pub struct ModelSpec {
     pub mean: [f32; 3],
     pub std: [f32; 3],
     pub files: &'static [ModelFile],
+    /// Local name of the text tower inside `files` (SigLIP's int8 export has its own name so an
+    /// older fp32 `text_model.onnx` is never mistaken for it).
+    pub text_file: &'static str,
     /// Largest vision batch known to work on the WebGPU execution provider.
     pub gpu_max_batch: usize,
     /// Scale for i8 quantization of unit vectors in the search index.
@@ -41,7 +44,6 @@ pub struct ModelSpec {
 }
 
 pub const VISION_FILE: &str = "vision_model.onnx";
-pub const TEXT_FILE: &str = "text_model.onnx";
 pub const TOKENIZER_FILE: &str = "tokenizer.json";
 
 pub const CLIP_B32: ModelSpec = ModelSpec {
@@ -64,7 +66,7 @@ pub const CLIP_B32: ModelSpec = ModelSpec {
             sha256: "fd6e1402a588279d1723c7534d4bcba5bc0b14b47dfab0e46f8c47b8270d7d40",
         },
         ModelFile {
-            local: TEXT_FILE,
+            local: "text_model.onnx",
             remote: "onnx/text_model.onnx",
             size: 254_058_553,
             sha256: "3f6571f5bad13a97c469c1622e1cfc4d9aef78b79fdbfcff804ca357bfada8cc",
@@ -76,6 +78,7 @@ pub const CLIP_B32: ModelSpec = ModelSpec {
             sha256: "f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd",
         },
     ],
+    text_file: "text_model.onnx",
     gpu_max_batch: 32,
     quant_scale: 300.0,
 };
@@ -100,9 +103,9 @@ pub const SIGLIP_B16: ModelSpec = ModelSpec {
             sha256: "f89d41bac7f4d4b87e010a467d93f98689d708916ed22f5a07f96fdfa26f475f",
         },
         ModelFile {
-            local: TEXT_FILE,
-            // int8 text tower: eval within noise of fp32 (R@10 0.973 vs 0.980, P@10 0.835 vs
-            // 0.830), 330 MB less RAM and download (M4 report).
+            local: "text_model_int8.onnx",
+            // int8 text tower: retrieval quality within noise of fp32 (Recall@10 0.973 vs
+            // 0.980 in our measurements), 330 MB less RAM and download.
             remote: "onnx/text_model_quantized.onnx",
             size: 111_475_220,
             sha256: "ad0329b1f35acc66d8953ff2559ce358da8eb0a7011794cf951523d63a4dbce2",
@@ -114,13 +117,14 @@ pub const SIGLIP_B16: ModelSpec = ModelSpec {
             sha256: "4a17c975210be5ab4c36b47d8dae4eefb866dbfb1e676e394aad85dc30a3ae08",
         },
     ],
+    text_file: "text_model_int8.onnx",
     gpu_max_batch: 16,
     quant_scale: 300.0,
 };
 
 pub const MODELS: &[ModelSpec] = &[SIGLIP_B16, CLIP_B32];
 
-/// Default model when a GPU is usable / when running CPU-only (ADR 0002).
+/// Default model when a GPU is usable / when running CPU-only (see `docs/design.md`).
 pub const DEFAULT_GPU_MODEL: &str = SIGLIP_B16.id;
 pub const DEFAULT_CPU_MODEL: &str = CLIP_B32.id;
 

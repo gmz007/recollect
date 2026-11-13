@@ -1,4 +1,5 @@
-//! `recollect bench`: measurements for the PRD performance targets on synthetic data.
+//! `recollect bench`: startup time, memory, search latency and rescan time on synthetic
+//! data.
 //! Always run with `--home <scratch dir>`; it writes a large throwaway library there.
 
 use crate::Library;
@@ -56,6 +57,9 @@ pub fn search(
     segments: usize,
     queries: usize,
 ) -> Result<()> {
+    if queries == 0 {
+        bail!("--queries must be at least 1");
+    }
     let spec =
         registry::get(model_id).ok_or_else(|| anyhow::anyhow!("unknown model {model_id}"))?;
     let marker = paths.data.join("bench-library.txt");
@@ -69,6 +73,8 @@ pub fn search(
         }
         generate(paths, spec, images, videos, segments)?;
         std::fs::write(&marker, &wanted)?;
+        // Write the cache now so no search is measured while a save is running.
+        Library::open(paths.clone(), Some(model_id))?.save_index_cache();
     }
     let db_mb = std::fs::metadata(paths.db_path())?.len() / 1_000_000
         + std::fs::metadata(paths.db_path().with_extension("db-wal"))
@@ -86,7 +92,12 @@ pub fn search(
         spec.dim
     );
     println!(
-        "T6 startup (open + index load): {:.2} s",
+        "T6 startup (open + index load, {}): {:.2} s",
+        if lib.loaded_from_cache() {
+            "from cache"
+        } else {
+            "rebuilt from database"
+        },
         load.as_secs_f64()
     );
     println!("T4 RSS after load: {rss} MB (process baseline before open {rss0} MB)");

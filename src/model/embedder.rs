@@ -1,9 +1,9 @@
-//! Image and text encoders on top of ONNX Runtime (ADR 0002).
+//! Image and text encoders on top of ONNX Runtime (see `docs/design.md`).
 //!
 //! Each encoder owns its ORT session and is meant to live on one thread (indexer thread for
 //! vision, search thread for text).
 
-use super::registry::{Family, ModelSpec, TEXT_FILE, TOKENIZER_FILE, VISION_FILE};
+use super::registry::{Family, ModelSpec, TOKENIZER_FILE, VISION_FILE};
 use anyhow::{Context, Result, anyhow, bail};
 use ndarray::{Array2, Array4};
 use ort::session::Session;
@@ -269,7 +269,7 @@ pub struct TextEncoder {
 
 impl TextEncoder {
     pub fn load(spec: &'static ModelSpec, dir: &Path, threads: usize) -> Result<Self> {
-        let session = session(&dir.join(TEXT_FILE), threads, false)?;
+        let session = session(&dir.join(spec.text_file), threads, false)?;
         let tokenizer = tokenizers::Tokenizer::from_file(dir.join(TOKENIZER_FILE))
             .map_err(|e| anyhow!("loading tokenizer: {e}"))?;
         let output = output_name(&session, "text_embeds");

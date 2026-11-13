@@ -1,4 +1,4 @@
-//! Cheap GPU detection used to pick a default model (ADR 0002).
+//! Cheap GPU detection used to pick a default model (see `docs/design.md`).
 
 use eframe::wgpu;
 use std::sync::atomic::{AtomicBool, Ordering};

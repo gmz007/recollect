@@ -1,4 +1,4 @@
-//! Video frame sampling with FFmpeg (ADR 0004).
+//! Video frame sampling with FFmpeg (see `docs/design.md`).
 //!
 //! The sampler works at the packet level so it does not depend on the decoder honouring
 //! `skip_frame`: packets are buffered one GOP (keyframe to keyframe) at a time; when the next

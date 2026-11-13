@@ -1,19 +1,21 @@
-//! Video indexing: sample frames (ADR 0004), embed them, merge similar consecutive frames into
+//! Video indexing: sample frames, embed them, merge similar consecutive frames into
 //! segments, store one vector per segment.
 
 use crate::indexer::{Progress, fit_for, write_items};
 use crate::library::Library;
 use crate::media::image as img;
 use crate::media::video::{self, SamplerConfig, VideoInfo};
-use crate::model::VisionEncoder;
 use crate::model::embedder::normalize;
+use crate::model::{Device, VisionEncoder};
 use crate::store::db::{FileMeta, FileRow, NewItem};
 use anyhow::Result;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Consecutive frames whose embedding has at least this cosine similarity with the first frame
-/// of the current segment are merged into it (tuned on the workspace eval set, see M2 report).
+/// of the current segment are merged into it (0.90 halved the number of vectors without
+/// losing retrieval quality in our measurements).
 pub const DEFAULT_SEGMENT_TAU: f32 = 0.90;
 /// Longest segment, seconds; keeps moments in long static shots findable.
 pub const MAX_SEGMENT_S: f64 = 60.0;
@@ -27,8 +29,14 @@ fn segment_tau() -> f32 {
 
 /// Videos decoded at the same time. Their frames share embedding batches, which matters for
 /// libraries of short clips (a 5 s clip gives ~3 frames; alone it would waste most of a GPU
-/// batch and leave the GPU idle while the next file opens).
-const PARALLEL_VIDEOS: usize = 3;
+/// batch and leave the GPU idle while the next file opens). On a CPU the encoder already uses
+/// every core, so fewer decoders compete with it.
+fn parallel_videos(device: Device) -> usize {
+    match device {
+        Device::Gpu => 3,
+        Device::Cpu => 2,
+    }
+}
 
 enum Msg {
     Frame(usize, f64, Vec<u8>),
@@ -59,7 +67,7 @@ pub(crate) fn index_videos(
     let stop = AtomicBool::new(false);
     std::thread::scope(|s| -> Result<()> {
         let (tx, rx) = crossbeam_channel::bounded::<Msg>(batch * 4);
-        for n in 0..PARALLEL_VIDEOS.min(files.len()) {
+        for n in 0..parallel_videos(enc.device()).min(files.len()) {
             let tx = tx.clone();
             let (next, stop) = (&next, &stop);
             std::thread::Builder::new()
@@ -72,11 +80,15 @@ pub(crate) fn index_videos(
                         }
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(f) = files.get(i) else { return };
-                        let res = video::sample(&f.path, cfg, spec.image_size, &halt, &mut |fr| {
-                            let px = img::to_square(&fr.rgb, spec.image_size, fit)?;
-                            tx.send(Msg::Frame(i, fr.t, px))
-                                .map_err(|_| anyhow::anyhow!("embedding stopped"))
-                        });
+                        // A decoder bug on one odd file must fail that file, not the whole run.
+                        let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            video::sample(&f.path, cfg, spec.image_size, &halt, &mut |fr| {
+                                let px = img::to_square(&fr.rgb, spec.image_size, fit)?;
+                                tx.send(Msg::Frame(i, fr.t, px))
+                                    .map_err(|_| anyhow::anyhow!("embedding stopped"))
+                            })
+                        }))
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("video decoder panicked")));
                         if tx.send(Msg::End(i, res)).is_err() {
                             return;
                         }
@@ -94,6 +106,9 @@ pub(crate) fn index_videos(
         let mut pending: Vec<(usize, f64, Vec<u8>)> = Vec::with_capacity(batch);
         let mut result: Result<()> = Ok(());
         for msg in rx.iter() {
+            if lib.control.is_cancelled() {
+                break;
+            }
             match msg {
                 Msg::Frame(i, t, px) => {
                     states.entry(i).or_insert_with(new_state).outstanding += 1;

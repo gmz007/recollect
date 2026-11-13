@@ -1,4 +1,4 @@
-//! Still-image decoding and resizing (ADR 0003).
+//! Still-image decoding and resizing (see `docs/design.md`).
 //!
 //! JPEGs are decoded with DCT-domain downscaling (`jpeg-decoder`), which is several times faster
 //! than a full decode for large photos. Everything else goes through the `image` crate.

@@ -1,5 +1,5 @@
 //! SQLite persistence: folders, files, embedded items. The database is the source of truth;
-//! the in-memory vector index is rebuilt from it at startup (ADR 0005).
+//! the in-memory vector index is rebuilt from it at startup (see `docs/design.md`).
 
 use crate::media::{MediaKind, ScannedFile};
 use anyhow::{Context, Result, bail};
@@ -163,6 +163,21 @@ pub fn blob_to_emb(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Random id tying an index cache to this database (a copied or recreated library must not
+/// accept another library's cache even if the epoch happens to match).
+fn new_library_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    h.write_u32(std::process::id());
+    format!("{:016x}", h.finish())
+}
+
 fn path_str(p: &Path) -> Result<&str> {
     p.to_str()
         .with_context(|| format!("path is not valid UTF-8: {}", p.display()))
@@ -196,6 +211,9 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
         let db = Self { conn };
+        if db.meta("library_id")?.is_none() {
+            db.set_meta("library_id", &new_library_id())?;
+        }
         match db.meta("schema_version")? {
             None => db.set_meta("schema_version", &SCHEMA_VERSION.to_string())?,
             Some(v) if v.parse::<i64>().ok() == Some(SCHEMA_VERSION) => {}
@@ -211,6 +229,12 @@ impl Db {
             .conn
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?)
+    }
+
+    /// Identity of this library database (see [`new_library_id`]).
+    pub fn library_id(&self) -> Result<String> {
+        self.meta("library_id")?
+            .context("library database has no library_id")
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
@@ -248,7 +272,7 @@ impl Db {
             )?;
             tx.execute("DELETE FROM folders WHERE id = ?1", [child.id])?;
         }
-        bump_epoch(&tx)?;
+        // No epoch bump: adding a folder (even one absorbing others) moves no items.
         tx.commit()?;
         Ok(id)
     }
@@ -358,7 +382,10 @@ impl Db {
                 }
             }
         }
-        bump_epoch(&tx)?;
+        // A scan that found nothing new must not invalidate the index cache.
+        if stats.added + stats.changed + stats.removed.len() > 0 {
+            bump_epoch(&tx)?;
+        }
         tx.commit()?;
         Ok(stats)
     }
@@ -657,6 +684,35 @@ mod tests {
         assert_eq!(db.stats("m").unwrap().images, 1);
         // Sibling with common string prefix is not "inside".
         assert!(db.add_folder(Path::new("/m/photos2")).is_ok());
+    }
+
+    #[test]
+    fn epoch_only_moves_on_real_changes() {
+        let mut db = Db::open_in_memory().unwrap();
+        let e0 = db.items_epoch().unwrap();
+        let f = db.add_folder(Path::new("/lib")).unwrap();
+        assert_eq!(db.items_epoch().unwrap(), e0, "add_folder");
+        let files = [sf("/lib/a.jpg", 1, 1)];
+        db.sync_folder(f, &files, &[]).unwrap();
+        let e1 = db.items_epoch().unwrap();
+        assert!(e1 > e0, "new file");
+        db.sync_folder(f, &files, &[]).unwrap();
+        assert_eq!(db.items_epoch().unwrap(), e1, "no-op sync");
+        db.sync_folder(f, &[sf("/lib/a.jpg", 2, 1)], &[]).unwrap();
+        let e2 = db.items_epoch().unwrap();
+        assert!(e2 > e1, "changed file");
+        db.sync_folder(f, &[], &[]).unwrap();
+        assert!(db.items_epoch().unwrap() > e2, "removed file");
+    }
+
+    #[test]
+    fn library_id_is_created_once() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("db.sqlite");
+        let id = Db::open(&p).unwrap().library_id().unwrap();
+        assert_eq!(id.len(), 16);
+        assert_eq!(Db::open(&p).unwrap().library_id().unwrap(), id);
+        assert_ne!(Db::open_in_memory().unwrap().library_id().unwrap(), id);
     }
 
     #[test]

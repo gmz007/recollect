@@ -1,4 +1,8 @@
-//! Search-quality evaluation against a query set (format: workspace `testdata/eval/README.md`).
+//! Search-quality evaluation against a query set.
+//!
+//! The query file is a JSON array of `{id, query, kind: "image"|"video", source, expected}`;
+//! `expected` lists image paths, or `{path, start, end}` time ranges for videos, relative to
+//! `--root`. `source: "coco-category"` marks queries with many correct images.
 //!
 //! - caption queries (one expected image): Recall@1/5/10 and MRR
 //! - category queries (many expected images): precision@10

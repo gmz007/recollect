@@ -60,8 +60,8 @@ pub(crate) fn by_vector(
     opts: &SearchOptions,
     exclude_file: Option<i64>,
 ) -> Result<Vec<SearchHit>> {
-    // Over-fetch: videos contribute many items per file, and re-scoring may reorder. If long
-    // videos crowd the candidates (few distinct files), widen the scan.
+    // Over-fetch: videos contribute many items per file, so the best `limit` files need more than
+    // `limit` candidates. If long videos crowd the candidates (few distinct files), widen the scan.
     let t0 = std::time::Instant::now();
     let mut k = (opts.limit * 4 + 100).min(5000);
     let cands = loop {
@@ -97,8 +97,8 @@ pub(crate) fn by_vector(
         })
         .collect();
     // Ranking uses the i8 scores directly: re-scoring with the stored f32 vectors made no
-    // difference on the eval set but cost ~30 ms of random disk reads per query at 1.2 M
-    // vectors (M4 report).
+    // measurable difference in retrieval quality but cost ~30 ms of random disk reads per
+    // query at 1.2 M vectors.
     let scored: Vec<(i64, i64, f32)> = cands
         .iter()
         .map(|c| (c.item_id, c.file_id, c.score))

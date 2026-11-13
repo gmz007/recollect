@@ -1,4 +1,4 @@
-//! Thumbnails: generated lazily when results are shown, cached on disk as JPEG (ADR 0003).
+//! Thumbnails: generated lazily when results are shown, cached on disk as JPEG (see `docs/design.md`).
 
 use crate::media::image::{self as img, Rgb};
 use anyhow::{Context, Result};

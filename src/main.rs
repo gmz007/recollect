@@ -30,6 +30,11 @@ fn main() -> anyhow::Result<()> {
     };
     match args.command {
         None | Some(Command::Gui) => recollect::ui::run(lib),
-        Some(_) => cli::run(&args, &lib),
+        Some(_) => {
+            let res = cli::run(&args, &lib);
+            // No-op unless something changed, so CLI runs leave a valid cache behind.
+            lib.save_index_cache();
+            res
+        }
     }
 }

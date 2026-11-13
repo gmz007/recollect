@@ -1,11 +1,15 @@
-//! In-memory vector index: exact brute-force scan over i8-quantized unit vectors (ADR 0005).
+//! In-memory vector index: exact brute-force scan over i8-quantized unit vectors (see `docs/design.md`).
 
 use crate::media::MediaKind;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-const CACHE_MAGIC: &[u8; 8] = b"RCLXIDX1";
+const CACHE_MAGIC: &[u8; 8] = b"RCLXIDX2";
+
+/// Longest model name / library id accepted in a cache header.
+const MAX_NAME_LEN: usize = 256;
 
 /// Rows per parallel work unit.
 const BLOCK: usize = 4096;
@@ -125,15 +129,55 @@ impl VectorIndex {
         self.kinds.push(kind);
     }
 
-    /// Removes all items belonging to the given files.
-    /// Saves the index to `path` (atomically), stamped with `model` and `epoch`.
-    pub fn save(&self, path: &std::path::Path, model: &str, epoch: u64) -> std::io::Result<()> {
+    /// Saves the index to `path` (atomically), stamped with `model`, `library_id` and `epoch`.
+    ///
+    /// The bytes go to a uniquely named temp file next to `path` (opened with `create_new`) and
+    /// are renamed into place, so concurrent savers can never interleave writes into one file
+    /// and a crash never leaves a half-written cache under the real name.
+    pub fn save(
+        &self,
+        path: &std::path::Path,
+        model: &str,
+        library_id: &str,
+        epoch: u64,
+    ) -> std::io::Result<()> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = path.with_file_name(format!(
+            "{name}.{}.{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        let res = self
+            .write_to(file, model, library_id, epoch)
+            .and_then(|()| std::fs::rename(&tmp, path));
+        if res.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        res
+    }
+
+    fn write_to(
+        &self,
+        file: std::fs::File,
+        model: &str,
+        library_id: &str,
+        epoch: u64,
+    ) -> std::io::Result<()> {
         use std::io::Write;
-        let tmp = path.with_extension("tmp");
-        let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
         w.write_all(CACHE_MAGIC)?;
         w.write_all(&(model.len() as u32).to_le_bytes())?;
         w.write_all(model.as_bytes())?;
+        w.write_all(&(library_id.len() as u32).to_le_bytes())?;
+        w.write_all(library_id.as_bytes())?;
         w.write_all(&(self.dim as u32).to_le_bytes())?;
         w.write_all(&self.scale.to_le_bytes())?;
         w.write_all(&epoch.to_le_bytes())?;
@@ -155,20 +199,24 @@ impl VectorIndex {
         let bytes =
             unsafe { std::slice::from_raw_parts(self.data.as_ptr().cast::<u8>(), self.data.len()) };
         w.write_all(bytes)?;
-        w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        std::fs::rename(&tmp, path)
+        w.into_inner().map_err(|e| e.into_error())?.sync_all()
     }
 
-    /// Loads a cache written by [`Self::save`] if it matches `model`, `dim`, `scale` and `epoch`.
+    /// Loads a cache written by [`Self::save`] if it matches `model`, `library_id`, `dim`,
+    /// `scale` and `epoch`. The header is untrusted: the file length must equal exactly what the
+    /// header promises before anything is allocated.
     pub fn load(
         path: &std::path::Path,
         model: &str,
+        library_id: &str,
         dim: usize,
         scale: f32,
         epoch: u64,
     ) -> Option<Self> {
         use std::io::Read;
-        let mut r = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path).ok()?);
+        let file = std::fs::File::open(path).ok()?;
+        let file_len = file.metadata().ok()?.len();
+        let mut r = std::io::BufReader::with_capacity(1 << 20, file);
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic).ok()?;
         if &magic != CACHE_MAGIC {
@@ -177,8 +225,19 @@ impl VectorIndex {
         let mut u32b = [0u8; 4];
         let mut u64b = [0u8; 8];
         r.read_exact(&mut u32b).ok()?;
-        let mut name = vec![0u8; u32::from_le_bytes(u32b) as usize];
+        let name_len = u32::from_le_bytes(u32b) as usize;
+        if name_len > MAX_NAME_LEN {
+            return None;
+        }
+        let mut name = vec![0u8; name_len];
         r.read_exact(&mut name).ok()?;
+        r.read_exact(&mut u32b).ok()?;
+        let id_len = u32::from_le_bytes(u32b) as usize;
+        if id_len > MAX_NAME_LEN {
+            return None;
+        }
+        let mut id = vec![0u8; id_len];
+        r.read_exact(&mut id).ok()?;
         r.read_exact(&mut u32b).ok()?;
         let d = u32::from_le_bytes(u32b) as usize;
         r.read_exact(&mut u32b).ok()?;
@@ -186,8 +245,24 @@ impl VectorIndex {
         r.read_exact(&mut u64b).ok()?;
         let ep = u64::from_le_bytes(u64b);
         r.read_exact(&mut u64b).ok()?;
-        let n = u64::from_le_bytes(u64b) as usize;
-        if name != model.as_bytes() || d != dim || sc != scale || ep != epoch {
+        let n = usize::try_from(u64::from_le_bytes(u64b)).ok()?;
+        if name != model.as_bytes()
+            || id != library_id.as_bytes()
+            || d != dim
+            || sc != scale
+            || ep != epoch
+        {
+            return None;
+        }
+        // magic + name_len + name + id_len + id + dim + scale + epoch + n
+        let header = (8 + 4 + 4 + 4 + 4 + 8 + 8usize)
+            .checked_add(name_len)?
+            .checked_add(id_len)?;
+        let expected = n
+            .checked_mul(8 + 8 + 1usize)?
+            .checked_add(n.checked_mul(dim)?)?
+            .checked_add(header)?;
+        if expected as u64 != file_len {
             return None;
         }
         let mut read_i64s = |n: usize| -> Option<Vec<i64>> {
@@ -226,6 +301,7 @@ impl VectorIndex {
         })
     }
 
+    /// Removes all items belonging to the given files.
     pub fn remove_files(&mut self, files: &HashSet<i64>) {
         if files.is_empty() {
             return;
@@ -413,8 +489,8 @@ mod tests {
                 v,
             );
         }
-        idx.save(&p, "m", 7).unwrap();
-        let back = VectorIndex::load(&p, "m", 16, 300.0, 7).unwrap();
+        idx.save(&p, "m", "lib", 7).unwrap();
+        let back = VectorIndex::load(&p, "m", "lib", 16, 300.0, 7).unwrap();
         assert_eq!(
             (
                 back.data.clone(),
@@ -431,15 +507,34 @@ mod tests {
         );
         assert_eq!(back.search(&vs[10], 1, None)[0].item_id, 10);
         assert!(
-            VectorIndex::load(&p, "m", 16, 300.0, 8).is_none(),
+            VectorIndex::load(&p, "m", "lib", 16, 300.0, 8).is_none(),
             "stale epoch"
         );
         assert!(
-            VectorIndex::load(&p, "other", 16, 300.0, 7).is_none(),
+            VectorIndex::load(&p, "other", "lib", 16, 300.0, 7).is_none(),
             "other model"
         );
+        assert!(
+            VectorIndex::load(&p, "m", "other-lib", 16, 300.0, 7).is_none(),
+            "other library"
+        );
+        // Truncated file.
+        let bytes = std::fs::read(&p).unwrap();
+        std::fs::write(&p, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(VectorIndex::load(&p, "m", "lib", 16, 300.0, 7).is_none());
+        // Header claiming a huge item count must not allocate or panic.
+        let mut forged = bytes.clone();
+        let n_at = 8 + 4 + 1 + 4 + 3 + 4 + 4 + 8;
+        forged[n_at..n_at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(&p, &forged).unwrap();
+        assert!(VectorIndex::load(&p, "m", "lib", 16, 300.0, 7).is_none());
+        // Oversized model name.
+        let mut forged = bytes.clone();
+        forged[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&p, &forged).unwrap();
+        assert!(VectorIndex::load(&p, "m", "lib", 16, 300.0, 7).is_none());
         std::fs::write(&p, b"garbage").unwrap();
-        assert!(VectorIndex::load(&p, "m", 16, 300.0, 7).is_none());
+        assert!(VectorIndex::load(&p, "m", "lib", 16, 300.0, 7).is_none());
     }
 
     #[test]
