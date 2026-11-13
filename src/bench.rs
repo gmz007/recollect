@@ -96,7 +96,7 @@ pub fn search(
         spec.dim
     );
     println!(
-        "T6 startup (open + index load, {}): {:.2} s",
+        "startup (open + index load, {}): {:.2} s",
         if lib.loaded_from_cache() {
             "from cache"
         } else {
@@ -104,8 +104,8 @@ pub fn search(
         },
         load.as_secs_f64()
     );
-    println!("T4 RSS after load: {rss} MB (process baseline before open {rss0} MB)");
-    println!("T5 database size: {db_mb} MB");
+    println!("RSS after load: {rss} MB (process baseline before open {rss0} MB)");
+    println!("database size: {db_mb} MB");
 
     let mut rng = Rng(0x5EED);
     let opts = SearchOptions {
@@ -163,7 +163,7 @@ pub fn search(
             percentile(&tl, 0.95).as_secs_f64() * 1e3
         );
         println!(
-            "T1 estimate (text p95 + search p95): {:.1} ms",
+            "search latency estimate (text p95 + search p95): {:.1} ms",
             (percentile(&tl, 0.95) + percentile(&lat, 0.95)).as_secs_f64() * 1e3
         );
     } else {
@@ -264,7 +264,7 @@ pub fn rescan(paths: &Paths, dir: &Path, files: usize) -> Result<()> {
     }
     let lib = Library::open(paths.clone(), Some(registry::CLIP_B32.id))?;
     lib.add_folder(&tree)?;
-    for label in ["first scan (inserts)", "T7 unchanged rescan"] {
+    for label in ["first scan (inserts)", "unchanged rescan"] {
         let t = Instant::now();
         let s = crate::indexer::sync_only(&lib)?;
         println!(
@@ -334,6 +334,7 @@ pub fn timeline(paths: &Paths, files: usize) -> Result<()> {
                             taken_at: when(&mut rng),
                             source: DateSource::Exif,
                             camera: Some("Bench Camera".into()),
+                            duration: None,
                         },
                     )
                 })
@@ -352,8 +353,8 @@ pub fn timeline(paths: &Paths, files: usize) -> Result<()> {
     let items = lib.timeline(&TimelineFilter::default())?;
     let ms = t.elapsed().as_secs_f64() * 1e3;
     let rss1 = rss_mb();
-    println!("A1 timeline load: {ms:.0} ms, {} items", items.len());
-    println!("A5 timeline memory: +{} MB", rss1.saturating_sub(rss0));
+    println!("timeline load: {ms:.0} ms, {} items", items.len());
+    println!("timeline memory: +{} MB", rss1.saturating_sub(rss0));
     Ok(())
 }
 

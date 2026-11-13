@@ -6,7 +6,7 @@
 //! smooth.
 
 use super::workers::ThumbCache;
-use super::{App, Query, apply_nav_keys, fmt_time, platform};
+use super::{App, Nav, Query, apply_nav_keys, fmt_time, platform};
 use crate::Library;
 use crate::library::Activity;
 use crate::media::MediaKind;
@@ -26,6 +26,8 @@ const HEADER_H: f32 = 34.0;
 const SECTION_GAP: f32 = 10.0;
 /// Reload interval while a scan or indexing run keeps adding files.
 const LIVE_RELOAD: Duration = Duration::from_secs(10);
+/// Wait before loading the same view again after a failed load.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
 
 /// What the central area shows when no search is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +231,56 @@ impl Layout {
     }
 }
 
+impl Layout {
+    /// Scroll offset for jumping to `item`: the section header when the item starts a section,
+    /// else the row that contains it (e.g. a month inside a year section).
+    pub fn jump_top(&self, groups: &[GroupSpan], item: usize) -> f32 {
+        let g = groups.partition_point(|g| g.end <= item);
+        if groups.get(g).is_some_and(|g| g.start == item)
+            && let Some(&top) = self.group_row.get(g).and_then(|&r| self.tops.get(r))
+        {
+            return top;
+        }
+        self.tops
+            .get(self.row_of_item(item))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Item reached by an arrow key from `cur` (`cur < len`). Up and down go to the same
+    /// column of the previous / next row of tiles in the layout, across section boundaries,
+    /// clamped to the last tile of a shorter row; left and right go to the previous / next item.
+    pub fn step(&self, cur: usize, len: usize, key: Nav) -> usize {
+        match key {
+            Nav::Left => cur.saturating_sub(1),
+            Nav::Right => (cur + 1).min(len.saturating_sub(1)),
+            Nav::Up | Nav::Down => {
+                let r = self.row_of_item(cur);
+                let Some(Row::Tiles { start, .. }) = self.rows.get(r).copied() else {
+                    return cur;
+                };
+                let col = cur - start;
+                let target = if key == Nav::Up {
+                    self.rows[..r].iter().rev().find_map(tiles_of)
+                } else {
+                    self.rows[r + 1..].iter().find_map(tiles_of)
+                };
+                match target {
+                    Some((s, e)) => (s + col).min(e - 1),
+                    None => cur,
+                }
+            }
+        }
+    }
+}
+
+fn tiles_of(r: &Row) -> Option<(usize, usize)> {
+    match *r {
+        Row::Tiles { start, end } => Some((start, end)),
+        Row::Header { .. } => None,
+    }
+}
+
 /// Scroll offset that makes `top..top + height` visible, or `None` if it already is.
 fn reveal(top: f32, height: f32, view: f32, offset: f32) -> Option<f32> {
     if top < offset {
@@ -390,6 +442,8 @@ pub(super) struct TimelineState {
     loaded_filter: Option<TimelineFilter>,
     requested: Option<(TimelineFilter, u64)>,
     requested_at: Instant,
+    /// The filter whose last load failed, and when; it is not retried right away.
+    failed: Option<(TimelineFilter, Instant)>,
     error: Option<String>,
     pub(super) selected: Option<usize>,
     expanded: HashSet<i32>,
@@ -424,6 +478,7 @@ impl TimelineState {
             loaded_filter: None,
             requested: None,
             requested_at: Instant::now(),
+            failed: None,
             error: None,
             selected: None,
             expanded: HashSet::new(),
@@ -459,6 +514,9 @@ impl TimelineState {
 
     /// Replaces the items; keeps the selection on the same file.
     pub(super) fn set_items(&mut self, items: Vec<TimelineItem>) {
+        if self.loaded && items == self.items {
+            return; // a reload that found nothing new: keep layout and scroll position
+        }
         let prev = self
             .selected
             .and_then(|i| self.items.get(i))
@@ -469,6 +527,31 @@ impl TimelineState {
         self.selected = prev.and_then(|f| self.items.iter().position(|it| it.file_id == f));
         self.top_item = None;
         self.loaded = true;
+    }
+
+    /// Before `new` replaces the items: remembers which photo is at the top of the viewport so
+    /// the scroll position follows it (or the nearest position if it is gone). Nothing is done
+    /// at the very top, where new items should simply show up.
+    fn anchor_scroll(&mut self, new: &[TimelineItem]) {
+        let Some(top) = self.top_item.filter(|&t| t > 0) else {
+            return;
+        };
+        let Some(old) = self.items.get(top) else {
+            return;
+        };
+        if new.is_empty() || new == self.items.as_slice() {
+            return;
+        }
+        let at = new
+            .iter()
+            .position(|it| it.file_id == old.file_id)
+            .unwrap_or_else(|| top.min(new.len() - 1));
+        self.pending = Some((at, false));
+    }
+
+    /// True when the loaded items belong to the view that is selected now.
+    fn matches(&self, filter: &TimelineFilter) -> bool {
+        self.loaded_filter.as_ref() == Some(filter)
     }
 
     fn ensure_layout(&mut self, width: f32) {
@@ -517,9 +600,7 @@ impl TimelineState {
         }
         let item = item.min(self.items.len() - 1);
         let top = if to_header {
-            let g = self.groups.partition_point(|g| g.end <= item);
-            let row = layout.group_row.get(g).copied().unwrap_or(0);
-            layout.tops.get(row).copied().unwrap_or(0.0)
+            layout.jump_top(&self.groups, item)
         } else {
             layout.reveal_span(item).0
         };
@@ -653,20 +734,36 @@ impl App {
             && self.tl.awaiting.as_ref().map(|a| a.0) == Some(r.id)
         {
             self.tl.awaiting = None;
+            self.tl.requested_at = Instant::now();
+            let same_view = self.tl.loaded_filter.as_ref() == Some(&r.filter);
             match r.items {
                 Ok(items) => {
-                    if self.tl.loaded_filter.as_ref() != Some(&r.filter) {
+                    if same_view {
+                        // A reload of what is shown: stay on the same photo.
+                        self.tl.anchor_scroll(&items);
+                    } else {
                         self.tl.scroll_to = Some(0.0);
                         self.tl.selected = None;
                         self.tl.pending = None;
                     }
                     self.tl.loaded_filter = Some(r.filter);
                     self.tl.error = None;
+                    self.tl.failed = None;
                     self.tl.set_items(items);
                 }
                 Err(e) => {
+                    if !same_view {
+                        // Never keep showing another view's items.
+                        self.tl.selected = None;
+                        self.tl.pending = None;
+                        self.tl.scroll_to = Some(0.0);
+                        self.tl.loaded_filter = Some(r.filter.clone());
+                        self.tl.set_items(Vec::new());
+                    }
                     self.tl.error = Some(e);
                     self.tl.loaded = true;
+                    self.tl.failed = Some((r.filter, Instant::now()));
+                    self.tl.requested = None; // allow a retry
                 }
             }
         }
@@ -678,20 +775,33 @@ impl App {
         }
         let filter = self.tl.filter(self.kind);
         let jobs = self.lib.jobs_finished();
+        // Files are being added: reload now and then. Embedding adds no files, so it does not
+        // trigger reloads; the reload when the job finishes picks up its results.
         let growing = matches!(
             self.status.activity,
-            Activity::Scanning { .. } | Activity::ReadingDates { .. } | Activity::Indexing(_)
+            Activity::Scanning { .. } | Activity::ReadingDates { .. }
         );
-        let stale = self.tl.requested.as_ref() != Some(&(filter.clone(), jobs));
+        let backing_off = self
+            .tl
+            .failed
+            .as_ref()
+            .is_some_and(|(f, at)| *f == filter && at.elapsed() < RETRY_AFTER);
+        let stale = self.tl.requested.as_ref() != Some(&(filter.clone(), jobs)) && !backing_off;
         let live = growing && self.tl.requested_at.elapsed() > LIVE_RELOAD;
-        if (stale || live) && self.tl.awaiting.is_none() {
-            let id = self.tl.worker.submit(filter.clone());
-            self.tl.awaiting = Some((id, filter.clone()));
-            self.tl.requested = Some((filter, jobs));
-            self.tl.requested_at = Instant::now();
-        } else if stale || live {
-            // A load is in flight: ask again as soon as it is done.
+        if self.tl.awaiting.is_none() {
+            if stale || live {
+                let id = self.tl.worker.submit(filter.clone());
+                self.tl.awaiting = Some((id, filter.clone()));
+                self.tl.requested = Some((filter, jobs));
+                self.tl.requested_at = Instant::now();
+            }
+        } else if stale {
+            // The view or library changed while a load is in flight: load again once it is
+            // done. (A live tick during a load does nothing.)
             self.tl.requested = None;
+        }
+        if backing_off {
+            self.ctx.request_repaint_after(RETRY_AFTER);
         }
         if growing {
             self.ctx.request_repaint_after(LIVE_RELOAD);
@@ -814,7 +924,10 @@ impl App {
 
     /// The album grid for the current view.
     pub(super) fn timeline_view(&mut self, ui: &mut egui::Ui) {
-        if !self.tl.loaded {
+        // Until items for the selected view arrive, show a spinner rather than the previous
+        // view's items laid out under the new view's rules.
+        let wanted = self.tl.filter(self.kind);
+        if !self.tl.loaded || !self.tl.matches(&wanted) {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() * 0.3);
                 ui.spinner();
@@ -962,8 +1075,15 @@ impl App {
         {
             return;
         }
-        let cols = self.tl.layout.as_ref().map_or(1, |l| l.cols);
-        let (next, enter) = apply_nav_keys(ctx, self.tl.selected, self.tl.items.len(), cols);
+        let len = self.tl.items.len();
+        let layout = self.tl.layout.as_ref();
+        let (next, enter) = apply_nav_keys(ctx, self.tl.selected, |sel, n| {
+            // Nothing (valid) selected: any arrow picks the first item.
+            let Some(cur) = sel.filter(|&i| i < len) else {
+                return Some(0);
+            };
+            Some(layout.map_or(cur, |l| l.step(cur, len, n)))
+        });
         if next != self.tl.selected {
             self.tl.selected = next;
             self.tl.keyboard_moved = true;
@@ -1224,6 +1344,114 @@ mod tests {
         assert!(!r.is_empty() && r.len() < 20, "{r:?}");
         let first = l.rows[r.start].first_item();
         assert!(first > 0 && first < n);
+    }
+
+    /// Sections of 5 and 2 items with 3 columns: rows are
+    /// header, [0 1 2], [3 4], header, [5 6].
+    fn two_sections() -> (Vec<GroupSpan>, Layout) {
+        let groups = vec![
+            GroupSpan {
+                key: 1,
+                start: 0,
+                end: 5,
+            },
+            GroupSpan {
+                key: 2,
+                start: 5,
+                end: 7,
+            },
+        ];
+        let l = Layout::build(&groups, 316.0, 100.0, true);
+        (groups, l)
+    }
+
+    #[test]
+    fn arrows_follow_the_tile_rows_across_sections() {
+        let (_, l) = two_sections();
+        let n = 7;
+        // Down across the boundary keeps the column.
+        assert_eq!(l.step(3, n, Nav::Down), 5);
+        assert_eq!(l.step(4, n, Nav::Down), 6);
+        // Down into a shorter row clamps to its last tile (within a section and across).
+        assert_eq!(l.step(2, n, Nav::Down), 4);
+        assert_eq!(l.step(4, n, Nav::Down), 6);
+        // Up across the boundary, from the short last row into the full row above... and from
+        // a column that the short row above does not have.
+        assert_eq!(l.step(5, n, Nav::Up), 3);
+        assert_eq!(l.step(6, n, Nav::Up), 4);
+        assert_eq!(l.step(3, n, Nav::Up), 0);
+        // Nothing above the first row / below the last one.
+        assert_eq!(l.step(1, n, Nav::Up), 1);
+        assert_eq!(l.step(6, n, Nav::Down), 6);
+        // Left and right walk the items in order, also across sections.
+        assert_eq!(l.step(5, n, Nav::Left), 4);
+        assert_eq!(l.step(4, n, Nav::Right), 5);
+        assert_eq!(l.step(6, n, Nav::Right), 6);
+        assert_eq!(l.step(0, n, Nav::Left), 0);
+    }
+
+    #[test]
+    fn arrows_clamp_to_a_short_row_in_the_next_section() {
+        // Sections of 4 and 1 item with 3 columns: [0 1 2], [3], header, [4].
+        let groups = [
+            GroupSpan {
+                key: 1,
+                start: 0,
+                end: 4,
+            },
+            GroupSpan {
+                key: 2,
+                start: 4,
+                end: 5,
+            },
+        ];
+        let l = Layout::build(&groups, 316.0, 100.0, true);
+        assert_eq!(l.step(2, 5, Nav::Down), 3);
+        assert_eq!(l.step(3, 5, Nav::Down), 4);
+        assert_eq!(l.step(4, 5, Nav::Up), 3);
+    }
+
+    #[test]
+    fn jumps_go_to_the_header_only_for_section_starts() {
+        let (groups, l) = two_sections();
+        // Item 5 starts the second section: its header.
+        assert_eq!(l.jump_top(&groups, 5), l.tops[3]);
+        assert_eq!(l.jump_top(&groups, 0), l.tops[0]);
+        // Item 4 is in the middle of a section (a month inside a year): its own row.
+        assert_eq!(l.jump_top(&groups, 4), l.tops[2]);
+        assert_eq!(l.jump_top(&groups, 1), l.tops[1]);
+    }
+
+    #[test]
+    fn reload_keeps_the_photo_at_the_top_in_view() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = crate::Library::open(
+            crate::config::Paths::under(d.path()),
+            Some(crate::model::registry::CLIP_B32.id),
+        )
+        .unwrap();
+        let mut st = TimelineState::new(lib, &egui::Context::default());
+        let items: Vec<_> = (0..20).map(|i| item(1_600_000_000 - i * 86_400)).collect();
+        st.set_items(items.clone());
+        let gen0 = st.generation;
+        st.set_items(items.clone());
+        assert_eq!(st.generation, gen0, "identical items keep the layout");
+        // Scrolled to item 10; three newer photos arrive at the front.
+        st.top_item = Some(10);
+        let mut newer: Vec<_> = (1..=3).map(|i| item(1_600_000_000 + i * 86_400)).collect();
+        newer.extend(items.clone());
+        st.anchor_scroll(&newer);
+        assert_eq!(st.pending, Some((13, false)));
+        // The photo disappeared: the nearest position (clamped to the new end).
+        st.pending = None;
+        st.top_item = Some(19);
+        st.anchor_scroll(&items[..5]);
+        assert_eq!(st.pending, Some((4, false)));
+        // At the very top nothing is anchored.
+        st.pending = None;
+        st.top_item = Some(0);
+        st.anchor_scroll(&newer);
+        assert_eq!(st.pending, None);
     }
 
     #[test]

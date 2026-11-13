@@ -39,12 +39,14 @@ impl DateSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Capture {
     /// Local wall-clock capture time, encoded as seconds since the epoch as if it were UTC.
     pub taken_at: i64,
     pub source: DateSource,
     pub camera: Option<String>,
+    /// Length in seconds (videos only), read from the container header.
+    pub duration: Option<f64>,
 }
 
 /// 1971-01-01: earlier values are zeroed or reset clocks, not real capture times.
@@ -62,18 +64,40 @@ fn plausible(wall: i64) -> bool {
     wall >= MIN_PLAUSIBLE && wall <= local_wall_clock(Utc::now().timestamp()) + 86_400
 }
 
-/// Reads the best available capture time of a file. Never fails: when the file has no usable
-/// metadata (or cannot be read) the modification time `mtime` (UTC seconds) is used.
-pub fn read_capture(path: &Path, kind: MediaKind, mtime: i64) -> Capture {
-    let found = match kind {
-        MediaKind::Image => read_exif(path),
-        MediaKind::Video => read_video(path),
-    };
-    found.unwrap_or_else(|| Capture {
+/// TIFF-based files (TIFF, DNG, many raw formats) larger than this are not parsed for EXIF:
+/// the EXIF reader loads a whole TIFF into memory (it only reads other containers' metadata
+/// segment), which would cost hundreds of MB per decode thread for a date.
+const MAX_TIFF_EXIF_BYTES: u64 = 64 << 20;
+
+/// Reads the best available capture time of a file. When the file opens but has no usable
+/// metadata, the modification time `mtime` (UTC seconds) is used. Returns `None` when the file
+/// cannot be opened or read right now (missing, unmounted drive, I/O error): the caller should
+/// try again later instead of settling for a guess.
+pub fn read_capture(path: &Path, kind: MediaKind, mtime: i64) -> Option<Capture> {
+    let fallback = |duration| Capture {
         taken_at: local_wall_clock(mtime),
         source: DateSource::File,
         camera: None,
-    })
+        duration,
+    };
+    match kind {
+        MediaKind::Image => match read_exif(path) {
+            Ok(found) => Some(found.unwrap_or_else(|| fallback(None))),
+            Err(e) => {
+                tracing::warn!("{}: {e}; reading its date again next time", path.display());
+                None
+            }
+        },
+        MediaKind::Video => {
+            // Check readability ourselves so a vanished file is not mistaken for "no tags".
+            if let Err(e) = File::open(path) {
+                tracing::warn!("{}: {e}; reading its date again next time", path.display());
+                return None;
+            }
+            let (found, duration) = read_video(path);
+            Some(found.unwrap_or_else(|| fallback(duration)))
+        }
+    }
 }
 
 fn ascii(field: &exif::Field) -> Option<String> {
@@ -87,11 +111,27 @@ fn ascii(field: &exif::Field) -> Option<String> {
     }
 }
 
-fn read_exif(path: &Path) -> Option<Capture> {
-    let file = File::open(path).ok()?;
-    let ex = exif::Reader::new()
-        .read_from_container(&mut BufReader::new(file))
-        .ok()?;
+/// `Err` only for I/O trouble; a file without usable EXIF is `Ok(None)`.
+fn read_exif(path: &Path) -> std::io::Result<Option<Capture>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+    let mut magic = [0u8; 4];
+    match reader.read_exact(&mut magic) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    if matches!(&magic, b"II*\0" | b"MM\0*") && len > MAX_TIFF_EXIF_BYTES {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    let ex = match exif::Reader::new().read_from_container(&mut reader) {
+        Ok(ex) => ex,
+        Err(exif::Error::Io(e)) if e.kind() != std::io::ErrorKind::UnexpectedEof => return Err(e),
+        Err(_) => return Ok(None),
+    };
     let text = |tag| ex.get_field(tag, exif::In::PRIMARY).and_then(ascii);
     let make = text(exif::Tag::Make);
     let model = text(exif::Tag::Model);
@@ -106,12 +146,13 @@ fn read_exif(path: &Path) -> Option<Capture> {
     .filter_map(text)
     .filter_map(|s| NaiveDateTime::parse_from_str(&s, "%Y:%m:%d %H:%M:%S").ok())
     .map(|n| n.and_utc().timestamp())
-    .find(|&t| plausible(t))?;
-    Some(Capture {
+    .find(|&t| plausible(t));
+    Ok(taken_at.map(|taken_at| Capture {
         taken_at,
         source: DateSource::Exif,
         camera,
-    })
+        duration: None,
+    }))
 }
 
 /// "Make Model", without repeating the make when the model already starts with it
@@ -159,16 +200,22 @@ fn tag(tags: &Tags, name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn read_video(path: &Path) -> Option<Capture> {
-    let ictx = video::open_input(path).ok()?;
+/// The capture time found in a video's tags (if any) and its duration (if known).
+fn read_video(path: &Path) -> (Option<Capture>, Option<f64>) {
+    let Ok(ictx) = video::open_input(path) else {
+        return (None, None);
+    };
     let fmt: Tags = ictx
         .metadata()
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    let stream: Tags = ictx
-        .streams()
-        .best(ffmpeg_next::media::Type::Video)
+    let best = ictx.streams().best(ffmpeg_next::media::Type::Video);
+    let duration = best
+        .as_ref()
+        .map(|s| video::header_duration(&ictx, s))
+        .filter(|d| *d > 0.0);
+    let stream: Tags = best
         .map(|s| {
             s.metadata()
                 .iter()
@@ -182,19 +229,26 @@ fn read_video(path: &Path) -> Option<Capture> {
         tag(&fmt, "creation_time"),
         tag(&stream, "creation_time"),
     ];
-    let taken_at = candidates
+    let Some(taken_at) = candidates
         .iter()
         .flatten()
-        .find_map(|s| parse_video_time(s))?;
+        .find_map(|s| parse_video_time(s))
+    else {
+        return (None, duration);
+    };
     let camera = camera_name(
         tag(&fmt, "com.apple.quicktime.make").as_deref(),
         tag(&fmt, "com.apple.quicktime.model").as_deref(),
     );
-    Some(Capture {
-        taken_at,
-        source: DateSource::Video,
-        camera,
-    })
+    (
+        Some(Capture {
+            taken_at,
+            source: DateSource::Video,
+            camera,
+            duration,
+        }),
+        duration,
+    )
 }
 
 #[cfg(test)]
@@ -282,7 +336,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("x.jpg");
         std::fs::write(&p, bytes).unwrap();
-        read_capture(&p, MediaKind::Image, mtime)
+        read_capture(&p, MediaKind::Image, mtime).unwrap()
     }
 
     #[test]
@@ -345,7 +399,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a.png");
         std::fs::write(&p, png).unwrap();
-        let c = read_capture(&p, MediaKind::Image, 1_600_000_000);
+        let c = read_capture(&p, MediaKind::Image, 1_600_000_000).unwrap();
         assert_eq!(c.source, DateSource::File);
         assert_eq!(c.taken_at, local_wall_clock(1_600_000_000));
         assert_eq!(c.camera, None);
@@ -357,11 +411,40 @@ mod tests {
         let p = d.path().join("g.jpg");
         std::fs::write(&p, b"definitely not a jpeg").unwrap();
         for kind in [MediaKind::Image, MediaKind::Video] {
-            let c = read_capture(&p, kind, 1_600_000_000);
-            assert_eq!(c.source, DateSource::File);
-            let c = read_capture(&d.path().join("missing"), kind, 1_600_000_000);
+            let c = read_capture(&p, kind, 1_600_000_000).unwrap();
             assert_eq!(c.source, DateSource::File);
         }
+    }
+
+    #[test]
+    fn unreadable_files_have_no_date_yet() {
+        let d = tempfile::tempdir().unwrap();
+        for kind in [MediaKind::Image, MediaKind::Video] {
+            assert_eq!(
+                read_capture(&d.path().join("missing"), kind, 1_600_000_000),
+                None,
+                "a file that cannot be opened is retried, not dated by a guess"
+            );
+        }
+        // A directory opens but cannot be read: also an I/O failure.
+        assert_eq!(
+            read_capture(d.path(), MediaKind::Image, 1_600_000_000),
+            None
+        );
+    }
+
+    #[test]
+    fn huge_tiff_is_not_parsed() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("big.tif");
+        let f = File::create(&p).unwrap();
+        // Sparse file: little-endian TIFF header, then a hole past the size limit.
+        use std::io::Write;
+        (&f).write_all(b"II*\0\x08\0\0\0").unwrap();
+        f.set_len(MAX_TIFF_EXIF_BYTES + 1).unwrap();
+        drop(f);
+        let c = read_capture(&p, MediaKind::Image, 1_600_000_000).unwrap();
+        assert_eq!(c.source, DateSource::File);
     }
 
     #[test]
@@ -374,8 +457,9 @@ mod tests {
             10,
             &["-metadata", "creation_time=2019-07-04T12:00:00Z"],
         );
-        let c = read_capture(&p, MediaKind::Video, 1_000_000_000);
+        let c = read_capture(&p, MediaKind::Video, 1_000_000_000).unwrap();
         assert_eq!(c.source, DateSource::Video);
+        assert!((c.duration.unwrap() - 1.0).abs() < 0.2, "{:?}", c.duration);
         let utc = ymd(2019, 7, 4, 12, 0, 0);
         assert_eq!(c.taken_at, local_wall_clock(utc));
     }

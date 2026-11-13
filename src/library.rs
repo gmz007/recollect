@@ -333,7 +333,9 @@ impl Library {
 
     /// Every file matching `filter` (indexed or not), in display order.
     pub fn timeline(&self, filter: &TimelineFilter) -> Result<Vec<TimelineItem>> {
-        self.db.lock().timeline(filter)
+        // Only the query holds the lock; conversion and sorting of a big library take longer.
+        let rows = self.db.lock().timeline_rows(filter)?;
+        Ok(rows.into_sorted(filter.order))
     }
 
     /// Number of files per capture-date source.
@@ -435,6 +437,7 @@ impl Library {
         self.spawn(move || {
             lib.update_status(|s| s.activity = Activity::SwitchingModel);
             let res = lib.switch_model(spec, new);
+            let ok = res.is_ok();
             lib.update_status(|s| {
                 s.activity = Activity::Idle;
                 s.last_run = None;
@@ -442,6 +445,10 @@ impl Library {
                     s.last_error = Some(format!("Switching models failed: {e:#}"));
                 }
             });
+            if ok {
+                // Re-embed with the new model (if it is installed) in the same job.
+                lib.run_indexing_job();
+            }
         })
     }
 
@@ -460,10 +467,39 @@ impl Library {
     }
 
     /// Starts downloading the current model in the background (the caller has obtained the
-    /// user's consent).
+    /// user's consent). When the download succeeds the same job goes on to scan, read dates and
+    /// embed everything, so the library is searchable without another click. If another job
+    /// (say, a dates-only scan) is running, it is cancelled first; waiting for it happens off the
+    /// calling thread.
     pub fn start_download(self: &Arc<Self>) -> Result<()> {
+        if matches!(self.status().activity, Activity::Downloading { .. }) {
+            return Ok(());
+        }
+        self.update_status(|s| s.last_run = None);
+        if self.spawn(Self::download_job(Arc::clone(self))).is_ok() {
+            return Ok(());
+        }
+        self.cancel();
         let lib = Arc::clone(self);
-        self.spawn(move || {
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                lib.wait();
+                if lib.spawn(Self::download_job(Arc::clone(&lib))).is_ok() {
+                    return;
+                }
+                // Something else won the race; cancel that one too and try again.
+                lib.cancel();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            lib.update_status(|s| {
+                s.last_error = Some("Model download failed: another job would not stop".into())
+            });
+        });
+        Ok(())
+    }
+
+    fn download_job(lib: Arc<Self>) -> impl FnOnce() + Send + 'static {
+        move || {
             let spec = lib.model();
             let res = download::download(
                 &lib.paths.models_dir(),
@@ -479,6 +515,7 @@ impl Library {
                     })
                 },
             );
+            let ok = res.is_ok();
             lib.update_status(|s| {
                 s.activity = Activity::Idle;
                 if let Err(e) = res
@@ -487,25 +524,31 @@ impl Library {
                     s.last_error = Some(format!("Model download failed: {e:#}"));
                 }
             });
-        })
+            if ok && !lib.control.is_cancelled() {
+                lib.run_indexing_job();
+            }
+        }
     }
 
     /// Starts a scan + indexing run in the background. Without an installed model it only
     /// scans and reads capture dates (the album works before any model is downloaded).
     pub fn start_indexing(self: &Arc<Self>) -> Result<()> {
         let lib = Arc::clone(self);
-        self.spawn(move || {
-            lib.update_status(|s| s.last_run = None);
-            let res = indexer::run(&lib);
-            lib.update_status(|s| {
-                s.activity = Activity::Idle;
-                s.paused = false;
-                match res {
-                    Ok(sum) => s.last_run = Some(sum),
-                    Err(e) => s.last_error = Some(format!("Indexing failed: {e:#}")),
-                }
-            });
-        })
+        self.spawn(move || lib.run_indexing_job())
+    }
+
+    /// Body of an indexing job: runs on a worker thread and records the outcome in the status.
+    fn run_indexing_job(&self) {
+        self.update_status(|s| s.last_run = None);
+        let res = indexer::run(self);
+        self.update_status(|s| {
+            s.activity = Activity::Idle;
+            s.paused = false;
+            match res {
+                Ok(sum) => s.last_run = Some(sum),
+                Err(e) => s.last_error = Some(format!("Indexing failed: {e:#}")),
+            }
+        });
     }
 
     fn spawn(&self, f: impl FnOnce() + Send + 'static) -> Result<()> {
@@ -1043,6 +1086,70 @@ mod tests {
         lib.wait();
         assert!(lib.folders().unwrap().is_empty());
         assert_eq!(lib.indexed_items(), 0);
+    }
+
+    /// Writes every file of the current model with its expected size (sparse), so the download
+    /// finds nothing to fetch.
+    fn fake_install(lib: &Library) {
+        let dir = lib.model_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in lib.model().files {
+            let file = std::fs::File::create(dir.join(f.local)).unwrap();
+            file.set_len(f.size).unwrap();
+        }
+        assert!(lib.model_installed());
+    }
+
+    fn wait_idle(lib: &Library) {
+        for _ in 0..500 {
+            if !lib.is_busy() && lib.status().last_run.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        lib.wait();
+    }
+
+    #[test]
+    fn a_finished_download_continues_with_an_indexing_run() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        let empty = d.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        lib.add_folder(&empty).unwrap();
+        fake_install(&lib);
+        lib.update_status(|s| {
+            s.last_run = Some(RunSummary {
+                files: 99,
+                ..Default::default()
+            })
+        });
+        lib.start_download().unwrap();
+        wait_idle(&lib);
+        let st = lib.status();
+        assert_eq!(st.last_error, None);
+        let run = st.last_run.expect("the download was followed by a run");
+        assert_eq!(run.files, 0, "the stale summary was replaced");
+        assert_eq!(st.activity, Activity::Idle);
+    }
+
+    #[test]
+    fn downloading_while_another_job_runs_cancels_it_first() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        fake_install(&lib);
+        let l = Arc::clone(&lib);
+        // A job that only ends when cancelled (stands in for a long dates-only scan).
+        lib.spawn(move || {
+            while !l.control.is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+        .unwrap();
+        lib.start_download().unwrap();
+        wait_idle(&lib);
+        assert_eq!(lib.status().last_error, None);
+        assert!(lib.status().last_run.is_some(), "download, then indexing");
     }
 
     #[test]

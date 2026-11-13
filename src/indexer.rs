@@ -85,7 +85,8 @@ fn read_dates(lib: &Library, summary: &mut RunSummary) -> Result<()> {
                     if lib.control.checkpoint() {
                         return None;
                     }
-                    Some((f.id, read_capture(&f.path, f.kind, f.mtime)))
+                    // `None` inside: unreadable right now, left undated for the next run.
+                    read_capture(&f.path, f.kind, f.mtime).map(|c| (f.id, c))
                 })
                 .collect()
         });

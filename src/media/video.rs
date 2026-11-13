@@ -84,6 +84,24 @@ pub(crate) fn open_input(path: &Path) -> Result<ff::format::context::Input> {
         .with_context(|| format!("opening {}", path.display()))
 }
 
+/// Duration in seconds from the container header: the video stream's if it has one, else the
+/// container's; 0 if unknown.
+pub(crate) fn header_duration(
+    ictx: &ff::format::context::Input,
+    st: &ff::format::stream::Stream,
+) -> f64 {
+    let tb = f64::from(st.time_base());
+    let mut duration = if st.duration() > 0 {
+        st.duration() as f64 * tb
+    } else {
+        0.0
+    };
+    if duration <= 0.0 && ictx.duration() > 0 {
+        duration = ictx.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
+    }
+    duration
+}
+
 /// Opens a local video file and picks its best video stream.
 fn open(path: &Path, threads: usize) -> Result<Stream> {
     let ictx = open_input(path)?;
@@ -98,14 +116,7 @@ fn open(path: &Path, threads: usize) -> Result<Stream> {
     } else {
         st.start_time()
     };
-    let mut duration = if st.duration() > 0 {
-        st.duration() as f64 * tb
-    } else {
-        0.0
-    };
-    if duration <= 0.0 && ictx.duration() > 0 {
-        duration = ictx.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
-    }
+    let duration = header_duration(&ictx, &st);
     let rate = st.avg_frame_rate();
     let fps = if rate.numerator() > 0 && rate.denominator() > 0 {
         f64::from(rate)

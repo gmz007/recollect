@@ -75,6 +75,32 @@ ALTER TABLE files ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE files ADD COLUMN added_at INTEGER;
 "#;
 
+/// Upgrades a version 1 database inside the caller's transaction. Columns that already exist
+/// (an earlier upgrade that was cut short) are left alone.
+fn migrate_v1(tx: &rusqlite::Transaction) -> Result<()> {
+    let have: HashSet<String> = tx
+        .prepare("SELECT name FROM pragma_table_info('files')")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for stmt in MIGRATE_V1_TO_V2
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let col = stmt.split_whitespace().nth(5).unwrap_or_default();
+        if !have.contains(col) {
+            tx.execute_batch(stmt)?;
+        }
+    }
+    // Existing files count as added when they were indexed (best guess), else now.
+    tx.execute(
+        "UPDATE files SET added_at = COALESCE(added_at, indexed_at, ?1)",
+        [now()],
+    )?;
+    tx.execute_batch(SCHEMA_ALBUMS)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
     Pending,
@@ -216,8 +242,86 @@ pub struct Stats {
     pub items: usize,
 }
 
+/// One `files` row as read for the timeline, before conversion.
+struct RawTimelineRow {
+    file_id: i64,
+    path: String,
+    kind: i64,
+    mtime: i64,
+    taken_at: Option<i64>,
+    date_source: Option<i64>,
+    duration: Option<f64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    favorite: i64,
+    camera: Option<String>,
+    added_at: i64,
+    item_id: Option<i64>,
+}
+
+/// Unconverted timeline rows; turning them into sorted [`TimelineItem`]s is CPU work that
+/// needs no database access.
+pub struct TimelineRows(Vec<RawTimelineRow>);
+
+impl TimelineRows {
+    /// Converts and sorts into display order. Files whose capture time is not known yet are
+    /// placed by their modification time (the sort key then depends on the machine's time zone).
+    pub fn into_sorted(self, order: TimelineOrder) -> Vec<TimelineItem> {
+        let mut out: Vec<(i64, TimelineItem)> = self
+            .0
+            .into_iter()
+            .map(|r| {
+                (
+                    r.added_at,
+                    TimelineItem {
+                        file_id: r.file_id,
+                        item_id: r.item_id,
+                        path: PathBuf::from(r.path),
+                        kind: MediaKind::from_i64(r.kind),
+                        mtime: r.mtime,
+                        taken_at: r.taken_at.unwrap_or_else(|| local_wall_clock(r.mtime)),
+                        date_source: DateSource::from_i64(r.date_source.unwrap_or(0)),
+                        duration: r.duration,
+                        width: r.width,
+                        height: r.height,
+                        favorite: r.favorite != 0,
+                        camera: r.camera,
+                    },
+                )
+            })
+            .collect();
+        match order {
+            TimelineOrder::TakenDesc => out.sort_by(|a, b| {
+                b.1.taken_at
+                    .cmp(&a.1.taken_at)
+                    .then(a.1.path.cmp(&b.1.path))
+            }),
+            TimelineOrder::TakenAsc => out.sort_by(|a, b| {
+                a.1.taken_at
+                    .cmp(&b.1.taken_at)
+                    .then(a.1.path.cmp(&b.1.path))
+            }),
+            TimelineOrder::AddedDesc => {
+                out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.path.cmp(&b.1.path)))
+            }
+        }
+        out.into_iter().map(|(_, i)| i).collect()
+    }
+}
+
 pub struct Db {
     conn: Connection,
+}
+
+fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
+    Ok(FileRow {
+        id: r.get(0)?,
+        path: PathBuf::from(r.get::<_, String>(1)?),
+        kind: MediaKind::from_i64(r.get(2)?),
+        size: r.get::<_, i64>(3)? as u64,
+        mtime: r.get(4)?,
+        status: FileStatus::from_i64(r.get(5)?),
+    })
 }
 
 fn bump_epoch(conn: &Connection) -> Result<()> {
@@ -293,16 +397,12 @@ impl Db {
         let mut db = Self { conn };
         // Decide before touching any table: a newer database must not be modified by an older
         // build, and an older one needs its columns added before the new indexes exist.
-        match db.meta("schema_version")?.map(|v| v.parse::<i64>()) {
-            None => {
-                let tx = db.conn.transaction()?;
-                tx.execute_batch(SCHEMA)?;
-                tx.execute_batch(SCHEMA_ALBUMS)?;
-                tx.commit()?;
-                db.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
-            }
-            Some(Ok(SCHEMA_VERSION)) => {}
-            Some(Ok(1)) => db.migrate_v1()?,
+        // Creation and migration run in one write transaction that re-reads the version, so two
+        // processes opening the same new or old database at once cannot both change it.
+        let version = db.meta("schema_version")?;
+        let needs_work = match version.as_deref().map(str::parse::<i64>) {
+            Some(Ok(SCHEMA_VERSION)) => false,
+            Some(Ok(1)) | None => true,
             Some(other) => bail!(
                 "library database has schema version {}; this build supports {SCHEMA_VERSION}",
                 match other {
@@ -310,6 +410,9 @@ impl Db {
                     Err(_) => "(unreadable)".into(),
                 }
             ),
+        };
+        if needs_work {
+            db.create_or_migrate()?;
         }
         if db.meta("library_id")?.is_none() {
             db.set_meta("library_id", &new_library_id())?;
@@ -317,21 +420,83 @@ impl Db {
         Ok(db)
     }
 
-    fn migrate_v1(&mut self) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute_batch(MIGRATE_V1_TO_V2)?;
-        // Existing files count as added when they were indexed (best guess), else now.
+    fn create_or_migrate(&mut self) -> Result<()> {
+        use rusqlite::TransactionBehavior;
+        // A first start of an old version may have been interrupted after creating its tables
+        // but before recording a version: such a database is version 1, not empty.
+        let has_files = |c: &Connection| -> Result<bool> {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'files')",
+                [],
+                |r| r.get(0),
+            )?)
+        };
+        // Back up a database that will be upgraded (once; never overwrite an earlier backup).
+        // Decided from an unlocked peek; the transaction below re-checks.
+        let peek_old = match self.meta("schema_version")?.as_deref() {
+            Some("1") => true,
+            None => has_files(&self.conn)?,
+            _ => false,
+        };
+        if peek_old {
+            self.backup_v1()?;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match version.as_deref() {
+            Some("2") => return Ok(()), // another process finished first
+            Some("1") => migrate_v1(&tx)?,
+            None if has_files(&tx)? => migrate_v1(&tx)?,
+            None => {
+                tx.execute_batch(SCHEMA)?;
+                tx.execute_batch(SCHEMA_ALBUMS)?;
+            }
+            Some(v) => bail!(
+                "library database has schema version {v}; this build supports {SCHEMA_VERSION}"
+            ),
+        }
         tx.execute(
-            "UPDATE files SET added_at = COALESCE(indexed_at, ?1)",
-            [now()],
-        )?;
-        tx.execute_batch(SCHEMA_ALBUMS)?;
-        tx.execute(
-            "INSERT INTO meta(key, value) VALUES ('schema_version', '2')
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [],
+            [SCHEMA_VERSION.to_string()],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Copies the database file to `library.db.v1.bak` next to it before an in-place upgrade.
+    /// Does nothing for in-memory databases or when that file already exists.
+    fn backup_v1(&self) -> Result<()> {
+        let Some(path) = self
+            .conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+        else {
+            return Ok(());
+        };
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".v1.bak");
+        let bak = path.with_file_name(name);
+        if bak.exists() {
+            return Ok(());
+        }
+        // Fold the write-ahead log into the main file so the copy is complete.
+        let _: rusqlite::Result<()> =
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        let tmp = bak.with_extension("bak.part");
+        std::fs::copy(&path, &tmp)
+            .and_then(|_| std::fs::rename(&tmp, &bak))
+            .with_context(|| format!("backing up the library database to {}", bak.display()))?;
         Ok(())
     }
 
@@ -509,16 +674,7 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT id, path, kind, size, mtime, status FROM files WHERE taken_at IS NULL ORDER BY id",
         )?;
-        let rows = st.query_map([], |r| {
-            Ok(FileRow {
-                id: r.get(0)?,
-                path: PathBuf::from(r.get::<_, String>(1)?),
-                kind: MediaKind::from_i64(r.get(2)?),
-                size: r.get::<_, i64>(3)? as u64,
-                mtime: r.get(4)?,
-                status: FileStatus::from_i64(r.get(5)?),
-            })
-        })?;
+        let rows = st.query_map([], file_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -527,10 +683,17 @@ impl Db {
         let tx = self.conn.transaction()?;
         {
             let mut upd = tx.prepare(
-                "UPDATE files SET taken_at = ?2, date_source = ?3, camera = ?4 WHERE id = ?1",
+                "UPDATE files SET taken_at = ?2, date_source = ?3, camera = ?4,
+                 duration = COALESCE(duration, ?5) WHERE id = ?1",
             )?;
             for (id, c) in batch {
-                upd.execute(params![id, c.taken_at, c.source.as_i64(), c.camera])?;
+                upd.execute(params![
+                    id,
+                    c.taken_at,
+                    c.source.as_i64(),
+                    c.camera,
+                    c.duration
+                ])?;
             }
         }
         tx.commit()?;
@@ -552,10 +715,15 @@ impl Db {
         })
     }
 
-    /// All files matching `filter`, indexed or not, in display order. Files whose capture
-    /// time is not known yet are placed by their modification time. One query and a sort in
-    /// memory: the sort key for such files depends on the machine's time zone.
+    /// All files matching `filter`, indexed or not, in display order. See
+    /// [`Self::timeline_rows`] and [`TimelineRows::into_sorted`]; callers holding a lock on the
+    /// database should split the two so the sort happens after releasing it.
     pub fn timeline(&self, filter: &TimelineFilter) -> Result<Vec<TimelineItem>> {
+        Ok(self.timeline_rows(filter)?.into_sorted(filter.order))
+    }
+
+    /// Raw timeline rows straight from SQLite (no conversion, no sorting).
+    pub fn timeline_rows(&self, filter: &TimelineFilter) -> Result<TimelineRows> {
         let mut sql = String::from(
             "SELECT id, path, kind, mtime, taken_at, date_source, duration, width, height,
                     favorite, camera, COALESCE(added_at, 0),
@@ -579,45 +747,26 @@ impl Db {
             args.push(a);
         }
         let mut st = self.conn.prepare(&sql)?;
-        let mut rows = st.query(rusqlite::params_from_iter(args))?;
-        let mut out: Vec<(i64, TimelineItem)> = Vec::new();
-        while let Some(r) = rows.next()? {
-            let mtime: i64 = r.get(3)?;
-            let taken: Option<i64> = r.get(4)?;
-            out.push((
-                r.get(11)?,
-                TimelineItem {
+        let rows = st
+            .query_map(rusqlite::params_from_iter(args), |r| {
+                Ok(RawTimelineRow {
                     file_id: r.get(0)?,
-                    item_id: r.get(12)?,
-                    path: PathBuf::from(r.get::<_, String>(1)?),
-                    kind: MediaKind::from_i64(r.get(2)?),
-                    mtime,
-                    taken_at: taken.unwrap_or_else(|| local_wall_clock(mtime)),
-                    date_source: DateSource::from_i64(r.get::<_, Option<i64>>(5)?.unwrap_or(0)),
+                    path: r.get(1)?,
+                    kind: r.get(2)?,
+                    mtime: r.get(3)?,
+                    taken_at: r.get(4)?,
+                    date_source: r.get(5)?,
                     duration: r.get(6)?,
                     width: r.get(7)?,
                     height: r.get(8)?,
-                    favorite: r.get::<_, i64>(9)? != 0,
+                    favorite: r.get(9)?,
                     camera: r.get(10)?,
-                },
-            ));
-        }
-        match filter.order {
-            TimelineOrder::TakenDesc => out.sort_by(|a, b| {
-                b.1.taken_at
-                    .cmp(&a.1.taken_at)
-                    .then(a.1.path.cmp(&b.1.path))
-            }),
-            TimelineOrder::TakenAsc => out.sort_by(|a, b| {
-                a.1.taken_at
-                    .cmp(&b.1.taken_at)
-                    .then(a.1.path.cmp(&b.1.path))
-            }),
-            TimelineOrder::AddedDesc => {
-                out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.path.cmp(&b.1.path)))
-            }
-        }
-        Ok(out.into_iter().map(|(_, i)| i).collect())
+                    added_at: r.get(11)?,
+                    item_id: r.get(12)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(TimelineRows(rows))
     }
 
     /// Files that need (re-)embedding with `model`: never indexed, changed, or indexed with
@@ -628,16 +777,7 @@ impl Db {
              WHERE status = 0 OR (status = 1 AND (model IS NULL OR model != ?1))
              ORDER BY kind, path",
         )?;
-        let rows = st.query_map([model], |r| {
-            Ok(FileRow {
-                id: r.get(0)?,
-                path: PathBuf::from(r.get::<_, String>(1)?),
-                kind: MediaKind::from_i64(r.get(2)?),
-                size: r.get::<_, i64>(3)? as u64,
-                mtime: r.get(4)?,
-                status: FileStatus::from_i64(r.get(5)?),
-            })
-        })?;
+        let rows = st.query_map([model], file_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1158,6 +1298,81 @@ mod tests {
     }
 
     #[test]
+    fn v1_database_without_a_version_row_is_still_migrated() {
+        // An old build was killed after creating its tables, before it recorded a version.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("lib.db");
+        Connection::open(&p)
+            .unwrap()
+            .execute_batch(&V1_SCHEMA.replace(
+                "INSERT INTO meta VALUES ('schema_version', '1'), ('library_id', 'abc'), ('items_epoch', '4');",
+                "",
+            ))
+            .unwrap();
+        let db = Db::open(&p).unwrap();
+        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("2"));
+        assert_eq!(db.stats("m").unwrap().images, 1, "existing rows are kept");
+        assert_eq!(db.pending_dates().unwrap().len(), 2);
+        db.conn
+            .execute("INSERT INTO albums(name, created_at) VALUES ('x', 1)", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_keeps_one_backup_of_the_old_database() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("lib.db");
+        Connection::open(&p)
+            .unwrap()
+            .execute_batch(V1_SCHEMA)
+            .unwrap();
+        let bak = d.path().join("lib.db.v1.bak");
+        drop(Db::open(&p).unwrap());
+        assert!(bak.exists());
+        // The backup is a complete version 1 database.
+        let old = Connection::open(&bak).unwrap();
+        let (v, files): (String, i64) = old
+            .query_row(
+                "SELECT (SELECT value FROM meta WHERE key = 'schema_version'),
+                        (SELECT COUNT(*) FROM files)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((v.as_str(), files), ("1", 2));
+        drop(old);
+        // An existing backup is never overwritten, and a fresh database gets none.
+        std::fs::write(&bak, b"keep me").unwrap();
+        Connection::open(&p)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(Db::open(&p).unwrap());
+        assert_eq!(std::fs::read(&bak).unwrap(), b"keep me");
+        let fresh = d.path().join("fresh.db");
+        drop(Db::open(&fresh).unwrap());
+        assert!(!d.path().join("fresh.db.v1.bak").exists());
+    }
+
+    #[test]
+    fn captures_store_a_video_duration_only_when_unknown() {
+        let mut db = Db::open_in_memory().unwrap();
+        let f = db.add_folder(Path::new("/lib")).unwrap();
+        db.sync_folder(f, &[sf("/lib/a.mp4", 1, 1)], &[]).unwrap();
+        let id = db.pending_dates().unwrap()[0].id;
+        let mut c = capture(100_000_000, DateSource::Video);
+        c.duration = Some(12.5);
+        db.set_captures(&[(id, c.clone())]).unwrap();
+        c.duration = Some(99.0);
+        db.set_captures(&[(id, c)]).unwrap();
+        let tl = db.timeline(&TimelineFilter::default()).unwrap();
+        assert_eq!(tl[0].duration, Some(12.5));
+    }
+
+    #[test]
     fn newer_schema_is_refused() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("lib.db");
@@ -1178,6 +1393,7 @@ mod tests {
             taken_at: t,
             source,
             camera: Some("cam".into()),
+            duration: None,
         }
     }
 

@@ -16,7 +16,7 @@ use crate::store::db::{Folder, Stats};
 use crate::thumbs::ThumbKey;
 use egui::{Align, Color32, Layout, RichText, Sense, Vec2};
 use frame_stats::FrameStats;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use timeline::{TimelineState, View};
@@ -163,8 +163,8 @@ impl App {
             let lib = Arc::clone(&app.lib);
             std::thread::spawn(move || lib.embed_text("warm up").ok());
         }
-        // Pick up changes made while the app was closed.
-        if app.snapshot.model_installed && !app.snapshot.folders.is_empty() {
+        // Pick up changes made while the app was closed (and read dates even without a model).
+        if !app.snapshot.folders.is_empty() {
             app.start_indexing();
         }
         app
@@ -293,15 +293,6 @@ impl App {
         if (self.was_busy && !busy) || jobs != self.jobs_seen {
             self.jobs_seen = jobs;
             self.refresh_snapshot(true);
-            if !busy
-                && self.lib.model_installed()
-                && !self.snapshot.folders.is_empty()
-                && self.status.last_run.is_none()
-                && self.status.last_error.is_none()
-            {
-                // A model download or model switch just finished: index right away.
-                self.start_indexing();
-            }
             self.rerun();
         }
         self.was_busy = busy;
@@ -376,7 +367,8 @@ impl App {
         if self.snapshot.folders.is_empty() {
             ui.label(RichText::new("No folders yet.").weak());
         }
-        for f in &self.snapshot.folders {
+        let labels = folder_labels(self.snapshot.folders.iter().map(|f| f.path.as_path()));
+        for (f, name) in self.snapshot.folders.iter().zip(labels) {
             ui.horizontal(|ui| {
                 if ui
                     .small_button("×")
@@ -385,11 +377,6 @@ impl App {
                 {
                     remove = Some(f.id);
                 }
-                let name = f
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| f.path.display().to_string());
                 if ui
                     .selectable_label(self.tl.view == View::Folder(f.id), name)
                     .on_hover_text(f.path.display().to_string())
@@ -434,7 +421,7 @@ impl App {
         let busy = self.lib.is_busy();
         if ui
             .add_enabled(
-                !busy && self.snapshot.model_installed && !self.snapshot.folders.is_empty(),
+                !busy && !self.snapshot.folders.is_empty(),
                 egui::Button::new("Rescan"),
             )
             .on_hover_text("Look for new, changed and deleted files")
@@ -1036,7 +1023,7 @@ impl eframe::App for App {
 
 /// Direction of a keyboard move through the results grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Nav {
+pub(crate) enum Nav {
     Left,
     Right,
     Up,
@@ -1099,8 +1086,7 @@ fn scroll_offset_for_row(
 fn apply_nav_keys(
     ctx: &egui::Context,
     selected: Option<usize>,
-    len: usize,
-    cols: usize,
+    step: impl Fn(Option<usize>, Nav) -> Option<usize>,
 ) -> (Option<usize>, bool) {
     let (counts, enter) = ctx.input_mut(|i| {
         let mut counts = [
@@ -1124,7 +1110,7 @@ fn apply_nav_keys(
     let mut handled = false;
     for (n, c) in counts {
         for _ in 0..c {
-            next = step(next, len, cols, n);
+            next = step(next, n);
             handled = true;
         }
     }
@@ -1149,7 +1135,9 @@ impl App {
         {
             return;
         }
-        let (next, enter) = apply_nav_keys(ctx, self.selected, self.results.len(), self.grid_cols);
+        let (next, enter) = apply_nav_keys(ctx, self.selected, |sel, n| {
+            step(sel, self.results.len(), self.grid_cols, n)
+        });
         if next != self.selected {
             self.selected = next;
             self.selected_t = next.and_then(|i| self.results[i].t_start);
@@ -1244,6 +1232,51 @@ impl Drop for App {
     }
 }
 
+/// Short sidebar names for library folders: the last path component, with as many parent
+/// components added as needed to tell folders with the same name apart ("images/dated" and
+/// "videos/dated").
+fn folder_labels<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
+    let parts: Vec<(&Path, Vec<String>)> = paths
+        .into_iter()
+        .map(|p| {
+            let names = p
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect();
+            (p, names)
+        })
+        .collect();
+    let label = |names: &[String], depth: usize, p: &Path| {
+        if names.is_empty() {
+            p.display().to_string()
+        } else {
+            names[names.len().saturating_sub(depth)..].join("/")
+        }
+    };
+    let mut depth = vec![1usize; parts.len()];
+    loop {
+        let labels: Vec<String> = parts
+            .iter()
+            .zip(&depth)
+            .map(|((p, n), &d)| label(n, d, p))
+            .collect();
+        let mut changed = false;
+        for i in 0..parts.len() {
+            let clash = (0..parts.len()).any(|j| j != i && labels[j] == labels[i]);
+            if clash && depth[i] < parts[i].1.len() {
+                depth[i] += 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            return labels;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -1276,6 +1309,24 @@ mod nav_tests {
             scroll_offset_for_row(50, stride, tile, view, 50.0 * stride - 100.0),
             None
         );
+    }
+
+    #[test]
+    fn folder_names_get_parents_only_when_needed() {
+        use std::path::Path;
+        let names = |v: &[&str]| super::folder_labels(v.iter().map(Path::new));
+        assert_eq!(names(&["/a/photos", "/b/trips"]), ["photos", "trips"]);
+        assert_eq!(
+            names(&["/lib/images/dated", "/lib/videos/dated", "/lib/other"]),
+            ["images/dated", "videos/dated", "other"]
+        );
+        // Needs two parents to tell apart; the unrelated folder stays short.
+        assert_eq!(
+            names(&["/x/a/b/pics", "/x/c/b/pics", "/y/misc"]),
+            ["a/b/pics", "c/b/pics", "misc"]
+        );
+        assert_eq!(names(&["/"]), ["/"]);
+        assert_eq!(names(&[]), Vec::<String>::new());
     }
 
     #[test]

@@ -15,6 +15,14 @@ All notable changes to this project are documented here. The format is based on
 - Browsing works before the search model is downloaded; the one-time download prompt is now a
   banner above the album instead of a full-screen card.
 
+### Changed
+
+- The library database is upgraded in place the first time this version starts. A backup of the
+  old database is kept as `library.db.v1.bak` next to it; older versions of Recollect cannot
+  open the upgraded database.
+- A model is no longer needed to browse: folders are scanned and dated on start, with or
+  without one. Once the model download finishes, indexing starts automatically.
+
 ## [0.1.0] - 2026-11-14
 
 ### Added
