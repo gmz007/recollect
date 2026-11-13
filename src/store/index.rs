@@ -127,8 +127,7 @@ impl VectorIndex {
 
     /// Top `k` items by approximate cosine similarity to unit vector `q`, best first.
     pub fn search(&self, q: &[f32], k: usize, kind: Option<MediaKind>) -> Vec<Candidate> {
-        assert_eq!(q.len(), self.dim, "query dimension mismatch");
-        if k == 0 || self.is_empty() {
+        if k == 0 || self.is_empty() || q.len() != self.dim {
             return Vec::new();
         }
         // Quantize the query with its own scale for full i8 precision.

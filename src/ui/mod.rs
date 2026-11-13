@@ -50,6 +50,19 @@ struct Snapshot {
     taken: Option<Instant>,
 }
 
+impl Snapshot {
+    /// Database queries: run off the UI thread (the database may be busy for a while).
+    fn fetch(lib: &Library) -> Self {
+        Self {
+            stats: lib.stats().unwrap_or_default(),
+            folders: lib.folders().unwrap_or_default(),
+            errors: lib.errors(50).unwrap_or_default(),
+            model_installed: lib.model_installed(),
+            taken: Some(Instant::now()),
+        }
+    }
+}
+
 pub struct App {
     lib: Arc<Library>,
     search: SearchWorker,
@@ -70,6 +83,9 @@ pub struct App {
     folder_input: String,
     notice: Option<(String, Instant)>,
     snapshot: Snapshot,
+    snapshot_rx: Option<crossbeam_channel::Receiver<Snapshot>>,
+    snapshot_again: bool,
+    ctx: egui::Context,
     status: Status,
     was_busy: bool,
     consent_dismissed: bool,
@@ -109,13 +125,16 @@ impl App {
             folder_input: String::new(),
             notice: None,
             snapshot: Snapshot::default(),
+            snapshot_rx: None,
+            snapshot_again: false,
+            ctx: ctx.clone(),
             status: Status::default(),
             was_busy: false,
             consent_dismissed: false,
             settings_open: false,
             settings_draft: settings,
         };
-        app.refresh_snapshot(true);
+        app.snapshot = Snapshot::fetch(&app.lib);
         if app.snapshot.model_installed {
             // Load the text model in the background so the first search is fast.
             let lib = Arc::clone(&app.lib);
@@ -132,7 +151,12 @@ impl App {
         self.notice = Some((msg.into(), Instant::now()));
     }
 
+    /// Requests fresh library facts from a background thread (never blocks the UI).
     fn refresh_snapshot(&mut self, force: bool) {
+        if self.snapshot_rx.is_some() {
+            self.snapshot_again |= force;
+            return;
+        }
         if !force
             && self
                 .snapshot
@@ -141,11 +165,26 @@ impl App {
         {
             return;
         }
-        self.snapshot.stats = self.lib.stats().unwrap_or_default();
-        self.snapshot.folders = self.lib.folders().unwrap_or_default();
-        self.snapshot.errors = self.lib.errors(50).unwrap_or_default();
-        self.snapshot.model_installed = self.lib.model_installed();
-        self.snapshot.taken = Some(Instant::now());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let lib = Arc::clone(&self.lib);
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Snapshot::fetch(&lib));
+            ctx.request_repaint();
+        });
+        self.snapshot_rx = Some(rx);
+    }
+
+    fn poll_snapshot(&mut self) {
+        if let Some(rx) = &self.snapshot_rx
+            && let Ok(s) = rx.try_recv()
+        {
+            self.snapshot = s;
+            self.snapshot_rx = None;
+            if std::mem::take(&mut self.snapshot_again) {
+                self.refresh_snapshot(true);
+            }
+        }
     }
 
     fn start_indexing(&mut self) {
@@ -173,6 +212,7 @@ impl App {
     /// Per-frame bookkeeping: results, status transitions, debounce, live refresh.
     fn update_state(&mut self, ctx: &egui::Context) {
         self.thumbs.begin_frame(ctx);
+        self.poll_snapshot();
         self.status = self.lib.status();
         if let Some(r) = self.search.poll()
             && Some(r.id) == self.awaiting
@@ -228,12 +268,12 @@ impl App {
         }
         if self.was_busy && !busy {
             self.refresh_snapshot(true);
-            if self.snapshot.model_installed
+            if self.lib.model_installed()
                 && !self.snapshot.folders.is_empty()
                 && self.status.last_run.is_none()
                 && self.status.last_error.is_none()
             {
-                // A model download just finished: index right away.
+                // A model download or model switch just finished: index right away.
                 self.start_indexing();
             }
             self.rerun();
@@ -315,15 +355,9 @@ impl App {
             });
         }
         if let Some(id) = remove {
-            if self.lib.is_busy() {
-                self.lib.cancel();
-                self.lib.wait();
-            }
-            if let Err(e) = self.lib.remove_folder(id) {
-                self.notify(format!("{e:#}"));
-            }
-            self.refresh_snapshot(true);
-            self.rerun();
+            // Cancels any running job first; runs in the background.
+            self.lib.start_remove_folder(id);
+            self.snapshot.folders.retain(|f| f.id != id);
         }
         ui.add_space(8.0);
         if ui.button("Add folder…").clicked()
@@ -400,7 +434,7 @@ impl App {
         match self.lib.add_folder(&p) {
             Ok(()) => {
                 self.refresh_snapshot(true);
-                if self.snapshot.model_installed && !self.lib.is_busy() {
+                if self.lib.model_installed() && !self.lib.is_busy() {
                     self.start_indexing();
                 } else if self.lib.is_busy() {
                     self.notify("Folder added. It will be indexed on the next rescan.");
@@ -448,6 +482,14 @@ impl App {
                     ui.spinner();
                     ui.label("Loading model…");
                 }
+                Activity::Removing => {
+                    ui.spinner();
+                    ui.label("Removing folder from the library…");
+                }
+                Activity::SwitchingModel => {
+                    ui.spinner();
+                    ui.label("Switching model…");
+                }
                 Activity::Indexing(p) => {
                     let dev = p.device.map(|d| d.to_string()).unwrap_or_default();
                     ui.add(
@@ -464,7 +506,11 @@ impl App {
                     ui.label(format!("{:.0} items/s on {dev} · {name}", p.rate));
                 }
             }
-            if self.lib.is_busy() {
+            let pausable = matches!(
+                self.status.activity,
+                Activity::Scanning { .. } | Activity::LoadingModel | Activity::Indexing(_)
+            );
+            if pausable && self.lib.is_busy() {
                 let paused = self.status.paused;
                 if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
                     self.lib.pause(!paused);
@@ -844,20 +890,29 @@ impl App {
                 });
             });
         if apply {
-            if let Err(e) = self.lib.set_settings(self.settings_draft.clone()) {
+            let switching = self
+                .settings_draft
+                .model
+                .as_deref()
+                .is_some_and(|m| m != self.lib.model().id);
+            if switching && self.lib.is_busy() {
+                self.notify(
+                    "Wait for the current job to finish (or cancel it) before switching models.",
+                );
+            } else if let Err(e) = self.lib.apply_settings(self.settings_draft.clone()) {
                 self.notify(format!("{e:#}"));
             } else {
                 open = false;
-                self.consent_dismissed = false;
-                self.results.clear();
-                self.selected = None;
-                self.refresh_snapshot(true);
-                if self.snapshot.model_installed
-                    && !self.lib.is_busy()
-                    && !self.snapshot.folders.is_empty()
-                {
-                    self.start_indexing();
+                if switching {
+                    // Old results and queries belong to the previous model.
+                    self.consent_dismissed = false;
+                    self.results.clear();
+                    self.current = None;
+                    self.query.clear();
+                    self.result_label.clear();
+                    self.selected = None;
                 }
+                self.refresh_snapshot(true);
             }
         }
         self.settings_open = open;
@@ -930,6 +985,15 @@ impl App {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.selected = None;
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // Closing the window stops background work cleanly (the database stays consistent
+        // either way, but this avoids killing a write mid-transaction).
+        self.lib.cancel();
+        self.lib.wait();
     }
 }
 

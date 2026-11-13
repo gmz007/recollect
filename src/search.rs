@@ -60,7 +60,13 @@ pub(crate) fn by_vector(
 ) -> Result<Vec<SearchHit>> {
     // Over-fetch: videos contribute many items per file, and re-scoring may reorder.
     let k = (opts.limit * 4 + 100).min(5000);
-    let cands = lib.index.read().search(q, k, opts.kind);
+    let cands = {
+        let index = lib.index.read();
+        if q.len() != index.dim() {
+            anyhow::bail!("the query was made with a different model; please search again");
+        }
+        index.search(q, k, opts.kind)
+    };
     if cands.is_empty() {
         return Ok(Vec::new());
     }
@@ -78,21 +84,17 @@ pub(crate) fn by_vector(
         .collect();
     scored.sort_by(|a, b| b.2.total_cmp(&a.2));
     let grouped = group_by_file(&scored, opts.limit);
-    let best_ids: Vec<i64> = grouped.iter().map(|g| g.0).collect();
-    let infos: HashMap<i64, ItemInfo> = db
-        .item_info(&best_ids)?
-        .into_iter()
-        .map(|i| (i.item_id, i))
-        .collect();
-    let moment_ids: Vec<i64> = grouped
+    let all_ids: Vec<i64> = grouped
         .iter()
-        .flat_map(|g| g.2.iter().map(|m| m.0))
+        .flat_map(|g| std::iter::once(g.0).chain(g.2.iter().map(|m| m.0)))
         .collect();
-    let moment_infos: HashMap<i64, ItemInfo> = db
-        .item_info(&moment_ids)?
+    let infos: HashMap<i64, ItemInfo> = db
+        .item_info(&all_ids)?
         .into_iter()
         .map(|i| (i.item_id, i))
         .collect();
+    drop(db);
+    let moment_infos = &infos;
     Ok(grouped
         .into_iter()
         .filter_map(|(id, score, moments)| {

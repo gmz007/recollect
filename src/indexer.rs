@@ -80,14 +80,18 @@ fn sync_folders(lib: &Library, summary: &mut RunSummary) -> Result<()> {
         for (p, e) in &res.problems {
             tracing::warn!("{}: {e}", p.display());
         }
-        let stats = lib.db.lock().sync_folder(f.id, &res.files)?;
+        let protected: Vec<_> = res.problems.iter().map(|p| p.0.clone()).collect();
+        let mut db = lib.db.lock();
+        let stats = db.sync_folder(f.id, &res.files, &protected)?;
         summary.added += stats.added;
         summary.changed += stats.changed;
         summary.removed += stats.removed.len();
         let stale: HashSet<i64> = stats.removed.into_iter().chain(stats.changed_ids).collect();
         if !stale.is_empty() {
+            // Still holding the db lock: lock order is db, then index.
             lib.remove_files_from_index(&stale);
         }
+        drop(db);
     }
     Ok(())
 }
@@ -119,6 +123,13 @@ impl Progress {
         self.items += items;
         self.p.current = Some(f.path.clone());
         if self.last_update.elapsed().as_millis() >= 100 || self.p.done == self.p.total {
+            self.publish(lib);
+        }
+    }
+
+    pub fn items_done(&mut self, lib: &Library, items: usize) {
+        self.items += items;
+        if self.last_update.elapsed().as_millis() >= 100 {
             self.publish(lib);
         }
     }
@@ -174,12 +185,16 @@ fn index_images(
         .build()?;
     let batch = enc.batch_size();
     let (tx, rx) = crossbeam_channel::bounded::<Prepared>(batch * 2);
+    // Set when embedding or writing fails, so decoders stop instead of finishing the library.
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    let abort = &abort;
     std::thread::scope(|s| -> Result<()> {
         s.spawn(move || {
             pool.install(|| {
                 use rayon::prelude::*;
                 files.par_iter().for_each_with(tx, |tx, f| {
-                    if lib.control.checkpoint() {
+                    if abort.load(std::sync::atomic::Ordering::Relaxed) || lib.control.checkpoint()
+                    {
                         return;
                     }
                     let _ = tx.send((f.clone(), prepare_image(&f.path, spec)));
@@ -205,6 +220,9 @@ fn index_images(
             }
             if out.len() >= WRITE_BATCH && result.is_ok() {
                 result = write_items(lib, &mut out);
+            }
+            if result.is_err() {
+                abort.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
         if result.is_ok() && !lib.control.is_cancelled() {
@@ -259,7 +277,10 @@ pub(crate) fn write_items(
         .drain(..)
         .map(|(f, m, items)| (f.id, m, items))
         .collect();
-    let ids = lib.db.lock().put_items(spec.id, &batch)?;
+    // Hold the db lock while updating the index so a concurrent folder removal can't slip in
+    // between (lock order: db, then index).
+    let mut db = lib.db.lock();
+    let ids = db.put_items(spec.id, &batch)?;
     let mut index = lib.index.write();
     for (((file_id, _, items), item_ids), kind) in batch.iter().zip(&ids).zip(kinds) {
         for (it, id) in items.iter().zip(item_ids) {

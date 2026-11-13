@@ -183,6 +183,8 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Another process (CLI next to the GUI) may hold the write lock briefly.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
         let db = Self { conn };
         match db.meta("schema_version")? {
@@ -270,7 +272,15 @@ impl Db {
 
     /// Reconciles the files table with a fresh scan of one folder: inserts new files, marks
     /// changed ones (size or mtime differ) pending, deletes vanished ones.
-    pub fn sync_folder(&mut self, folder_id: i64, scanned: &[ScannedFile]) -> Result<SyncStats> {
+    ///
+    /// Files under `protected` paths (directories that could not be read during the scan) are
+    /// kept even if they were not seen, so a temporary I/O error doesn't drop them.
+    pub fn sync_folder(
+        &mut self,
+        folder_id: i64,
+        scanned: &[ScannedFile],
+        protected: &[PathBuf],
+    ) -> Result<SyncStats> {
         let tx = self.conn.transaction()?;
         let mut existing: HashMap<String, (i64, u64, i64)> = HashMap::new();
         {
@@ -322,7 +332,7 @@ impl Db {
             }
             let mut del = tx.prepare("DELETE FROM files WHERE id = ?1")?;
             for (p, &(id, _, _)) in &existing {
-                if !seen.contains(p) {
+                if !seen.contains(p) && !protected.iter().any(|d| Path::new(p).starts_with(d)) {
                     del.execute([id])?;
                     stats.removed.push(id);
                 }
@@ -373,6 +383,19 @@ impl Db {
             )?;
             let ts = now();
             for (file_id, meta, items) in batch {
+                let changed = upd.execute(params![
+                    file_id,
+                    model,
+                    meta.width,
+                    meta.height,
+                    meta.duration,
+                    ts
+                ])?;
+                if changed == 0 {
+                    // The file was removed meanwhile (e.g. its folder was removed).
+                    all.push(Vec::new());
+                    continue;
+                }
                 del.execute([file_id])?;
                 let mut ids = Vec::with_capacity(items.len());
                 for it in items {
@@ -383,19 +406,6 @@ impl Db {
                         emb_to_blob(&it.embedding)
                     ])?;
                     ids.push(tx.last_insert_rowid());
-                }
-                let changed = upd.execute(params![
-                    file_id,
-                    model,
-                    meta.width,
-                    meta.height,
-                    meta.duration,
-                    ts
-                ])?;
-                if changed == 0 {
-                    // The file was removed meanwhile (e.g. folder removed during indexing).
-                    tx.execute("DELETE FROM items WHERE file_id = ?1", [file_id])?;
-                    ids.clear();
                 }
                 all.push(ids);
             }
@@ -433,72 +443,101 @@ impl Db {
         Ok(())
     }
 
-    pub fn embeddings(&self, item_ids: &[i64]) -> Result<HashMap<i64, Vec<f32>>> {
-        let mut st = self
-            .conn
-            .prepare_cached("SELECT embedding FROM items WHERE id = ?1")?;
-        let mut out = HashMap::with_capacity(item_ids.len());
-        for &id in item_ids {
-            if let Some(b) = st.query_row([id], |r| r.get::<_, Vec<u8>>(0)).optional()? {
-                out.insert(id, blob_to_emb(&b));
+    /// Runs `sql` (which must contain `IN (#)`) for chunks of ids and collects rows.
+    fn by_ids<T>(
+        &self,
+        sql: &str,
+        ids: &[i64],
+        mut row: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut st = self.conn.prepare_cached(&sql.replace('#', &marks))?;
+            let rows = st.query_map(rusqlite::params_from_iter(chunk.iter()), &mut row)?;
+            for r in rows {
+                out.push(r?);
             }
         }
         Ok(out)
     }
 
+    pub fn embeddings(&self, item_ids: &[i64]) -> Result<HashMap<i64, Vec<f32>>> {
+        let rows = self.by_ids(
+            "SELECT id, embedding FROM items WHERE id IN (#)",
+            item_ids,
+            |r| Ok((r.get::<_, i64>(0)?, blob_to_emb(r.get_ref(1)?.as_blob()?))),
+        )?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Display information for items, in the order of `item_ids` (missing items are skipped).
     pub fn item_info(&self, item_ids: &[i64]) -> Result<Vec<ItemInfo>> {
-        let mut st = self.conn.prepare_cached(
+        let rows = self.by_ids(
             "SELECT items.id, items.file_id, files.path, files.kind, files.mtime, items.t_start, items.t_end,
                     files.width, files.height, files.duration
-             FROM items JOIN files ON files.id = items.file_id WHERE items.id = ?1",
-        )?;
-        let mut out = Vec::with_capacity(item_ids.len());
-        for &id in item_ids {
-            let row = st
-                .query_row([id], |r| {
-                    Ok(ItemInfo {
-                        item_id: r.get(0)?,
-                        file_id: r.get(1)?,
-                        path: PathBuf::from(r.get::<_, String>(2)?),
-                        kind: MediaKind::from_i64(r.get(3)?),
-                        mtime: r.get(4)?,
-                        t_start: r.get(5)?,
-                        t_end: r.get(6)?,
-                        width: r.get(7)?,
-                        height: r.get(8)?,
-                        duration: r.get(9)?,
-                    })
+             FROM items JOIN files ON files.id = items.file_id WHERE items.id IN (#)",
+            item_ids,
+            |r| {
+                Ok(ItemInfo {
+                    item_id: r.get(0)?,
+                    file_id: r.get(1)?,
+                    path: PathBuf::from(r.get::<_, String>(2)?),
+                    kind: MediaKind::from_i64(r.get(3)?),
+                    mtime: r.get(4)?,
+                    t_start: r.get(5)?,
+                    t_end: r.get(6)?,
+                    width: r.get(7)?,
+                    height: r.get(8)?,
+                    duration: r.get(9)?,
                 })
-                .optional()?;
-            out.extend(row);
-        }
-        Ok(out)
+            },
+        )?;
+        let mut by_id: HashMap<i64, ItemInfo> = rows.into_iter().map(|i| (i.item_id, i)).collect();
+        Ok(item_ids.iter().filter_map(|id| by_id.remove(id)).collect())
     }
 
-    /// Item ids of an indexed file (e.g. to search for similar media).
-    pub fn file_item_ids(&self, file_id: i64) -> Result<Vec<i64>> {
-        let mut st = self
+    /// Library counts; `indexed`/`pending` are relative to `model`.
+    pub fn stats(&self, model: &str) -> Result<Stats> {
+        let folders: i64 = self
             .conn
-            .prepare("SELECT id FROM items WHERE file_id = ?1 ORDER BY t_start")?;
-        let ids = st
-            .query_map([file_id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(ids)
+            .query_row("SELECT COUNT(*) FROM folders", [], |r| r.get(0))?;
+        let (images, videos, indexed, pending, errors): (i64, i64, i64, i64, i64) =
+            self.conn.query_row(
+                "SELECT COALESCE(SUM(kind = 0), 0), COALESCE(SUM(kind = 1), 0),
+                    COALESCE(SUM(status = 1 AND model = ?1), 0),
+                    COALESCE(SUM(status = 0 OR (status = 1 AND (model IS NULL OR model != ?1))), 0),
+                    COALESCE(SUM(status = 2), 0)
+             FROM files",
+                [model],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+        let items: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items JOIN files ON files.id = items.file_id WHERE files.model = ?1",
+            [model],
+            |r| r.get(0),
+        )?;
+        Ok(Stats {
+            folders: folders as usize,
+            images: images as usize,
+            videos: videos as usize,
+            indexed: indexed as usize,
+            pending: pending as usize,
+            errors: errors as usize,
+            items: items as usize,
+        })
     }
 
-    pub fn stats(&self) -> Result<Stats> {
-        let q = |sql: &str| -> Result<usize> {
-            Ok(self.conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as usize)
-        };
-        Ok(Stats {
-            folders: q("SELECT COUNT(*) FROM folders")?,
-            images: q("SELECT COUNT(*) FROM files WHERE kind = 0")?,
-            videos: q("SELECT COUNT(*) FROM files WHERE kind = 1")?,
-            indexed: q("SELECT COUNT(*) FROM files WHERE status = 1")?,
-            pending: q("SELECT COUNT(*) FROM files WHERE status = 0")?,
-            errors: q("SELECT COUNT(*) FROM files WHERE status = 2")?,
-            items: q("SELECT COUNT(*) FROM items")?,
-        })
+    /// The file an item belongs to and the model that file was indexed with.
+    pub fn item_owner(&self, item_id: i64) -> Result<Option<(i64, Option<String>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT files.id, files.model FROM items JOIN files ON files.id = items.file_id WHERE items.id = ?1",
+                [item_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// Most recent indexing errors: (path, message).
@@ -540,7 +579,7 @@ mod tests {
         let a = db.add_folder(Path::new("/m/photos/2020")).unwrap();
         assert_eq!(db.add_folder(Path::new("/m/photos/2020")).unwrap(), a);
         assert!(db.add_folder(Path::new("/m/photos/2020/x")).is_err());
-        db.sync_folder(a, &[sf("/m/photos/2020/a.jpg", 1, 1)])
+        db.sync_folder(a, &[sf("/m/photos/2020/a.jpg", 1, 1)], &[])
             .unwrap();
         // Adding a parent absorbs the child folder and its files.
         let p = db.add_folder(Path::new("/m/photos")).unwrap();
@@ -552,7 +591,7 @@ mod tests {
                 path: PathBuf::from("/m/photos")
             }]
         );
-        assert_eq!(db.stats().unwrap().images, 1);
+        assert_eq!(db.stats("m").unwrap().images, 1);
         // Sibling with common string prefix is not "inside".
         assert!(db.add_folder(Path::new("/m/photos2")).is_ok());
     }
@@ -562,7 +601,7 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         let f = db.add_folder(Path::new("/lib")).unwrap();
         let s = db
-            .sync_folder(f, &[sf("/lib/a.jpg", 1, 1), sf("/lib/b.mp4", 2, 2)])
+            .sync_folder(f, &[sf("/lib/a.jpg", 1, 1), sf("/lib/b.mp4", 2, 2)], &[])
             .unwrap();
         assert_eq!(
             (s.added, s.changed, s.unchanged, s.removed.len()),
@@ -579,22 +618,40 @@ mod tests {
         // Another model needs everything again.
         assert_eq!(db.pending("other").unwrap().len(), 2);
 
-        let s = db.sync_folder(f, &[sf("/lib/a.jpg", 1, 9)]).unwrap();
+        let s = db.sync_folder(f, &[sf("/lib/a.jpg", 1, 9)], &[]).unwrap();
         assert_eq!((s.added, s.changed, s.unchanged), (0, 1, 0));
         assert_eq!(s.removed, vec![pend[1].id]);
         assert_eq!(db.pending("m").unwrap().len(), 1);
         assert_eq!(
-            db.stats().unwrap().items,
+            db.stats("m").unwrap().items,
             0,
             "stale items of changed files are dropped"
         );
     }
 
     #[test]
+    fn unreadable_subfolders_are_not_emptied() {
+        let mut db = Db::open_in_memory().unwrap();
+        let f = db.add_folder(Path::new("/lib")).unwrap();
+        db.sync_folder(
+            f,
+            &[sf("/lib/a.jpg", 1, 1), sf("/lib/sub/b.jpg", 1, 1)],
+            &[],
+        )
+        .unwrap();
+        let s = db
+            .sync_folder(f, &[sf("/lib/a.jpg", 1, 1)], &[PathBuf::from("/lib/sub")])
+            .unwrap();
+        assert!(s.removed.is_empty());
+        let s = db.sync_folder(f, &[sf("/lib/a.jpg", 1, 1)], &[]).unwrap();
+        assert_eq!(s.removed.len(), 1);
+    }
+
+    #[test]
     fn items_round_trip_and_errors() {
         let mut db = Db::open_in_memory().unwrap();
         let f = db.add_folder(Path::new("/lib")).unwrap();
-        db.sync_folder(f, &[sf("/lib/a.jpg", 1, 1), sf("/lib/v.mp4", 1, 1)])
+        db.sync_folder(f, &[sf("/lib/a.jpg", 1, 1), sf("/lib/v.mp4", 1, 1)], &[])
             .unwrap();
         let p = db.pending("m").unwrap();
         let v = NewItem {
@@ -630,26 +687,35 @@ mod tests {
             db.errors(10).unwrap(),
             vec![(PathBuf::from("/lib/a.jpg"), "boom".to_string())]
         );
-        let st = db.stats().unwrap();
+        let st = db.stats("m").unwrap();
         assert_eq!((st.errors, st.indexed, st.items), (1, 1, 1));
         let removed = db.remove_folder(f).unwrap();
         assert_eq!(removed.len(), 2);
-        assert_eq!(db.stats().unwrap(), Stats::default());
+        assert_eq!(db.stats("m").unwrap(), Stats::default());
     }
 
     #[test]
     fn put_items_for_deleted_file_is_dropped() {
         let mut db = Db::open_in_memory().unwrap();
         let f = db.add_folder(Path::new("/lib")).unwrap();
-        db.sync_folder(f, &[sf("/lib/a.jpg", 1, 1)]).unwrap();
-        let id = db.pending("m").unwrap()[0].id;
+        let g = db.add_folder(Path::new("/other")).unwrap();
+        db.sync_folder(f, &[sf("/lib/a.jpg", 1, 1)], &[]).unwrap();
+        db.sync_folder(g, &[sf("/other/b.jpg", 1, 1)], &[]).unwrap();
+        let p = db.pending("m").unwrap();
         db.remove_folder(f).unwrap();
-        let ids = db.put_items("m", &[(id, FileMeta::default(), vec![item(0.1)])]);
-        // Foreign key prevents inserting items for a missing file; either way nothing is stored.
-        if let Ok(ids) = ids {
-            assert!(ids[0].is_empty());
-        }
-        assert_eq!(db.stats().unwrap().items, 0);
+        // A batch mixing a removed file with a live one: the live one is stored, the other skipped.
+        let ids = db
+            .put_items(
+                "m",
+                &[
+                    (p[0].id, FileMeta::default(), vec![item(0.1)]),
+                    (p[1].id, FileMeta::default(), vec![item(0.2)]),
+                ],
+            )
+            .unwrap();
+        assert!(ids[0].is_empty());
+        assert_eq!(ids[1].len(), 1);
+        assert_eq!(db.stats("m").unwrap().items, 1);
     }
 
     #[test]

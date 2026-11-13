@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// Directory where a model's files live.
 pub fn model_dir(models_root: &Path, spec: &ModelSpec) -> PathBuf {
@@ -65,7 +66,15 @@ fn fetch_file(
     progress: &mut dyn FnMut(u64),
 ) -> Result<()> {
     let part = dest.with_extension("part");
-    let resp = ureq::get(url)
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        // Generous total budget for ~400 MB on a slow line; cancel works between reads.
+        .timeout_recv_body(Some(Duration::from_secs(4 * 3600)))
+        .build()
+        .into();
+    let resp = agent
+        .get(url)
         .header(
             "User-Agent",
             concat!("recollect/", env!("CARGO_PKG_VERSION")),
@@ -90,6 +99,11 @@ fn fetch_file(
         hasher.update(&buf[..k]);
         out.write_all(&buf[..k])?;
         n += k as u64;
+        if n > f.size {
+            drop(out);
+            let _ = std::fs::remove_file(&part);
+            bail!("{}: server sent more data than expected", f.remote);
+        }
         progress(n);
     }
     out.sync_all()?;

@@ -12,6 +12,8 @@ use std::path::Path;
 
 /// Refuse to decode absurdly large images (decompression bombs), in pixels.
 const MAX_PIXELS: u64 = 250_000_000;
+/// Still images larger than this are not decoded (several decode threads run at once).
+const MAX_FILE_BYTES: u64 = 512 << 20;
 
 /// A decoded image: packed RGB8.
 #[derive(Debug, Clone)]
@@ -33,6 +35,12 @@ pub struct Decoded {
 /// Decodes `path` so that its shorter side is at least `min_side` pixels where the source
 /// allows it (smaller sources are returned at full size).
 pub fn decode(path: &Path, min_side: u32) -> Result<Decoded> {
+    let len = std::fs::metadata(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .len();
+    if len > MAX_FILE_BYTES {
+        bail!("file too large to index ({} MB)", len >> 20);
+    }
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     decode_bytes(&bytes, min_side)
 }

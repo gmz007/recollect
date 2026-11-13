@@ -31,6 +31,8 @@ pub enum Activity {
     },
     LoadingModel,
     Indexing(IndexProgress),
+    Removing,
+    SwitchingModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -208,7 +210,7 @@ impl Library {
     }
 
     pub fn stats(&self) -> Result<Stats> {
-        self.db.lock().stats()
+        self.db.lock().stats(self.model().id)
     }
 
     pub fn errors(&self, limit: usize) -> Result<Vec<(PathBuf, String)>> {
@@ -237,39 +239,79 @@ impl Library {
     }
 
     /// Removes a folder and its index entries. Media files are never touched.
+    /// Blocks while the database is busy; GUI code should use [`Self::start_remove_folder`].
     pub fn remove_folder(&self, folder_id: i64) -> Result<()> {
-        let removed = self.db.lock().remove_folder(folder_id)?;
-        self.index
-            .write()
-            .remove_files(&removed.into_iter().collect());
+        {
+            // Lock order everywhere: db, then index.
+            let mut db = self.db.lock();
+            let removed = db.remove_folder(folder_id)?;
+            self.index
+                .write()
+                .remove_files(&removed.into_iter().collect());
+        }
         self.notify();
         Ok(())
+    }
+
+    /// Cancels any running job, then removes the folder as a background job.
+    pub fn start_remove_folder(self: &Arc<Self>, folder_id: i64) {
+        let lib = Arc::clone(self);
+        std::thread::spawn(move || {
+            lib.cancel();
+            lib.wait();
+            let job = Arc::clone(&lib);
+            let res = lib.spawn(move || {
+                job.update_status(|s| s.activity = Activity::Removing);
+                let r = job.remove_folder(folder_id);
+                job.update_status(|s| {
+                    s.activity = Activity::Idle;
+                    if let Err(e) = r {
+                        s.last_error = Some(format!("Removing the folder failed: {e:#}"));
+                    }
+                });
+            });
+            if let Err(e) = res {
+                lib.update_status(|s| s.last_error = Some(format!("{e:#}")));
+            }
+        });
     }
 
     pub(crate) fn remove_files_from_index(&self, ids: &HashSet<i64>) {
         self.index.write().remove_files(ids);
     }
 
-    pub fn set_settings(&self, new: Settings) -> Result<()> {
-        new.save(&self.paths.settings_path())?;
-        let model_changed = new.model != self.settings.read().model;
-        *self.settings.write() = new.clone();
-        if model_changed && let Some(id) = &new.model {
-            self.switch_model(id)?;
+    /// Applies new settings. A model change runs as a background job (it rebuilds the vector
+    /// index); nothing is persisted unless the change is applied.
+    pub fn apply_settings(self: &Arc<Self>, new: Settings) -> Result<()> {
+        let target = new.model.as_deref().unwrap_or(self.model().id);
+        let spec = registry::get(target).ok_or_else(|| anyhow!("unknown model '{target}'"))?;
+        if spec.id == self.model().id {
+            new.save(&self.paths.settings_path())?;
+            *self.settings.write() = new;
+            self.notify();
+            return Ok(());
         }
-        self.notify();
-        Ok(())
+        let lib = Arc::clone(self);
+        self.spawn(move || {
+            lib.update_status(|s| s.activity = Activity::SwitchingModel);
+            let res = lib.switch_model(spec, new);
+            lib.update_status(|s| {
+                s.activity = Activity::Idle;
+                s.last_run = None;
+                if let Err(e) = res {
+                    s.last_error = Some(format!("Switching models failed: {e:#}"));
+                }
+            });
+        })
     }
 
-    fn switch_model(&self, id: &str) -> Result<()> {
-        if self.is_busy() {
-            bail!("wait for the current job to finish before switching models");
-        }
-        let spec = registry::get(id).ok_or_else(|| anyhow!("unknown model '{id}'"))?;
+    fn switch_model(&self, spec: &'static ModelSpec, new: Settings) -> Result<()> {
         let index = load_index(&self.db.lock(), spec)?;
+        new.save(&self.paths.settings_path())?;
+        *self.settings.write() = new;
+        *self.text.lock() = None;
         *self.model.write() = spec;
         *self.index.write() = index;
-        *self.text.lock() = None;
         Ok(())
     }
 
@@ -295,7 +337,9 @@ impl Library {
             );
             lib.update_status(|s| {
                 s.activity = Activity::Idle;
-                if let Err(e) = res {
+                if let Err(e) = res
+                    && !lib.control.is_cancelled()
+                {
                     s.last_error = Some(format!("Model download failed: {e:#}"));
                 }
             });
@@ -330,7 +374,10 @@ impl Library {
             let _ = h.join();
         }
         self.control.reset();
-        self.update_status(|s| s.last_error = None);
+        self.update_status(|s| {
+            s.last_error = None;
+            s.paused = false;
+        });
         *w = Some(
             std::thread::Builder::new()
                 .name("recollect-worker".into())
@@ -400,21 +447,28 @@ impl Library {
     pub fn similar(&self, item_id: i64, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
         let (v, file_id) = {
             let db = self.db.lock();
+            let (file_id, model) = db
+                .item_owner(item_id)?
+                .ok_or_else(|| anyhow!("that item is no longer in the library"))?;
+            if model.as_deref() != Some(self.model().id) {
+                bail!("that item was indexed with another model; wait for re-indexing to finish");
+            }
             let v = db
                 .embeddings(&[item_id])?
                 .remove(&item_id)
                 .ok_or_else(|| anyhow!("item {item_id} not found"))?;
-            let info = db.item_info(&[item_id])?;
-            (v, info.first().map(|i| i.file_id))
+            (v, file_id)
         };
-        search::by_vector(self, &v, opts, file_id)
+        search::by_vector(self, &v, opts, Some(file_id))
     }
 }
 
 impl Drop for Library {
     fn drop(&mut self) {
         self.cancel();
-        if let Some(h) = self.worker.get_mut().take() {
+        if let Some(h) = self.worker.get_mut().take()
+            && h.thread().id() != std::thread::current().id()
+        {
             let _ = h.join();
         }
     }
@@ -455,4 +509,89 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
         }
     }
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::{MediaKind, ScannedFile};
+    use crate::store::db::{FileMeta, NewItem};
+
+    fn open(dir: &Path) -> Arc<Library> {
+        crate::gpu::force_cpu(true);
+        Library::open(Paths::under(dir), Some(registry::CLIP_B32.id)).unwrap()
+    }
+
+    /// Stores one indexed image with a CLIP-sized vector; returns its item id.
+    fn seed(lib: &Library) -> i64 {
+        let mut db = lib.db.lock();
+        let f = db.add_folder(Path::new("/lib")).unwrap();
+        let file = ScannedFile {
+            path: "/lib/a.jpg".into(),
+            kind: MediaKind::Image,
+            size: 1,
+            mtime: 1,
+        };
+        db.sync_folder(f, &[file], &[]).unwrap();
+        let id = db.pending(registry::CLIP_B32.id).unwrap()[0].id;
+        let mut v = vec![0.0; 512];
+        v[0] = 1.0;
+        let item = NewItem {
+            t_start: None,
+            t_end: None,
+            embedding: v,
+        };
+        db.put_items(
+            registry::CLIP_B32.id,
+            &[(id, FileMeta::default(), vec![item])],
+        )
+        .unwrap()[0][0]
+    }
+
+    #[test]
+    fn model_switch_rebuilds_index_and_old_vectors_are_rejected() {
+        let d = tempfile::tempdir().unwrap();
+        let item = seed(&open(d.path()));
+        let lib = open(d.path()); // reload: the index now holds the seeded vector
+        assert_eq!(lib.indexed_items(), 1);
+        assert!(
+            lib.similar(item, &SearchOptions::default())
+                .unwrap()
+                .is_empty()
+        );
+
+        let new = Settings {
+            model: Some(registry::SIGLIP_B16.id.into()),
+            ..lib.settings()
+        };
+        lib.apply_settings(new).unwrap();
+        lib.wait();
+        assert_eq!(lib.status().last_error, None);
+        assert_eq!(lib.model().id, registry::SIGLIP_B16.id);
+        assert_eq!(lib.indexed_items(), 0);
+        let saved = Settings::load(&lib.paths().settings_path()).unwrap();
+        assert_eq!(saved.model.as_deref(), Some(registry::SIGLIP_B16.id));
+        // The old 512-d vector must produce an error, not a panic.
+        let err = lib.similar(item, &SearchOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("another model"), "{err}");
+        assert!(search::by_vector(&lib, &[0.0; 512], &SearchOptions::default(), None).is_err());
+    }
+
+    #[test]
+    fn removing_a_folder_in_the_background_clears_the_index() {
+        let d = tempfile::tempdir().unwrap();
+        seed(&open(d.path()));
+        let lib = open(d.path());
+        let folder = lib.folders().unwrap()[0].id;
+        lib.start_remove_folder(folder);
+        for _ in 0..200 {
+            if lib.folders().unwrap().is_empty() && !lib.is_busy() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        lib.wait();
+        assert!(lib.folders().unwrap().is_empty());
+        assert_eq!(lib.indexed_items(), 0);
+    }
 }

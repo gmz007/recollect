@@ -55,11 +55,15 @@ impl SearchWorker {
                     }
                     let (id, query, opts) = req;
                     let t = Instant::now();
-                    let hits = match &query {
+                    // A bug in one search must not kill the worker for the rest of the session.
+                    let run = std::panic::AssertUnwindSafe(|| match &query {
                         Query::Text(q) => lib.search(q, &opts),
                         Query::Similar { item_id, .. } => lib.similar(*item_id, &opts),
-                    }
-                    .map_err(|e| format!("{e:#}"));
+                    });
+                    let hits = match std::panic::catch_unwind(run) {
+                        Ok(r) => r.map_err(|e| format!("{e:#}")),
+                        Err(_) => Err("search failed unexpectedly".to_string()),
+                    };
                     if resp_tx
                         .send(SearchResponse {
                             id,

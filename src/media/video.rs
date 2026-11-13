@@ -12,7 +12,7 @@ use ffmpeg_next as ff;
 use std::path::Path;
 use std::sync::Once;
 
-/// Upper bound for one buffered GOP; beyond it we decode as we go.
+/// Default upper bound for one buffered GOP.
 const MAX_GOP_BYTES: usize = 64 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,6 +21,8 @@ pub struct SamplerConfig {
     pub interval: f64,
     /// GOPs up to this long are represented by their keyframe alone, seconds.
     pub max_gap: f64,
+    /// Upper bound for one buffered GOP; beyond it we decode packet by packet.
+    pub max_gop_bytes: usize,
 }
 
 impl Default for SamplerConfig {
@@ -28,6 +30,7 @@ impl Default for SamplerConfig {
         Self {
             interval: 2.0,
             max_gap: 4.0,
+            max_gop_bytes: MAX_GOP_BYTES,
         }
     }
 }
@@ -61,12 +64,20 @@ struct Stream {
     tb: f64,
     start: i64,
     duration: f64,
+    /// Nominal frame rate, used to time frames that carry no timestamp.
+    fps: f64,
+    last_t: Option<f64>,
     dec: ff::decoder::Video,
 }
 
-fn open(path: &Path) -> Result<Stream> {
+/// Opens a local video file. Only the `file` protocol is allowed, so a crafted file (e.g. a
+/// playlist disguised as .mp4) can never make FFmpeg touch the network.
+fn open(path: &Path, threads: usize) -> Result<Stream> {
     init();
-    let ictx = ff::format::input(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut opts = ff::Dictionary::new();
+    opts.set("protocol_whitelist", "file");
+    let ictx = ff::format::input_with_dictionary(path, opts)
+        .with_context(|| format!("opening {}", path.display()))?;
     let st = ictx
         .streams()
         .best(ff::media::Type::Video)
@@ -86,10 +97,16 @@ fn open(path: &Path) -> Result<Stream> {
     if duration <= 0.0 && ictx.duration() > 0 {
         duration = ictx.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
     }
+    let rate = st.avg_frame_rate();
+    let fps = if rate.numerator() > 0 && rate.denominator() > 0 {
+        f64::from(rate)
+    } else {
+        25.0
+    };
     let mut cctx = ff::codec::context::Context::from_parameters(st.parameters())?;
     cctx.set_threading(ff::codec::threading::Config {
         kind: ff::codec::threading::Type::Frame,
-        count: 0, // auto
+        count: threads, // 0 = auto
     });
     let dec = cctx
         .decoder()
@@ -101,6 +118,8 @@ fn open(path: &Path) -> Result<Stream> {
         tb,
         start,
         duration,
+        fps,
+        last_t: None,
         dec,
     })
 }
@@ -239,12 +258,31 @@ impl Stream {
         (ts - self.start) as f64 * self.tb
     }
 
-    /// Receives all frames currently available; calls `f(time, frame)`; stops early if `f`
-    /// returns false.
+    /// Reads the next packet of the video stream; `None` at end of file.
+    fn next_packet(&mut self) -> Result<Option<ff::Packet>> {
+        loop {
+            let mut pkt = ff::Packet::empty();
+            match pkt.read(&mut self.ictx) {
+                Ok(()) if pkt.stream() == self.index => return Ok(Some(pkt)),
+                Ok(()) => {}
+                Err(ff::Error::Eof) => return Ok(None),
+                Err(e) if is_retryable(&e) => {}
+                Err(e) => return Err(e).context("reading packet"),
+            }
+        }
+    }
+
+    /// Receives all frames currently available and calls `f(time, frame)` for each; stops
+    /// early (returning false) when `f` returns false. Frames are lent, never copied.
     fn drain(&mut self, f: &mut dyn FnMut(f64, &ff::frame::Video) -> Result<bool>) -> Result<bool> {
         let mut frame = ff::frame::Video::empty();
         while self.dec.receive_frame(&mut frame).is_ok() {
-            let t = self.time_of(frame.timestamp().unwrap_or(self.start));
+            let t = match frame.timestamp() {
+                Some(ts) => self.time_of(ts),
+                // No timestamp: assume constant frame rate after the previous frame.
+                None => self.last_t.map(|l| l + 1.0 / self.fps).unwrap_or(0.0),
+            };
+            self.last_t = Some(t);
             if !f(t, &frame)? {
                 return Ok(false);
             }
@@ -253,64 +291,8 @@ impl Stream {
     }
 }
 
-/// Reads the duration and display size without decoding frames (except one for rotation/SAR).
-pub fn probe(path: &Path) -> Result<VideoInfo> {
-    let mut s = open(path)?;
-    let (w, h) = (s.dec.width(), s.dec.height());
-    if w == 0 || h == 0 {
-        bail!("video has no size");
-    }
-    Ok(VideoInfo {
-        duration: s.duration,
-        width: w,
-        height: h,
-    })
-    .map(|mut info| {
-        // Display dims from a decoded frame if we can get one quickly.
-        if let Ok(f) = first_frame_dims(&mut s) {
-            info.width = f.0;
-            info.height = f.1;
-        }
-        info
-    })
-}
-
-fn first_frame_dims(s: &mut Stream) -> Result<(u32, u32)> {
-    let idx = s.index;
-    let mut conv = Converter::new(u32::MAX);
-    let mut out = None;
-    let mut packets = 0;
-    let pkts: Vec<ff::Packet> = s
-        .ictx
-        .packets()
-        .filter(|(st, _)| st.index() == idx)
-        .map(|(_, p)| p)
-        .take(64)
-        .collect();
-    for p in pkts {
-        packets += 1;
-        s.dec.send_packet(&p)?;
-        s.drain(&mut |_, f| {
-            let sar = f.aspect_ratio();
-            let sar = if sar.numerator() > 0 && sar.denominator() > 0 {
-                f64::from(sar)
-            } else {
-                1.0
-            };
-            conv.rotation = rotation_of(f);
-            let (w, h) = ((f.width() as f64 * sar).round() as u32, f.height());
-            out = Some(if conv.rotation % 180 == 90 {
-                (h, w)
-            } else {
-                (w, h)
-            });
-            Ok(false)
-        })?;
-        if out.is_some() || packets > 64 {
-            break;
-        }
-    }
-    out.ok_or_else(|| anyhow!("no frame decoded"))
+fn packet_time(s: &Stream, p: &ff::Packet) -> Option<f64> {
+    p.pts().or(p.dts()).map(|t| s.time_of(t))
 }
 
 /// Samples frames through the whole video. `on_frame` receives frames in time order; return an
@@ -322,7 +304,7 @@ pub fn sample(
     cancel: &dyn Fn() -> bool,
     on_frame: &mut dyn FnMut(Frame) -> Result<()>,
 ) -> Result<VideoInfo> {
-    let mut s = open(path)?;
+    let mut s = open(path, 0)?;
     let mut st = SampleState {
         conv: Converter::new(min_side),
         cfg,
@@ -335,45 +317,50 @@ pub fn sample(
     };
     let mut gop: Vec<ff::Packet> = Vec::new();
     let mut gop_bytes = 0usize;
-    let idx = s.index;
-    loop {
+    // True while decoding an oversized GOP packet by packet (decoder state must be kept).
+    let mut streaming = false;
+    while let Some(pkt) = s.next_packet()? {
         if cancel() {
             bail!("cancelled");
         }
-        let mut pkt = ff::Packet::empty();
-        match pkt.read(&mut s.ictx) {
-            Ok(()) => {}
-            Err(ff::Error::Eof) => break,
-            Err(e) if is_retryable(&e) => continue,
-            Err(e) => return Err(e).context("reading packet"),
+        if pkt.is_key() && streaming {
+            st.finish_stream(&mut s, on_frame)?;
+            streaming = false;
         }
-        if pkt.stream() != idx {
+        if streaming {
+            st.decode_due(&mut s, &pkt, on_frame)?;
             continue;
         }
         if pkt.is_key() && !gop.is_empty() {
-            let end = pkt.pts().or(pkt.dts()).map(|t| s.time_of(t));
+            let end = packet_time(&s, &pkt);
             st.process_gop(&mut s, &gop, end, on_frame)?;
             gop.clear();
             gop_bytes = 0;
         }
         gop_bytes += pkt.size();
         gop.push(pkt);
-        if gop_bytes > MAX_GOP_BYTES {
-            // Pathological GOP: decode what we have in order, then keep streaming.
-            st.process_gop(&mut s, &gop, None, on_frame)?;
+        if gop_bytes > st.cfg.max_gop_bytes {
+            // Pathological GOP: decode what we have in order and keep going packet by packet.
+            for p in &gop {
+                st.decode_due(&mut s, p, on_frame)?;
+            }
             gop.clear();
             gop_bytes = 0;
+            streaming = true;
         }
     }
-    if !gop.is_empty() {
-        let end = Some(s.duration.max(st.next_t));
+    if streaming {
+        st.finish_stream(&mut s, on_frame)?;
+    } else if !gop.is_empty() {
+        // The last GOP ends at the known duration; if that is unknown, decode it in order.
+        let end = (s.duration > 0.0).then_some(s.duration);
         st.process_gop(&mut s, &gop, end, on_frame)?;
     }
     if st.emitted == 0 {
         bail!("no frames could be decoded");
     }
     if st.info.duration <= 0.0 {
-        st.info.duration = st.next_t.max(0.0);
+        st.info.duration = (st.next_t - st.cfg.interval).max(0.0) + st.cfg.interval;
     }
     Ok(st.info)
 }
@@ -411,6 +398,52 @@ impl SampleState {
         on_frame(Frame { t: t.max(0.0), rgb })
     }
 
+    /// Sends one packet and emits whichever decoded frames are due (and before `end`).
+    fn decode_due_until(
+        &mut self,
+        s: &mut Stream,
+        p: Option<&ff::Packet>,
+        end: Option<f64>,
+        on_frame: &mut dyn FnMut(Frame) -> Result<()>,
+    ) -> Result<()> {
+        match p {
+            Some(p) => {
+                if s.dec.send_packet(p).is_err() {
+                    return Ok(()); // corrupt packet: skip
+                }
+            }
+            None => {
+                let _ = s.dec.send_eof();
+            }
+        }
+        s.drain(&mut |t, f| {
+            if self.due(t) && end.is_none_or(|e| t < e) {
+                self.emit(t, f, on_frame)?;
+            }
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    fn decode_due(
+        &mut self,
+        s: &mut Stream,
+        p: &ff::Packet,
+        on_frame: &mut dyn FnMut(Frame) -> Result<()>,
+    ) -> Result<()> {
+        self.decode_due_until(s, Some(p), None, on_frame)
+    }
+
+    fn finish_stream(
+        &mut self,
+        s: &mut Stream,
+        on_frame: &mut dyn FnMut(Frame) -> Result<()>,
+    ) -> Result<()> {
+        self.decode_due_until(s, None, None, on_frame)?;
+        s.dec.flush();
+        Ok(())
+    }
+
     fn process_gop(
         &mut self,
         s: &mut Stream,
@@ -419,11 +452,7 @@ impl SampleState {
         on_frame: &mut dyn FnMut(Frame) -> Result<()>,
     ) -> Result<()> {
         let first = &gop[0];
-        let start = first
-            .pts()
-            .or(first.dts())
-            .map(|t| s.time_of(t))
-            .unwrap_or(self.next_t);
+        let start = packet_time(s, first).unwrap_or(self.next_t);
         let short = first.is_key() && end.is_some_and(|e| e - start <= self.cfg.max_gap);
         if short {
             // Keyframe only, and only if a sample is due before the next GOP starts.
@@ -434,95 +463,69 @@ impl SampleState {
                 return Ok(()); // corrupt keyframe: skip this GOP
             }
             let _ = s.dec.send_eof();
-            let mut got: Option<(f64, ff::frame::Video)> = None;
+            let mut res = Ok(());
             s.drain(&mut |t, f| {
-                if got.is_none() {
-                    got = Some((t, f.clone()));
-                }
-                Ok(true)
+                res = self.emit(t, f, on_frame);
+                Ok(false) // the first frame is all we want
             })?;
             s.dec.flush();
-            if let Some((t, f)) = got {
-                self.emit(t, &f, on_frame)?;
-            }
-            return Ok(());
+            return res;
         }
         // Long GOP: decode in order until no further sample is due inside it.
-        let mut ready: Vec<(f64, ff::frame::Video)> = Vec::new();
         for p in gop {
             if end.is_some_and(|e| self.next_t >= e) && self.emitted > 0 {
                 break;
             }
-            if s.dec.send_packet(p).is_err() {
-                continue;
-            }
-            s.drain(&mut |t, f| {
-                ready.push((t, f.clone()));
-                Ok(true)
-            })?;
-            for (t, f) in ready.drain(..) {
-                if self.due(t) {
-                    self.emit(t, &f, on_frame)?;
-                }
-            }
+            self.decode_due_until(s, Some(p), end, on_frame)?;
         }
-        let _ = s.dec.send_eof();
-        s.drain(&mut |t, f| {
-            ready.push((t, f.clone()));
-            Ok(true)
-        })?;
-        for (t, f) in ready.drain(..) {
-            if self.due(t) && end.is_none_or(|e| t < e) {
-                self.emit(t, &f, on_frame)?;
-            }
-        }
+        self.decode_due_until(s, None, end, on_frame)?;
         s.dec.flush();
         Ok(())
     }
 }
 
-/// Decodes the frame shown at time `t` (seconds), scaled so its shorter side is ≈`min_side`.
+/// Decodes the frame shown at time `t` (seconds from the start), scaled so its shorter side is
+/// ≈`min_side`.
 pub fn frame_at(path: &Path, t: f64, min_side: u32) -> Result<Rgb> {
-    let mut s = open(path)?;
+    let mut s = open(path, 2)?;
     let target = t.max(0.0);
-    let ts = (target * f64::from(ff::ffi::AV_TIME_BASE)) as i64;
-    // Seek to the keyframe at or before `t`; fall back to decoding from the start.
+    // Seek to the keyframe at or before `t`, in absolute stream time (streams may not start
+    // at zero, e.g. MPEG-TS); fall back to decoding from the start if seeking fails.
+    let abs = s.start as f64 * s.tb + target;
+    let ts = (abs * f64::from(ff::ffi::AV_TIME_BASE)) as i64;
     let _ = s.ictx.seek(ts, ..ts + 1);
     let mut conv = Converter::new(min_side);
-    let idx = s.index;
-    let mut best: Option<ff::frame::Video> = None;
+    let mut found: Option<Rgb> = None;
     let mut decoded = 0usize;
-    loop {
-        let mut pkt = ff::Packet::empty();
-        match pkt.read(&mut s.ictx) {
-            Ok(()) => {}
-            Err(ff::Error::Eof) => break,
-            Err(e) if is_retryable(&e) => continue,
-            Err(e) => return Err(e).context("reading packet"),
-        }
-        if pkt.stream() != idx || s.dec.send_packet(&pkt).is_err() {
+    while let Some(pkt) = s.next_packet()? {
+        if s.dec.send_packet(&pkt).is_err() {
             continue;
         }
-        let mut done = false;
         s.drain(&mut |ft, f| {
             decoded += 1;
-            best = Some(f.clone());
-            done = ft + 0.02 >= target || decoded > 2000;
-            Ok(!done)
+            if ft + 0.02 >= target || decoded > 2000 {
+                found = Some(conv.convert(f)?);
+                return Ok(false);
+            }
+            Ok(true)
         })?;
-        if done {
+        if found.is_some() {
             break;
         }
     }
-    if best.is_none() {
+    if found.is_none() {
+        // Past the last frame (or decoder delay at EOF): take the last frame available.
         let _ = s.dec.send_eof();
+        let mut last: Option<ff::frame::Video> = None;
         s.drain(&mut |_, f| {
-            best = Some(f.clone());
+            last = Some(f.clone());
             Ok(true)
         })?;
+        if let Some(f) = last {
+            found = Some(conv.convert(&f)?);
+        }
     }
-    let f = best.ok_or_else(|| anyhow!("no frame at {t:.1}s"))?;
-    conv.convert(&f)
+    found.ok_or_else(|| anyhow!("no frame at {t:.1}s"))
 }
 
 #[cfg(test)]
@@ -631,8 +634,45 @@ pub(crate) mod tests {
         let ref_top_red = reference.get_pixel(45, 5)[0] > 128;
         let top_red = r.data[(5 * 90 + 45) * 3] > 128;
         assert_eq!(top_red, ref_top_red);
-        let info = probe(&rot).unwrap();
-        assert_eq!((info.width, info.height), (90, 320));
+        let (_, info) = sample_all(&rot, SamplerConfig::default());
+        assert_eq!((info.width, info.height), (64, 228));
+    }
+
+    #[test]
+    fn oversized_gop_streams_without_losing_frames() {
+        let d = tempfile::tempdir().unwrap();
+        let p = make_clip(d.path(), "big.mp4", 20, 200, &[]);
+        let cfg = SamplerConfig {
+            max_gop_bytes: 2_000,
+            ..Default::default()
+        };
+        let (ts, _) = sample_all(&p, cfg);
+        assert!(ts.len() >= 9 && ts.len() <= 11, "{ts:?}");
+        assert!(
+            ts.windows(2).all(|w| (w[1] - w[0] - 2.0).abs() < 0.15),
+            "{ts:?}"
+        );
+    }
+
+    #[test]
+    fn single_gop_without_known_duration() {
+        let d = tempfile::tempdir().unwrap();
+        let p = make_clip(d.path(), "src.mp4", 20, 200, &[]);
+        // Matroska written to a pipe has no duration and no cues.
+        let out = d.path().join("nodur.mkv");
+        let st = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "ffmpeg -loglevel error -i '{}' -c copy -f matroska - > '{}'",
+                p.display(),
+                out.display()
+            ))
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let (ts, info) = sample_all(&out, SamplerConfig::default());
+        assert!(ts.len() >= 9, "{ts:?}");
+        assert!(info.duration >= 18.0, "{info:?}");
     }
 
     #[test]
