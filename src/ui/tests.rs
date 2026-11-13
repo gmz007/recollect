@@ -78,3 +78,59 @@ fn settings_window_lists_models() {
     }
     h.get_by_label("Use the GPU when available");
 }
+
+fn hit(path: &str, kind: crate::media::MediaKind, t: Option<f64>) -> crate::search::SearchHit {
+    crate::search::SearchHit {
+        item_id: 1,
+        file_id: 1,
+        path: path.into(),
+        kind,
+        mtime: 0,
+        score: 0.31,
+        t_start: t,
+        t_end: t.map(|t| t + 2.0),
+        width: Some(1280),
+        height: Some(720),
+        duration: t.map(|_| 600.0),
+        moments: t
+            .map(|_| {
+                vec![crate::search::Moment {
+                    item_id: 2,
+                    t_start: 100.0,
+                    t_end: 104.0,
+                    score: 0.2,
+                }]
+            })
+            .unwrap_or_default(),
+    }
+}
+
+#[test]
+fn results_and_video_detail_panel() {
+    use crate::media::MediaKind;
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    fake_install(&lib);
+    lib.add_folder(d.path()).unwrap();
+    let mut app = App::new(&egui::Context::default(), lib);
+    app.results = vec![
+        hit("/nowhere/clip.mp4", MediaKind::Video, Some(42.0)),
+        hit("/nowhere/photo.jpg", MediaKind::Image, None),
+    ];
+    app.current = Some(super::Query::Text("a dragon".into()));
+    app.result_label = "a dragon".into();
+    app.selected = Some(0);
+    app.selected_t = Some(42.0);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| app.show(ui));
+    // A background rescan may be running (spinner), so step instead of waiting to settle.
+    h.run_steps(5);
+    h.get_by_label_contains("Best 2 matches for “a dragon”");
+    h.get_by_label("clip.mp4");
+    h.get_by_label("Play at 0:42");
+    h.get_by_label("Matching moments");
+    h.get_by_label_contains("1:40 – 1:44");
+    h.get_by_label("Find similar");
+    h.get_by_label("Show in folder");
+}

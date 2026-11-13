@@ -57,3 +57,102 @@ fn padding_and_devices_give_the_same_embeddings() {
         }
     }
 }
+
+/// Copies (hard-links where possible) a test model into a fresh Recollect home.
+fn home_with_model(id: &str) -> Option<(tempfile::TempDir, recollect::config::Paths)> {
+    let src = model_dir(id)?;
+    let home = tempfile::tempdir().unwrap();
+    let paths = recollect::config::Paths::under(home.path());
+    let dst = paths.models_dir().join(id);
+    std::fs::create_dir_all(&dst).unwrap();
+    for e in std::fs::read_dir(&src).unwrap().flatten() {
+        let to = dst.join(e.file_name());
+        if std::fs::hard_link(e.path(), &to).is_err() {
+            std::fs::copy(e.path(), &to).unwrap();
+        }
+    }
+    Some((home, paths))
+}
+
+#[test]
+#[ignore = "needs downloaded models (RECOLLECT_TEST_MODELS)"]
+fn cancel_resume_errors_and_search_end_to_end() {
+    use recollect::Library;
+    use recollect::search::SearchOptions;
+    let Some((_home, paths)) = home_with_model(registry::CLIP_B32.id) else {
+        return;
+    };
+    recollect::gpu::force_cpu(true);
+    let media = tempfile::tempdir().unwrap();
+    let colors = [
+        ("red", [220u8, 20, 20]),
+        ("green", [20, 180, 40]),
+        ("blue", [30, 40, 220]),
+    ];
+    for (name, rgb) in colors {
+        for i in 0..10u32 {
+            let img = image::RgbImage::from_fn(320, 240, |x, y| {
+                let n = ((x * 7 + y * 13 + i * 31) % 17) as u8;
+                image::Rgb([
+                    rgb[0].saturating_add(n),
+                    rgb[1].saturating_add(n),
+                    rgb[2].saturating_add(n),
+                ])
+            });
+            img.save(media.path().join(format!("{name}-{i}.png")))
+                .unwrap();
+        }
+    }
+    std::fs::write(media.path().join("broken.jpg"), b"\xFF\xD8\xFF garbage").unwrap();
+
+    {
+        let lib = Library::open(paths.clone(), Some(registry::CLIP_B32.id)).unwrap();
+        lib.add_folder(media.path()).unwrap();
+        lib.start_indexing().unwrap();
+        // Cancel once embedding has started, to stop in the middle of the run.
+        for _ in 0..2000 {
+            if matches!(
+                lib.status().activity,
+                recollect::library::Activity::Indexing(_)
+            ) || !lib.is_busy()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        lib.cancel();
+        lib.wait();
+        let s = lib.stats().unwrap();
+        assert_eq!(s.indexed + s.pending + s.errors, 31, "{s:?}");
+        assert_eq!(lib.indexed_items(), s.items, "index and database agree");
+    }
+    // "Restart": a new Library on the same data resumes where the last run stopped.
+    let lib = Library::open(paths, Some(registry::CLIP_B32.id)).unwrap();
+    let sum = lib.index_blocking().unwrap();
+    assert!(!sum.cancelled);
+    let s = lib.stats().unwrap();
+    assert_eq!((s.indexed, s.pending, s.errors), (30, 0, 1), "{s:?}");
+    assert_eq!(lib.indexed_items(), 30);
+    let hits = lib
+        .search(
+            "a plain red picture",
+            &SearchOptions {
+                limit: 5,
+                kind: None,
+            },
+        )
+        .unwrap();
+    let top = hits[0]
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(top.starts_with("red"), "top hit {top}");
+    // Rescan with nothing changed does no work.
+    let again = lib.index_blocking().unwrap();
+    assert_eq!(
+        (again.files, again.added, again.changed, again.removed),
+        (0, 0, 0, 0)
+    );
+}
