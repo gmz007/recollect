@@ -40,6 +40,13 @@ pub(crate) fn run(lib: &Library) -> Result<RunSummary> {
     Ok(summary)
 }
 
+/// Scan and reconcile only, no embedding (benchmarks).
+pub(crate) fn sync_only(lib: &Library) -> Result<RunSummary> {
+    let mut summary = RunSummary::default();
+    sync_folders(lib, &mut summary)?;
+    Ok(summary)
+}
+
 fn index_pending(lib: &Library, summary: &mut RunSummary) -> Result<()> {
     let spec = lib.model();
     let pending = lib.db.lock().pending(spec.id)?;

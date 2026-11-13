@@ -5,6 +5,8 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
+const CACHE_MAGIC: &[u8; 8] = b"RCLXIDX1";
+
 /// Rows per parallel work unit.
 const BLOCK: usize = 4096;
 
@@ -47,13 +49,36 @@ fn quantize(v: &[f32], scale: f32) -> impl Iterator<Item = i8> + '_ {
         .map(move |x| (x * scale).round().clamp(-127.0, 127.0) as i8)
 }
 
-#[inline]
-fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
+#[inline(always)]
+fn dot_i8_portable(a: &[i8], b: &[i8]) -> i32 {
     // Written so LLVM auto-vectorizes it (i8×i8 → i16 → i32 accumulate).
     a.iter()
         .zip(b)
         .map(|(&x, &y)| i32::from(x) * i32::from(y))
         .sum()
+}
+
+fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
+    dot_i8_portable(a, b)
+}
+
+/// The same loop compiled for AVX2 (release builds target baseline x86-64, i.e. SSE2).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn dot_i8_avx2(a: &[i8], b: &[i8]) -> i32 {
+    dot_i8_portable(a, b)
+}
+
+type DotFn = fn(&[i8], &[i8]) -> i32;
+
+/// Picks the fastest dot product this CPU supports (checked once per search).
+fn pick_dot() -> DotFn {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: only called after confirming the CPU supports AVX2.
+        return |a, b| unsafe { dot_i8_avx2(a, b) };
+    }
+    dot_i8
 }
 
 impl VectorIndex {
@@ -101,6 +126,106 @@ impl VectorIndex {
     }
 
     /// Removes all items belonging to the given files.
+    /// Saves the index to `path` (atomically), stamped with `model` and `epoch`.
+    pub fn save(&self, path: &std::path::Path, model: &str, epoch: u64) -> std::io::Result<()> {
+        use std::io::Write;
+        let tmp = path.with_extension("tmp");
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
+        w.write_all(CACHE_MAGIC)?;
+        w.write_all(&(model.len() as u32).to_le_bytes())?;
+        w.write_all(model.as_bytes())?;
+        w.write_all(&(self.dim as u32).to_le_bytes())?;
+        w.write_all(&self.scale.to_le_bytes())?;
+        w.write_all(&epoch.to_le_bytes())?;
+        w.write_all(&(self.len() as u64).to_le_bytes())?;
+        for v in &self.item_ids {
+            w.write_all(&v.to_le_bytes())?;
+        }
+        for v in &self.file_ids {
+            w.write_all(&v.to_le_bytes())?;
+        }
+        w.write_all(
+            &self
+                .kinds
+                .iter()
+                .map(|k| k.as_i64() as u8)
+                .collect::<Vec<_>>(),
+        )?;
+        // SAFETY: i8 and u8 have the same size and layout.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(self.data.as_ptr().cast::<u8>(), self.data.len()) };
+        w.write_all(bytes)?;
+        w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Loads a cache written by [`Self::save`] if it matches `model`, `dim`, `scale` and `epoch`.
+    pub fn load(
+        path: &std::path::Path,
+        model: &str,
+        dim: usize,
+        scale: f32,
+        epoch: u64,
+    ) -> Option<Self> {
+        use std::io::Read;
+        let mut r = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path).ok()?);
+        let mut magic = [0u8; 8];
+        r.read_exact(&mut magic).ok()?;
+        if &magic != CACHE_MAGIC {
+            return None;
+        }
+        let mut u32b = [0u8; 4];
+        let mut u64b = [0u8; 8];
+        r.read_exact(&mut u32b).ok()?;
+        let mut name = vec![0u8; u32::from_le_bytes(u32b) as usize];
+        r.read_exact(&mut name).ok()?;
+        r.read_exact(&mut u32b).ok()?;
+        let d = u32::from_le_bytes(u32b) as usize;
+        r.read_exact(&mut u32b).ok()?;
+        let sc = f32::from_le_bytes(u32b);
+        r.read_exact(&mut u64b).ok()?;
+        let ep = u64::from_le_bytes(u64b);
+        r.read_exact(&mut u64b).ok()?;
+        let n = u64::from_le_bytes(u64b) as usize;
+        if name != model.as_bytes() || d != dim || sc != scale || ep != epoch {
+            return None;
+        }
+        let mut read_i64s = |n: usize| -> Option<Vec<i64>> {
+            let mut buf = vec![0u8; n * 8];
+            r.read_exact(&mut buf).ok()?;
+            Some(
+                buf.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| i64::from_le_bytes(*c))
+                    .collect(),
+            )
+        };
+        let item_ids = read_i64s(n)?;
+        let file_ids = read_i64s(n)?;
+        let mut kinds = vec![0u8; n];
+        r.read_exact(&mut kinds).ok()?;
+        let mut raw = vec![0u8; n * dim];
+        r.read_exact(&mut raw).ok()?;
+        // Reinterpret the bytes as i8 without copying.
+        let mut raw = std::mem::ManuallyDrop::new(raw);
+        // SAFETY: same allocation, element size, alignment and length; ownership moves over.
+        let data = unsafe {
+            Vec::from_raw_parts(raw.as_mut_ptr().cast::<i8>(), raw.len(), raw.capacity())
+        };
+        Some(Self {
+            dim,
+            scale,
+            data,
+            item_ids,
+            file_ids,
+            kinds: kinds
+                .into_iter()
+                .map(|k| MediaKind::from_i64(i64::from(k)))
+                .collect(),
+        })
+    }
+
     pub fn remove_files(&mut self, files: &HashSet<i64>) {
         if files.is_empty() {
             return;
@@ -147,6 +272,7 @@ impl VectorIndex {
         let qq: Vec<i8> = quantize(q, qscale).collect();
         let dim = self.dim;
         let n = self.len();
+        let dot = pick_dot();
         let blocks: Vec<usize> = (0..n.div_ceil(BLOCK)).collect();
         let heaps: Vec<BinaryHeap<Entry>> = blocks
             .par_iter()
@@ -159,7 +285,7 @@ impl VectorIndex {
                     {
                         continue;
                     }
-                    let s = dot_i8(&self.data[r * dim..(r + 1) * dim], &qq);
+                    let s = dot(&self.data[r * dim..(r + 1) * dim], &qq);
                     if heap.len() < k {
                         heap.push(Entry(s, r));
                     } else if heap.peek().is_some_and(|e| s > e.0) {
@@ -260,6 +386,60 @@ mod tests {
         let got = idx.search(q, 20, None);
         let overlap = got.iter().filter(|c| top.contains(&c.item_id)).count();
         assert!(overlap >= 17, "overlap {overlap}/20");
+    }
+
+    #[test]
+    fn simd_and_portable_dot_agree() {
+        let a: Vec<i8> = (0..768).map(|i| ((i * 37) % 255) as i8).collect();
+        let b: Vec<i8> = (0..768).map(|i| ((i * 91 + 7) % 255) as i8).collect();
+        assert_eq!(pick_dot()(&a, &b), dot_i8(&a, &b));
+    }
+
+    #[test]
+    fn cache_round_trip_and_staleness() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("index-m.bin");
+        let vs = rand_vecs(300, 16, 5);
+        let mut idx = VectorIndex::new(16, 300.0);
+        for (i, v) in vs.iter().enumerate() {
+            idx.add(
+                i as i64,
+                i as i64 / 2,
+                if i % 3 == 0 {
+                    MediaKind::Video
+                } else {
+                    MediaKind::Image
+                },
+                v,
+            );
+        }
+        idx.save(&p, "m", 7).unwrap();
+        let back = VectorIndex::load(&p, "m", 16, 300.0, 7).unwrap();
+        assert_eq!(
+            (
+                back.data.clone(),
+                back.item_ids.clone(),
+                back.file_ids.clone(),
+                back.kinds.clone()
+            ),
+            (
+                idx.data.clone(),
+                idx.item_ids.clone(),
+                idx.file_ids.clone(),
+                idx.kinds.clone()
+            )
+        );
+        assert_eq!(back.search(&vs[10], 1, None)[0].item_id, 10);
+        assert!(
+            VectorIndex::load(&p, "m", 16, 300.0, 8).is_none(),
+            "stale epoch"
+        );
+        assert!(
+            VectorIndex::load(&p, "other", 16, 300.0, 7).is_none(),
+            "other model"
+        );
+        std::fs::write(&p, b"garbage").unwrap();
+        assert!(VectorIndex::load(&p, "m", 16, 300.0, 7).is_none());
     }
 
     #[test]

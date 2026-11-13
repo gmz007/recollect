@@ -4,11 +4,13 @@
 use crate::indexer::{Progress, fit_for, write_items};
 use crate::library::Library;
 use crate::media::image as img;
-use crate::media::video::{self, SamplerConfig};
+use crate::media::video::{self, SamplerConfig, VideoInfo};
 use crate::model::VisionEncoder;
 use crate::model::embedder::normalize;
 use crate::store::db::{FileMeta, FileRow, NewItem};
 use anyhow::Result;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Consecutive frames whose embedding has at least this cosine similarity with the first frame
 /// of the current segment are merged into it (tuned on the workspace eval set, see M2 report).
@@ -23,30 +25,155 @@ fn segment_tau() -> f32 {
         .unwrap_or(DEFAULT_SEGMENT_TAU)
 }
 
+/// Videos decoded at the same time. Their frames share embedding batches, which matters for
+/// libraries of short clips (a 5 s clip gives ~3 frames; alone it would waste most of a GPU
+/// batch and leave the GPU idle while the next file opens).
+const PARALLEL_VIDEOS: usize = 3;
+
+enum Msg {
+    Frame(usize, f64, Vec<u8>),
+    End(usize, Result<VideoInfo>),
+}
+
+struct FileState {
+    merger: Merger,
+    /// Frames sent by the sampler but not yet embedded.
+    outstanding: usize,
+    ended: Option<Result<VideoInfo>>,
+}
+
 pub(crate) fn index_videos(
     lib: &Library,
     enc: &mut VisionEncoder,
     files: &[FileRow],
     prog: &mut Progress,
 ) -> Result<()> {
-    for f in files {
-        if lib.control.checkpoint() {
-            return Ok(());
+    if files.is_empty() {
+        return Ok(());
+    }
+    let spec = lib.model();
+    let fit = fit_for(spec);
+    let cfg = SamplerConfig::default();
+    let batch = enc.batch_size();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|s| -> Result<()> {
+        let (tx, rx) = crossbeam_channel::bounded::<Msg>(batch * 4);
+        for n in 0..PARALLEL_VIDEOS.min(files.len()) {
+            let tx = tx.clone();
+            let (next, stop) = (&next, &stop);
+            std::thread::Builder::new()
+                .name(format!("recollect-video-{n}"))
+                .spawn_scoped(s, move || {
+                    let halt = || stop.load(Ordering::Relaxed) || lib.control.checkpoint();
+                    loop {
+                        if halt() {
+                            return;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(f) = files.get(i) else { return };
+                        let res = video::sample(&f.path, cfg, spec.image_size, &halt, &mut |fr| {
+                            let px = img::to_square(&fr.rgb, spec.image_size, fit)?;
+                            tx.send(Msg::Frame(i, fr.t, px))
+                                .map_err(|_| anyhow::anyhow!("embedding stopped"))
+                        });
+                        if tx.send(Msg::End(i, res)).is_err() {
+                            return;
+                        }
+                    }
+                })
+                .expect("spawning video sampler");
         }
-        match index_one(lib, enc, f, prog) {
-            Ok(Some((meta, items))) => {
+        drop(tx);
+        let new_state = || FileState {
+            merger: Merger::new(segment_tau(), cfg.interval),
+            outstanding: 0,
+            ended: None,
+        };
+        let mut states: HashMap<usize, FileState> = HashMap::new();
+        let mut pending: Vec<(usize, f64, Vec<u8>)> = Vec::with_capacity(batch);
+        let mut result: Result<()> = Ok(());
+        for msg in rx.iter() {
+            match msg {
+                Msg::Frame(i, t, px) => {
+                    states.entry(i).or_insert_with(new_state).outstanding += 1;
+                    pending.push((i, t, px));
+                    if pending.len() >= batch {
+                        result = embed_pending(lib, enc, &mut pending, &mut states, prog);
+                    }
+                }
+                Msg::End(i, res) => states.entry(i).or_insert_with(new_state).ended = Some(res),
+            }
+            if result.is_ok() {
+                result = finalize_ready(lib, files, &mut states, prog);
+            }
+            if result.is_err() {
+                break;
+            }
+        }
+        // Make the samplers stop (their sends fail) before the scope joins them.
+        stop.store(true, Ordering::Relaxed);
+        drop(rx);
+        if result.is_ok() && !lib.control.is_cancelled() {
+            result = embed_pending(lib, enc, &mut pending, &mut states, prog)
+                .and_then(|()| finalize_ready(lib, files, &mut states, prog));
+        }
+        result
+    })
+}
+
+fn embed_pending(
+    lib: &Library,
+    enc: &mut VisionEncoder,
+    pending: &mut Vec<(usize, f64, Vec<u8>)>,
+    states: &mut HashMap<usize, FileState>,
+    prog: &mut Progress,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let px: Vec<&[u8]> = pending.iter().map(|p| p.2.as_slice()).collect();
+    let embs = enc.embed(&px).map_err(|e| ModelError(format!("{e:#}")))?;
+    let n = pending.len();
+    for ((i, t, _), e) in pending.drain(..).zip(embs) {
+        if let Some(st) = states.get_mut(&i) {
+            st.merger.push(t, e);
+            st.outstanding -= 1;
+        }
+    }
+    prog.items_done(lib, n);
+    Ok(())
+}
+
+/// Stores every video whose sampler has finished and whose frames are all embedded.
+fn finalize_ready(
+    lib: &Library,
+    files: &[FileRow],
+    states: &mut HashMap<usize, FileState>,
+    prog: &mut Progress,
+) -> Result<()> {
+    let ready: Vec<usize> = states
+        .iter()
+        .filter(|(_, st)| st.ended.is_some() && st.outstanding == 0)
+        .map(|(i, _)| *i)
+        .collect();
+    for i in ready {
+        let st = states.remove(&i).expect("present");
+        let f = &files[i];
+        match st.ended.expect("ended") {
+            Ok(info) => {
+                let items = st.merger.finish(info.duration);
+                let meta = FileMeta {
+                    width: Some(info.width),
+                    height: Some(info.height),
+                    duration: Some(info.duration),
+                };
                 write_items(lib, &mut vec![(f.clone(), meta, items)])?;
                 prog.file_done(lib, f, 0, false); // frames were counted as they were embedded
             }
-            Ok(None) => return Ok(()), // cancelled: file stays pending
-            Err(e) if lib.control.is_cancelled() => {
-                tracing::debug!("cancelled during {}: {e:#}", f.path.display());
-                return Ok(());
-            }
+            // Cancelled: the file stays pending for the next run.
+            Err(_) if lib.control.is_cancelled() => {}
             Err(e) => {
-                if is_fatal(&e) {
-                    return Err(e);
-                }
                 let failed = crate::indexer::file_failed(lib, f, &e)?;
                 prog.file_done(lib, f, 0, failed);
             }
@@ -55,12 +182,8 @@ pub(crate) fn index_videos(
     Ok(())
 }
 
-/// Errors from the model itself (not the file) should stop the run instead of marking every
+/// Errors from the model itself (not the file) stop the run instead of marking every
 /// remaining video as broken.
-fn is_fatal(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<ModelError>().is_some())
-}
-
 #[derive(Debug)]
 struct ModelError(String);
 
@@ -71,88 +194,6 @@ impl std::fmt::Display for ModelError {
 }
 
 impl std::error::Error for ModelError {}
-
-type Sampled = (f64, Vec<u8>);
-
-fn index_one(
-    lib: &Library,
-    enc: &mut VisionEncoder,
-    f: &FileRow,
-    prog: &mut Progress,
-) -> Result<Option<(FileMeta, Vec<NewItem>)>> {
-    let spec = lib.model();
-    let fit = fit_for(spec);
-    let cfg = SamplerConfig::default();
-    let batch = enc.batch_size();
-    let (tx, rx) = crossbeam_channel::bounded::<Sampled>(batch * 2);
-    // Segments are merged as embeddings arrive: memory stays flat for very long videos.
-    let mut frames = Merger::new(segment_tau(), cfg.interval);
-    let path = f.path.clone();
-    let (info, embed_result) = std::thread::scope(|s| {
-        let sampler = s.spawn(move || {
-            video::sample(
-                &path,
-                cfg,
-                spec.image_size,
-                &|| lib.control.checkpoint(),
-                &mut |fr| {
-                    let px = img::to_square(&fr.rgb, spec.image_size, fit)?;
-                    tx.send((fr.t, px))
-                        .map_err(|_| anyhow::anyhow!("embedding stopped"))
-                },
-            )
-        });
-        let mut pending: Vec<Sampled> = Vec::with_capacity(batch);
-        let mut embed = |pending: &mut Vec<Sampled>, frames: &mut Merger| -> Result<()> {
-            if pending.is_empty() {
-                return Ok(());
-            }
-            let px: Vec<&[u8]> = pending.iter().map(|p| p.1.as_slice()).collect();
-            let embs = enc.embed(&px).map_err(|e| ModelError(format!("{e:#}")))?;
-            for (p, e) in pending.drain(..).zip(embs) {
-                frames.push(p.0, e);
-            }
-            Ok(())
-        };
-        let mut result = Ok(());
-        for item in rx.iter() {
-            pending.push(item);
-            if pending.len() >= batch {
-                let n = pending.len();
-                result = embed(&mut pending, &mut frames);
-                prog.items_done(lib, n);
-                if result.is_err() {
-                    break;
-                }
-            }
-        }
-        // Dropping the receiver makes the sampler's next send fail, so it stops decoding.
-        drop(rx);
-        if result.is_ok() {
-            let n = pending.len();
-            result = embed(&mut pending, &mut frames);
-            prog.items_done(lib, n);
-        }
-        (
-            sampler
-                .join()
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("video decoder panicked"))),
-            result,
-        )
-    });
-    embed_result?;
-    if lib.control.is_cancelled() {
-        return Ok(None);
-    }
-    let info = info?;
-    let items = frames.finish(info.duration);
-    let meta = FileMeta {
-        width: Some(info.width),
-        height: Some(info.height),
-        duration: Some(info.duration),
-    };
-    Ok(Some((meta, items)))
-}
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()

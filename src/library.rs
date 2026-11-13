@@ -122,6 +122,8 @@ pub struct Library {
     jobs_finished: Arc<AtomicU64>,
     /// Set when folders change while a job runs; the indexer scans again before finishing.
     pub(crate) rescan_requested: AtomicBool,
+    /// Weak self-reference so jobs can persist the index cache when they finish.
+    self_ref: RwLock<std::sync::Weak<Library>>,
     text: Mutex<Option<TextEncoder>>,
     notifier: RwLock<Option<Notifier>>,
 }
@@ -171,8 +173,14 @@ impl Library {
         };
         let spec = registry::get(&id).ok_or_else(|| anyhow!("unknown model '{id}'"))?;
         let db = Db::open(&paths.db_path())?;
-        let index = load_index(&db, spec)?;
-        Ok(Arc::new(Self {
+        let epoch = db.items_epoch()?;
+        let cache = index_cache_path(&paths, spec);
+        let (index, from_cache) =
+            match VectorIndex::load(&cache, spec.id, spec.dim, spec.quant_scale, epoch) {
+                Some(i) => (i, true),
+                None => (load_index(&db, spec)?, false),
+            };
+        let lib = Arc::new(Self {
             paths,
             settings: RwLock::new(settings),
             model: RwLock::new(spec),
@@ -184,9 +192,44 @@ impl Library {
             busy: Arc::new(AtomicBool::new(false)),
             jobs_finished: Arc::new(AtomicU64::new(0)),
             rescan_requested: AtomicBool::new(false),
+            self_ref: RwLock::new(std::sync::Weak::new()),
             text: Mutex::new(None),
             notifier: RwLock::new(None),
-        }))
+        });
+        *lib.self_ref.write() = Arc::downgrade(&lib);
+        if !from_cache {
+            let l = Arc::clone(&lib);
+            std::thread::spawn(move || l.save_index_cache());
+        }
+        Ok(lib)
+    }
+
+    /// Writes the in-memory index to disk so the next start can skip decoding every vector.
+    pub fn save_index_cache(&self) {
+        let spec = self.model();
+        let path = index_cache_path(&self.paths, spec);
+        // Epoch and index are read consistently: writers update the index while holding the
+        // db lock (lock order db → index).
+        let db = self.db.lock();
+        let (epoch, count) = match db
+            .items_epoch()
+            .and_then(|e| Ok((e, db.item_count(spec.id)?)))
+        {
+            Ok(v) => v,
+            Err(e) => return tracing::warn!("index cache: {e:#}"),
+        };
+        let index = self.index.read();
+        drop(db);
+        if index.len() != count {
+            // Never persist an index that doesn't mirror the database.
+            return tracing::debug!(
+                "index cache not written: {} vectors vs {count} items",
+                index.len()
+            );
+        }
+        if let Err(e) = index.save(&path, spec.id, epoch) {
+            tracing::warn!("could not write index cache {}: {e}", path.display());
+        }
     }
 
     pub fn paths(&self) -> &Paths {
@@ -429,6 +472,7 @@ impl Library {
         self.busy.store(true, Ordering::Release);
         let busy = Arc::clone(&self.busy);
         let finished = Arc::clone(&self.jobs_finished);
+        let weak = self.self_ref.read().clone();
         let job = move || {
             // Reset even if the job panics.
             struct Done(Arc<AtomicBool>, Arc<AtomicU64>);
@@ -440,6 +484,9 @@ impl Library {
             }
             let _done = Done(busy, finished);
             f();
+            if let Some(lib) = weak.upgrade() {
+                lib.save_index_cache();
+            }
         };
         match std::thread::Builder::new()
             .name("recollect-worker".into())
@@ -560,6 +607,10 @@ impl Drop for Library {
             let _ = h.join();
         }
     }
+}
+
+fn index_cache_path(paths: &Paths, spec: &ModelSpec) -> PathBuf {
+    paths.data.join(format!("index-{}.bin", spec.id))
 }
 
 fn load_index(db: &Db, spec: &ModelSpec) -> Result<VectorIndex> {
@@ -687,11 +738,13 @@ mod tests {
                 });
             }
             db.sync_folder(f, &files, &[]).unwrap();
+            // Spread over all dimensions like real embeddings (no saturating components):
+            // q = constant direction, r = orthogonal alternating direction.
             let unit = |a: f32| {
-                let mut v = vec![0.0; 512];
-                v[0] = a.cos();
-                v[1] = a.sin();
-                v
+                let c = 1.0 / (512f32).sqrt();
+                (0..512)
+                    .map(|i| c * a.cos() + if i % 2 == 0 { c } else { -c } * a.sin())
+                    .collect::<Vec<f32>>()
             };
             let mut batch = Vec::new();
             for row in db.pending(registry::CLIP_B32.id).unwrap() {
@@ -716,8 +769,7 @@ mod tests {
             db.put_items(registry::CLIP_B32.id, &batch).unwrap();
         }
         let lib = open(d.path());
-        let mut q = vec![0.0; 512];
-        q[0] = 1.0;
+        let q = vec![1.0 / (512f32).sqrt(); 512];
         let hits = search::by_vector(
             &lib,
             &q,
@@ -818,6 +870,27 @@ mod tests {
             crate::store::db::SyncStats::default()
         );
         assert_eq!(db.stats("m").unwrap().images, 0);
+    }
+
+    #[test]
+    fn index_cache_is_written_and_reused() {
+        let d = tempfile::tempdir().unwrap();
+        seed(&open(d.path()));
+        let lib = open(d.path()); // rebuilt from the database
+        assert_eq!(lib.indexed_items(), 1);
+        lib.save_index_cache();
+        let cache = index_cache_path(lib.paths(), lib.model());
+        assert!(cache.exists());
+        drop(lib);
+        let lib = open(d.path());
+        assert_eq!(lib.indexed_items(), 1, "loaded from the cache");
+        // Any database change makes the cache stale.
+        lib.db.lock().set_meta("items_epoch", "999").unwrap();
+        let epoch = lib.db.lock().items_epoch().unwrap();
+        assert!(
+            VectorIndex::load(&cache, lib.model().id, 512, lib.model().quant_scale, epoch)
+                .is_none()
+        );
     }
 
     #[test]

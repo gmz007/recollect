@@ -101,9 +101,11 @@ pub const SIGLIP_B16: ModelSpec = ModelSpec {
         },
         ModelFile {
             local: TEXT_FILE,
-            remote: "onnx/text_model.onnx",
-            size: 441_332_132,
-            sha256: "3aa7fdbd20eaa8740cce17bf82913de641fcb632a768fed59f661cdcd0c32553",
+            // int8 text tower: eval within noise of fp32 (R@10 0.973 vs 0.980, P@10 0.835 vs
+            // 0.830), 330 MB less RAM and download (M4 report).
+            remote: "onnx/text_model_quantized.onnx",
+            size: 111_475_220,
+            sha256: "ad0329b1f35acc66d8953ff2559ce358da8eb0a7011794cf951523d63a4dbce2",
         },
         ModelFile {
             local: TOKENIZER_FILE,

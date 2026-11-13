@@ -62,6 +62,7 @@ pub(crate) fn by_vector(
 ) -> Result<Vec<SearchHit>> {
     // Over-fetch: videos contribute many items per file, and re-scoring may reorder. If long
     // videos crowd the candidates (few distinct files), widen the scan.
+    let t0 = std::time::Instant::now();
     let mut k = (opts.limit * 4 + 100).min(5000);
     let cands = loop {
         let cands = {
@@ -77,10 +78,11 @@ pub(crate) fn by_vector(
         }
         k = (k * 4).min(MAX_CANDIDATES);
     };
+    let t_scan = t0.elapsed();
     if cands.is_empty() {
         return Ok(Vec::new());
     }
-    // Re-score only what can appear: the best few items of the first `limit` + margin files.
+    // Keep only what can appear: the best few items of the first `limit` + margin files.
     let mut per_file: HashMap<i64, usize> = HashMap::new();
     let cands: Vec<_> = cands
         .into_iter()
@@ -94,18 +96,15 @@ pub(crate) fn by_vector(
             *e <= MAX_MOMENTS + 1
         })
         .collect();
-    let ids: Vec<i64> = cands.iter().map(|c| c.item_id).collect();
-    let db = lib.db.lock();
-    // Exact re-scoring with the stored f32 vectors.
-    let embs = db.embeddings(&ids)?;
-    let mut scored: Vec<(i64, i64, f32)> = cands
+    // Ranking uses the i8 scores directly: re-scoring with the stored f32 vectors made no
+    // difference on the eval set but cost ~30 ms of random disk reads per query at 1.2 M
+    // vectors (M4 report).
+    let scored: Vec<(i64, i64, f32)> = cands
         .iter()
-        .map(|c| {
-            let s = embs.get(&c.item_id).map(|e| dot(e, q)).unwrap_or(c.score);
-            (c.item_id, c.file_id, s)
-        })
+        .map(|c| (c.item_id, c.file_id, c.score))
         .collect();
-    scored.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let db = lib.db.lock();
+    let t_lock = t0.elapsed();
     let grouped = group_by_file(&scored, opts.limit);
     let all_ids: Vec<i64> = grouped
         .iter()
@@ -117,6 +116,13 @@ pub(crate) fn by_vector(
         .map(|i| (i.item_id, i))
         .collect();
     drop(db);
+    tracing::debug!(
+        "search: scan {:?} (k={k}), db lock {:?}, info {:?} ({} rows)",
+        t_scan,
+        t_lock - t_scan,
+        t0.elapsed() - t_lock,
+        infos.len()
+    );
     let moment_infos = &infos;
     Ok(grouped
         .into_iter()
@@ -149,10 +155,6 @@ pub(crate) fn by_vector(
             })
         })
         .collect())
-}
-
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// (best item id, best score, further (item id, score) moments)

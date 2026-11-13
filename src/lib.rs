@@ -2,6 +2,7 @@
 //!
 //! The [`library::Library`] facade is the entry point for both the GUI and the CLI.
 
+pub mod bench;
 pub mod cli;
 pub mod config;
 pub mod eval;

@@ -142,6 +142,15 @@ pub struct Db {
     conn: Connection,
 }
 
+fn bump_epoch(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('items_epoch', '1')
+         ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+        [],
+    )?;
+    Ok(())
+}
+
 pub fn emb_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
@@ -239,6 +248,7 @@ impl Db {
             )?;
             tx.execute("DELETE FROM folders WHERE id = ?1", [child.id])?;
         }
+        bump_epoch(&tx)?;
         tx.commit()?;
         Ok(id)
     }
@@ -266,6 +276,7 @@ impl Db {
         };
         tx.execute("DELETE FROM files WHERE folder_id = ?1", [folder_id])?;
         tx.execute("DELETE FROM folders WHERE id = ?1", [folder_id])?;
+        bump_epoch(&tx)?;
         tx.commit()?;
         Ok(ids)
     }
@@ -347,6 +358,7 @@ impl Db {
                 }
             }
         }
+        bump_epoch(&tx)?;
         tx.commit()?;
         Ok(stats)
     }
@@ -419,6 +431,7 @@ impl Db {
                 all.push(ids);
             }
         }
+        bump_epoch(&tx)?;
         tx.commit()?;
         Ok(all)
     }
@@ -428,9 +441,32 @@ impl Db {
             "UPDATE files SET status = 2, error = ?2, indexed_at = ?3 WHERE id = ?1",
             params![file_id, error, now()],
         )?;
-        self.conn
-            .execute("DELETE FROM items WHERE file_id = ?1", [file_id])?;
+        if self
+            .conn
+            .execute("DELETE FROM items WHERE file_id = ?1", [file_id])?
+            > 0
+        {
+            bump_epoch(&self.conn)?;
+        }
         Ok(())
+    }
+
+    /// Number of items embedded with `model`.
+    pub fn item_count(&self, model: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items JOIN files ON files.id = items.file_id WHERE files.status = 1 AND files.model = ?1",
+            [model],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Changes whenever the set of stored items may have changed (guards the index cache).
+    pub fn items_epoch(&self) -> Result<u64> {
+        Ok(self
+            .meta("items_epoch")?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
     }
 
     /// Streams all items embedded with `model` (for building the in-memory index).

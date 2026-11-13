@@ -72,6 +72,32 @@ pub enum Command {
     },
     /// Show library statistics and recent errors.
     Status,
+    /// Performance measurements on synthetic data (needs --home <scratch dir>).
+    Bench {
+        #[command(subcommand)]
+        cmd: BenchCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BenchCmd {
+    /// Startup load, memory, database size and search latency for a synthetic library.
+    Search {
+        #[arg(long, default_value_t = 200_000)]
+        images: usize,
+        #[arg(long, default_value_t = 20_000)]
+        videos: usize,
+        /// Segments per video (2,000 h / 20,000 videos = 6 min each; 50 = one per 7 s).
+        #[arg(long, default_value_t = 50)]
+        segments: usize,
+        #[arg(long, default_value_t = 50)]
+        queries: usize,
+    },
+    /// Scan and unchanged-rescan time for a tree of empty files.
+    Rescan {
+        #[arg(long, default_value_t = 200_000)]
+        files: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -195,6 +221,7 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
                 println!("model {}\n{rep}", lib.model().id);
             }
         }
+        Command::Bench { .. } => unreachable!("handled before opening the library"),
         Command::Status => {
             let s = lib.stats()?;
             println!(
@@ -218,6 +245,27 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runs a benchmark (without opening a library first).
+pub fn bench(cli: &Cli, cmd: &BenchCmd) -> Result<()> {
+    crate::bench::require_scratch_home(cli.home.as_ref())?;
+    let dir = cli.home.clone().expect("checked");
+    let paths = Paths::under(&dir);
+    match cmd {
+        BenchCmd::Search {
+            images,
+            videos,
+            segments,
+            queries,
+        } => {
+            let id = cli.model.as_deref().unwrap_or(registry::DEFAULT_GPU_MODEL);
+            crate::bench::search(&paths, id, *images, *videos, *segments, *queries)
+        }
+        BenchCmd::Rescan { files } => {
+            crate::bench::rescan(&Paths::under(&dir.join("rescan-home")), &dir, *files)
+        }
+    }
 }
 
 fn download_model(lib: &Arc<Library>, yes: bool) -> Result<()> {

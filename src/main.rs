@@ -15,6 +15,10 @@ fn main() -> anyhow::Result<()> {
         recollect::gpu::force_cpu(true);
     }
     let gui = matches!(args.command, None | Some(Command::Gui));
+    if let Some(Command::Bench { cmd }) = &args.command {
+        // Benchmarks open their own libraries; don't load one up front.
+        return cli::bench(&args, cmd);
+    }
     let lib = match cli::paths(&args).and_then(|p| Library::open(p, args.model.as_deref())) {
         Ok(lib) => lib,
         Err(e) if gui => {
