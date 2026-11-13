@@ -180,11 +180,11 @@ impl Db {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // Another process (CLI next to the GUI) may hold a lock briefly; set this first.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        // Another process (CLI next to the GUI) may hold the write lock briefly.
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
         let db = Self { conn };
         match db.meta("schema_version")? {
@@ -282,6 +282,15 @@ impl Db {
         protected: &[PathBuf],
     ) -> Result<SyncStats> {
         let tx = self.conn.transaction()?;
+        // The folder may have been removed (or absorbed by a parent) since the scan started.
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM folders WHERE id = ?1)",
+            [folder_id],
+            |r| r.get(0),
+        )?;
+        if !present {
+            return Ok(SyncStats::default());
+        }
         let mut existing: HashMap<String, (i64, u64, i64)> = HashMap::new();
         {
             let mut st =
@@ -527,6 +536,23 @@ impl Db {
             errors: errors as usize,
             items: items as usize,
         })
+    }
+
+    pub fn folder_file_count(&self, folder_id: i64) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE folder_id = ?1",
+            [folder_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Makes every failed file pending again (e.g. after fixing a drive or updating Recollect).
+    pub fn retry_errors(&self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE files SET status = 0, error = NULL WHERE status = 2",
+            [],
+        )?)
     }
 
     /// The file an item belongs to and the model that file was indexed with.

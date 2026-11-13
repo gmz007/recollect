@@ -31,7 +31,6 @@ pub enum Activity {
     },
     LoadingModel,
     Indexing(IndexProgress),
-    Removing,
     SwitchingModel,
 }
 
@@ -57,6 +56,8 @@ pub struct RunSummary {
     pub seconds: f32,
     pub cancelled: bool,
     pub device: Option<Device>,
+    /// Folders that were unreachable or looked unmounted (kept as they were).
+    pub skipped_folders: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -117,8 +118,10 @@ pub struct Library {
     worker: Mutex<Option<JoinHandle<()>>>,
     /// True while a background job runs (lock-free, polled by the UI every frame).
     busy: Arc<AtomicBool>,
-    /// Incremented each time a background job finishes.
+    /// Incremented each time a background job (or a folder removal) finishes.
     jobs_finished: Arc<AtomicU64>,
+    /// Set when folders change while a job runs; the indexer scans again before finishing.
+    pub(crate) rescan_requested: AtomicBool,
     text: Mutex<Option<TextEncoder>>,
     notifier: RwLock<Option<Notifier>>,
 }
@@ -136,7 +139,24 @@ impl Library {
     /// Opens (or creates) the library under `paths`. `model_override` forces a model id.
     pub fn open(paths: Paths, model_override: Option<&str>) -> Result<Arc<Self>> {
         paths.create_all()?;
-        let mut settings = Settings::load(&paths.settings_path())?;
+        let mut settings = match Settings::load(&paths.settings_path()) {
+            Ok(s) => s,
+            Err(e) => {
+                // Keep the broken file for inspection and start with defaults.
+                tracing::warn!("{e:#}; using default settings");
+                let bad = paths.settings_path().with_extension("toml.broken");
+                let _ = std::fs::rename(paths.settings_path(), bad);
+                Settings::default()
+            }
+        };
+        if settings
+            .model
+            .as_deref()
+            .is_some_and(|id| registry::get(id).is_none())
+        {
+            tracing::warn!("unknown model in settings; choosing a default");
+            settings.model = None;
+        }
         let id = match model_override {
             Some(id) => id.to_string(),
             None => match &settings.model {
@@ -163,6 +183,7 @@ impl Library {
             worker: Mutex::new(None),
             busy: Arc::new(AtomicBool::new(false)),
             jobs_finished: Arc::new(AtomicU64::new(0)),
+            rescan_requested: AtomicBool::new(false),
             text: Mutex::new(None),
             notifier: RwLock::new(None),
         }))
@@ -225,6 +246,11 @@ impl Library {
         self.db.lock().errors(limit)
     }
 
+    /// Marks failed files pending again; the next indexing run retries them.
+    pub fn retry_errors(&self) -> Result<usize> {
+        self.db.lock().retry_errors()
+    }
+
     pub fn folders(&self) -> Result<Vec<Folder>> {
         self.db.lock().folders()
     }
@@ -242,8 +268,28 @@ impl Library {
         }
         let canon = strip_verbatim(canon);
         self.db.lock().add_folder(&canon)?;
+        self.rescan_requested.store(true, Ordering::Release);
         self.notify();
         Ok(())
+    }
+
+    /// Adds a folder off the calling thread (canonicalizing a dead network path or waiting for
+    /// the database must not freeze the UI), then makes sure it gets indexed.
+    pub fn start_add_folder(self: &Arc<Self>, path: PathBuf) {
+        let lib = Arc::clone(self);
+        std::thread::spawn(move || {
+            match lib.add_folder(&path) {
+                Ok(()) => {
+                    // If a job is running it picks the folder up (rescan_requested).
+                    if !lib.is_busy() && lib.model_installed() {
+                        let _ = lib.start_indexing();
+                    }
+                }
+                Err(e) => lib.update_status(|s| s.last_error = Some(format!("{e:#}"))),
+            }
+            lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
+            lib.notify();
+        });
     }
 
     /// Removes a folder and its index entries. Media files are never touched.
@@ -261,33 +307,19 @@ impl Library {
         Ok(())
     }
 
-    /// Cancels any running job, then removes the folder as a background job.
+    /// Removes a folder on a background thread. It never cancels the running job: removal is
+    /// a database transaction plus an index update under the usual lock order, and a running
+    /// indexer simply skips files that disappeared.
     pub fn start_remove_folder(self: &Arc<Self>, folder_id: i64) {
         let lib = Arc::clone(self);
         std::thread::spawn(move || {
-            // Another job may grab the worker between `wait` and `spawn` (e.g. an automatic
-            // rescan); cancel it too and retry.
-            for _ in 0..50 {
-                lib.cancel();
-                lib.wait();
-                let job = Arc::clone(&lib);
-                let res = lib.spawn(move || {
-                    job.update_status(|s| s.activity = Activity::Removing);
-                    let r = job.remove_folder(folder_id);
-                    job.update_status(|s| {
-                        s.activity = Activity::Idle;
-                        if let Err(e) = r {
-                            s.last_error = Some(format!("Removing the folder failed: {e:#}"));
-                        }
-                    });
+            if let Err(e) = lib.remove_folder(folder_id) {
+                lib.update_status(|s| {
+                    s.last_error = Some(format!("Removing the folder failed: {e:#}"))
                 });
-                if res.is_ok() {
-                    return;
-                }
             }
-            lib.update_status(|s| {
-                s.last_error = Some("Could not remove the folder; try again.".into())
-            });
+            lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
+            lib.notify();
         });
     }
 
@@ -324,8 +356,8 @@ impl Library {
         let index = load_index(&self.db.lock(), spec)?;
         new.save(&self.paths.settings_path())?;
         *self.settings.write() = new;
-        *self.model.write() = spec;
         *self.index.write() = index;
+        *self.model.write() = spec;
         *self.text.lock() = None;
         Ok(())
     }
@@ -368,6 +400,7 @@ impl Library {
         }
         let lib = Arc::clone(self);
         self.spawn(move || {
+            lib.update_status(|s| s.last_run = None);
             let res = indexer::run(&lib);
             lib.update_status(|s| {
                 s.activity = Activity::Idle;
@@ -438,6 +471,20 @@ impl Library {
         if let Some(h) = handle {
             let _ = h.join();
         }
+    }
+
+    /// Like [`Self::wait`] but gives up after `limit` (e.g. at exit, when a download may be
+    /// stuck in a network read). Returns true if the job finished.
+    pub fn wait_for(&self, limit: std::time::Duration) -> bool {
+        let start = Instant::now();
+        while self.is_busy() {
+            if start.elapsed() >= limit {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        self.wait();
+        true
     }
 
     /// Runs indexing on the calling thread (CLI).
@@ -696,6 +743,81 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 20);
         assert!(hits.iter().all(|h| h.kind == MediaKind::Image));
+    }
+
+    #[test]
+    fn empty_mount_point_keeps_the_index_and_missing_files_stay_pending() {
+        let d = tempfile::tempdir().unwrap();
+        let media = d.path().join("mnt");
+        std::fs::create_dir_all(&media).unwrap();
+        let lib = open(d.path());
+        lib.add_folder(&media).unwrap();
+        {
+            // As if indexed earlier, then the drive was unmounted (empty mount point).
+            let mut db = lib.db.lock();
+            let f = db.folders().unwrap()[0].id;
+            let file = ScannedFile {
+                path: media.join("a.jpg"),
+                kind: MediaKind::Image,
+                size: 1,
+                mtime: 1,
+            };
+            db.sync_folder(f, &[file], &[]).unwrap();
+            let id = db.pending(registry::CLIP_B32.id).unwrap()[0].id;
+            let item = NewItem {
+                t_start: None,
+                t_end: None,
+                embedding: vec![0.1; 512],
+            };
+            db.put_items(
+                registry::CLIP_B32.id,
+                &[(id, FileMeta::default(), vec![item])],
+            )
+            .unwrap();
+        }
+        let sum = crate::indexer::run(&lib).unwrap();
+        assert_eq!(
+            sum.skipped_folders,
+            vec![std::fs::canonicalize(&media).unwrap()]
+        );
+        assert_eq!(lib.stats().unwrap().indexed, 1, "index kept");
+
+        // A file that vanishes between scan and decode is not marked as failed.
+        let row = crate::store::db::FileRow {
+            id: 1,
+            path: media.join("gone.jpg"),
+            kind: MediaKind::Image,
+            size: 1,
+            mtime: 1,
+            status: crate::store::db::FileStatus::Pending,
+        };
+        let err = anyhow!("decode failed");
+        assert!(!crate::indexer::file_failed(&lib, &row, &err).unwrap());
+    }
+
+    #[test]
+    fn retry_errors_and_sync_of_a_removed_folder() {
+        let mut db = Db::open_in_memory().unwrap();
+        let f = db.add_folder(Path::new("/lib")).unwrap();
+        let file = ScannedFile {
+            path: "/lib/a.jpg".into(),
+            kind: MediaKind::Image,
+            size: 1,
+            mtime: 1,
+        };
+        db.sync_folder(f, std::slice::from_ref(&file), &[]).unwrap();
+        let id = db.pending("m").unwrap()[0].id;
+        db.set_error(id, "bad").unwrap();
+        assert!(db.pending("m").unwrap().is_empty());
+        assert_eq!(db.retry_errors().unwrap(), 1);
+        assert_eq!(db.pending("m").unwrap().len(), 1);
+        db.remove_folder(f).unwrap();
+        // A scan that started before the removal must not resurrect rows (or hit FK errors).
+        assert_eq!(
+            db.sync_folder(f, &[file], &[]).unwrap(),
+            crate::store::db::SyncStats::default()
+        );
+        assert_eq!(db.stats("m").unwrap().images, 0);
     }
 
     #[test]

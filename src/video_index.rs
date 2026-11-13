@@ -47,8 +47,8 @@ pub(crate) fn index_videos(
                 if is_fatal(&e) {
                     return Err(e);
                 }
-                lib.db.lock().set_error(f.id, &format!("{e:#}"))?;
-                prog.file_done(lib, f, 0, true);
+                let failed = crate::indexer::file_failed(lib, f, &e)?;
+                prog.file_done(lib, f, 0, failed);
             }
         }
     }

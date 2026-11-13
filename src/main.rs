@@ -14,7 +14,16 @@ fn main() -> anyhow::Result<()> {
     if args.cpu {
         recollect::gpu::force_cpu(true);
     }
-    let lib = Library::open(cli::paths(&args)?, args.model.as_deref())?;
+    let gui = matches!(args.command, None | Some(Command::Gui));
+    let lib = match cli::paths(&args).and_then(|p| Library::open(p, args.model.as_deref())) {
+        Ok(lib) => lib,
+        Err(e) if gui => {
+            let msg = format!("{e:#}");
+            eprintln!("error: {msg}");
+            return recollect::ui::run_error(msg);
+        }
+        Err(e) => return Err(e),
+    };
     match args.command {
         None | Some(Command::Gui) => recollect::ui::run(lib),
         Some(_) => cli::run(&args, &lib),

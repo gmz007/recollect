@@ -66,6 +66,9 @@ fn home_with_model(id: &str) -> Option<(tempfile::TempDir, recollect::config::Pa
     let dst = paths.models_dir().join(id);
     std::fs::create_dir_all(&dst).unwrap();
     for e in std::fs::read_dir(&src).unwrap().flatten() {
+        if !e.path().is_file() {
+            continue;
+        }
         let to = dst.join(e.file_name());
         if std::fs::hard_link(e.path(), &to).is_err() {
             std::fs::copy(e.path(), &to).unwrap();
@@ -78,8 +81,13 @@ fn home_with_model(id: &str) -> Option<(tempfile::TempDir, recollect::config::Pa
 #[ignore = "needs downloaded models (RECOLLECT_TEST_MODELS)"]
 fn cancel_resume_errors_and_search_end_to_end() {
     use recollect::Library;
+    use recollect::library::Activity;
     use recollect::search::SearchOptions;
-    let Some((_home, paths)) = home_with_model(registry::CLIP_B32.id) else {
+    let Some((spec, (_home, paths))) = registry::MODELS
+        .iter()
+        .find_map(|m| Some((m, home_with_model(m.id)?)))
+    else {
+        eprintln!("SKIPPED: no model under RECOLLECT_TEST_MODELS");
         return;
     };
     recollect::gpu::force_cpu(true);
@@ -106,28 +114,30 @@ fn cancel_resume_errors_and_search_end_to_end() {
     std::fs::write(media.path().join("broken.jpg"), b"\xFF\xD8\xFF garbage").unwrap();
 
     {
-        let lib = Library::open(paths.clone(), Some(registry::CLIP_B32.id)).unwrap();
+        let lib = Library::open(paths.clone(), Some(spec.id)).unwrap();
         lib.add_folder(media.path()).unwrap();
-        lib.start_indexing().unwrap();
-        // Cancel once embedding has started, to stop in the middle of the run.
-        for _ in 0..2000 {
-            if matches!(
-                lib.status().activity,
-                recollect::library::Activity::Indexing(_)
-            ) || !lib.is_busy()
+        // Cancel deterministically as soon as the first file is done.
+        let weak = std::sync::Arc::downgrade(&lib);
+        lib.set_notifier(move || {
+            if let Some(l) = weak.upgrade()
+                && let Activity::Indexing(p) = l.status().activity
+                && p.done > 0
             {
-                break;
+                l.cancel();
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        lib.cancel();
+        });
+        lib.start_indexing().unwrap();
         lib.wait();
         let s = lib.stats().unwrap();
         assert_eq!(s.indexed + s.pending + s.errors, 31, "{s:?}");
+        assert!(
+            s.pending > 0,
+            "cancel should leave work for the resume: {s:?}"
+        );
         assert_eq!(lib.indexed_items(), s.items, "index and database agree");
     }
     // "Restart": a new Library on the same data resumes where the last run stopped.
-    let lib = Library::open(paths, Some(registry::CLIP_B32.id)).unwrap();
+    let lib = Library::open(paths, Some(spec.id)).unwrap();
     let sum = lib.index_blocking().unwrap();
     assert!(!sum.cancelled);
     let s = lib.stats().unwrap();
@@ -142,6 +152,7 @@ fn cancel_resume_errors_and_search_end_to_end() {
             },
         )
         .unwrap();
+    assert!(!hits.is_empty(), "search returned nothing");
     let top = hits[0]
         .path
         .file_name()

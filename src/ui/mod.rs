@@ -89,6 +89,7 @@ pub struct App {
     status: Status,
     was_busy: bool,
     jobs_seen: u64,
+    last_prune: Instant,
     consent_dismissed: bool,
     settings_open: bool,
     settings_draft: Settings,
@@ -102,11 +103,7 @@ impl App {
         let search = SearchWorker::new(Arc::clone(&lib), move || c.request_repaint());
         let thumbs = ThumbCache::new(ctx, lib.paths().thumbs_dir(), 3);
         let settings = lib.settings();
-        {
-            let dir = lib.paths().thumbs_dir();
-            let max = settings.thumb_cache_mb.saturating_mul(1 << 20);
-            std::thread::spawn(move || crate::thumbs::prune(&dir, max));
-        }
+        prune_thumbnails(&lib);
         let mut app = Self {
             lib,
             search,
@@ -132,6 +129,7 @@ impl App {
             status: Status::default(),
             was_busy: false,
             jobs_seen: 0,
+            last_prune: Instant::now(),
             consent_dismissed: false,
             settings_open: false,
             settings_draft: settings,
@@ -284,6 +282,10 @@ impl App {
             self.rerun();
         }
         self.was_busy = busy;
+        if self.last_prune.elapsed() > Duration::from_secs(600) {
+            self.last_prune = Instant::now();
+            prune_thumbnails(&self.lib);
+        }
         if self
             .notice
             .as_ref()
@@ -420,6 +422,15 @@ impl App {
                                     .on_hover_text(format!("{}\n{e}", p.display()));
                             }
                         });
+                    if ui
+                        .add_enabled(!self.lib.is_busy(), egui::Button::new("Retry failed files"))
+                        .clicked()
+                    {
+                        match self.lib.retry_errors() {
+                            Ok(_) => self.start_indexing(),
+                            Err(e) => self.notify(format!("{e:#}")),
+                        }
+                    }
                 });
         }
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
@@ -438,37 +449,20 @@ impl App {
     }
 
     fn add_folder(&mut self, p: PathBuf) {
-        match self.lib.add_folder(&p) {
-            Ok(()) => {
-                self.refresh_snapshot(true);
-                if self.lib.model_installed() && !self.lib.is_busy() {
-                    self.start_indexing();
-                } else if self.lib.is_busy() {
-                    self.notify("Folder added. It will be indexed on the next rescan.");
-                }
-            }
-            Err(e) => self.notify(format!("{e:#}")),
-        }
+        // Runs in the background; a running indexing job picks the new folder up.
+        self.lib.start_add_folder(p);
+        self.snapshot_again = true;
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             match &self.status.activity {
                 Activity::Idle => {
+                    let waiting = self.snapshot.stats.pending;
                     if let Some(r) = &self.status.last_run {
-                        let dev = r.device.map(|d| format!(" on {d}")).unwrap_or_default();
-                        ui.label(format!(
-                            "Up to date. Last scan: {} new, {} changed, {} removed{}{}.",
-                            r.added,
-                            r.changed,
-                            r.removed,
-                            if r.files > 0 {
-                                format!("; {} files indexed in {:.0}s", r.files, r.seconds)
-                            } else {
-                                String::new()
-                            },
-                            dev
-                        ));
+                        ui.label(run_summary_text(r, waiting));
+                    } else if self.status.last_error.is_some() {
+                        ui.label(format!("Stopped. {waiting} files waiting."));
                     } else {
                         ui.label("Ready.");
                     }
@@ -489,10 +483,6 @@ impl App {
                     ui.spinner();
                     ui.label("Loading model…");
                 }
-                Activity::Removing => {
-                    ui.spinner();
-                    ui.label("Removing folder from the library…");
-                }
                 Activity::SwitchingModel => {
                     ui.spinner();
                     ui.label("Switching model…");
@@ -512,6 +502,12 @@ impl App {
                         .unwrap_or_default();
                     ui.label(format!("{:.0} items/s on {dev} · {name}", p.rate));
                 }
+            }
+            if matches!(self.status.activity, Activity::Downloading { .. })
+                && ui.button("Cancel download").clicked()
+            {
+                self.lib.cancel();
+                self.consent_dismissed = true;
             }
             let pausable = matches!(
                 self.status.activity,
@@ -842,7 +838,8 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.label(RichText::new("Search model").strong());
                 let current = self
@@ -867,9 +864,11 @@ impl App {
                     }
                 }
                 ui.label(
-                    RichText::new("Switching models re-indexes your library.")
-                        .small()
-                        .weak(),
+                    RichText::new(
+                        "Switching models (also back to an earlier one) re-indexes your library.",
+                    )
+                    .small()
+                    .weak(),
                 );
                 ui.add_space(8.0);
                 ui.checkbox(
@@ -921,10 +920,72 @@ impl App {
                     self.selected = None;
                 }
                 self.refresh_snapshot(true);
+                prune_thumbnails(&self.lib);
             }
         }
         self.settings_open = open;
     }
+}
+
+/// Keeps the thumbnail cache within the configured size (background thread).
+fn prune_thumbnails(lib: &Library) {
+    let dir = lib.paths().thumbs_dir();
+    let max = lib.settings().thumb_cache_mb.saturating_mul(1 << 20);
+    std::thread::spawn(move || crate::thumbs::prune(&dir, max));
+}
+
+/// Shown instead of the app when the library can't be opened (no console on desktop launches).
+pub fn run_error(message: String) -> anyhow::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Recollect")
+            .with_app_id("recollect")
+            .with_inner_size([640.0, 280.0]),
+        ..Default::default()
+    };
+    eframe::run_ui_native("Recollect", options, move |ui, _frame| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.heading("Recollect could not start");
+            ui.add_space(8.0);
+            ui.label(&message);
+            ui.add_space(8.0);
+            ui.label(RichText::new("Your photos and videos were not touched.").weak());
+            ui.add_space(12.0);
+            if ui.button("Quit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+    })
+    .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+}
+
+fn run_summary_text(r: &crate::library::RunSummary, waiting: usize) -> String {
+    let mut parts = Vec::new();
+    if r.cancelled {
+        parts.push(format!("Stopped. {waiting} files waiting"));
+    } else if waiting > 0 {
+        parts.push(format!("Done, {waiting} files still waiting"));
+    } else {
+        parts.push("Up to date".to_string());
+    }
+    parts.push(format!(
+        "last scan: {} new, {} changed, {} removed",
+        r.added, r.changed, r.removed
+    ));
+    if r.files > 0 || r.errors > 0 {
+        let dev = r.device.map(|d| format!(" on {d}")).unwrap_or_default();
+        parts.push(format!(
+            "{} indexed, {} failed in {:.0}s{dev}",
+            r.files, r.errors, r.seconds
+        ));
+    }
+    if !r.skipped_folders.is_empty() {
+        parts.push(format!(
+            "{} folder(s) unavailable, kept as they were",
+            r.skipped_folders.len()
+        ));
+    }
+    parts.join(" · ")
 }
 
 fn fmt_time(t: f64) -> String {
@@ -978,7 +1039,12 @@ impl App {
             if needs_model && (!self.consent_dismissed || matches!(self.status.activity, Activity::Downloading { .. })) {
                 self.consent_card(ui);
             } else if needs_model {
-                self.empty_state(ui, "No model yet", "Download a model from Settings to start searching.");
+                self.empty_state(ui, "No model yet", "Recollect needs to download a model once before it can search.");
+                ui.vertical_centered(|ui| {
+                    if ui.button("Download model…").clicked() {
+                        self.consent_dismissed = false;
+                    }
+                });
             } else if self.snapshot.folders.is_empty() {
                 self.empty_state(ui, "Add a folder to get started", "Use “Add folder…” on the left. Recollect only reads your files; it never changes them.");
             } else if self.current.is_none() && self.query.trim().is_empty() {
@@ -1001,7 +1067,8 @@ impl Drop for App {
         // Closing the window stops background work cleanly (the database stays consistent
         // either way, but this avoids killing a write mid-transaction).
         self.lib.cancel();
-        self.lib.wait();
+        // A download can be stuck in a network read; don't keep the process alive for it.
+        self.lib.wait_for(Duration::from_secs(3));
     }
 }
 

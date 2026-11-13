@@ -13,6 +13,7 @@ use crate::model::{Device, ModelSpec, VisionEncoder};
 use crate::store::db::{FileMeta, FileRow, NewItem};
 use anyhow::Result;
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// Files written to the database per transaction.
@@ -21,36 +22,69 @@ const WRITE_BATCH: usize = 64;
 pub(crate) fn run(lib: &Library) -> Result<RunSummary> {
     let t0 = Instant::now();
     let mut summary = RunSummary::default();
-    sync_folders(lib, &mut summary)?;
-    if lib.control.is_cancelled() {
-        summary.cancelled = true;
-        return Ok(summary);
+    // Folders added while we run set `rescan_requested`; go round again until none were.
+    lib.rescan_requested.store(false, Ordering::Release);
+    loop {
+        summary.skipped_folders.clear();
+        sync_folders(lib, &mut summary)?;
+        if lib.control.is_cancelled() {
+            break;
+        }
+        index_pending(lib, &mut summary)?;
+        if lib.control.is_cancelled() || !lib.rescan_requested.swap(false, Ordering::AcqRel) {
+            break;
+        }
     }
+    summary.cancelled = lib.control.is_cancelled();
+    summary.seconds = t0.elapsed().as_secs_f32();
+    Ok(summary)
+}
 
+fn index_pending(lib: &Library, summary: &mut RunSummary) -> Result<()> {
     let spec = lib.model();
     let pending = lib.db.lock().pending(spec.id)?;
     let (images, videos): (Vec<FileRow>, Vec<FileRow>) = pending
         .into_iter()
         .partition(|f| f.kind == MediaKind::Image);
     let total = images.len() + videos.len();
-    if total > 0 {
-        lib.update_status(|s| s.activity = Activity::LoadingModel);
-        let settings = lib.settings();
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let gpu = settings.use_gpu && !crate::gpu::cpu_forced();
-        let mut enc = VisionEncoder::load(spec, &lib.model_dir(), gpu, threads)?;
-        summary.device = Some(enc.device());
-        let mut prog = Progress::new(total, enc.device());
-        index_images(lib, &mut enc, &images, settings.decode_threads(), &mut prog)?;
-        crate::video_index::index_videos(lib, &mut enc, &videos, &mut prog)?;
-        summary.files = prog.p.done;
-        summary.errors = prog.p.errors;
+    if total == 0 {
+        return Ok(());
     }
-    summary.cancelled = lib.control.is_cancelled();
-    summary.seconds = t0.elapsed().as_secs_f32();
-    Ok(summary)
+    lib.update_status(|s| s.activity = Activity::LoadingModel);
+    let settings = lib.settings();
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let gpu = settings.use_gpu && !crate::gpu::cpu_forced();
+    let mut enc = VisionEncoder::load(spec, &lib.model_dir(), gpu, threads)?;
+    summary.device = Some(enc.device());
+    let mut prog = Progress::new(total, enc.device());
+    index_images(lib, &mut enc, &images, settings.decode_threads(), &mut prog)?;
+    crate::video_index::index_videos(lib, &mut enc, &videos, &mut prog)?;
+    summary.files += prog.p.done - prog.p.errors;
+    summary.errors += prog.p.errors;
+    Ok(())
+}
+
+/// Records a per-file failure. Failures that look temporary (the file or its drive vanished,
+/// I/O errors) leave the file pending so the next run retries it; decode failures are
+/// recorded as errors.
+pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Result<bool> {
+    let transient = !f.path.exists()
+        || e.chain().any(|c| {
+            c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                !matches!(
+                    io.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+                )
+            })
+        });
+    if transient {
+        tracing::warn!("{}: {e:#} (will retry on the next scan)", f.path.display());
+    } else {
+        lib.db.lock().set_error(f.id, &format!("{e:#}"))?;
+    }
+    Ok(!transient)
 }
 
 /// Scans every folder and reconciles the files table. Folders whose root is unreachable (e.g.
@@ -71,9 +105,11 @@ fn sync_folders(lib: &Library, summary: &mut RunSummary) -> Result<()> {
                 "library folder {} is not reachable; skipping",
                 f.path.display()
             );
+            summary.skipped_folders.push(f.path.clone());
             continue;
         }
-        let res = scan::scan(&f.path, &|| lib.control.is_cancelled());
+        // `checkpoint` also honours pause while walking big trees.
+        let res = scan::scan(&f.path, &|| lib.control.checkpoint());
         if lib.control.is_cancelled() {
             return Ok(());
         }
@@ -82,6 +118,16 @@ fn sync_folders(lib: &Library, summary: &mut RunSummary) -> Result<()> {
         }
         let protected: Vec<_> = res.problems.iter().map(|p| p.0.clone()).collect();
         let mut db = lib.db.lock();
+        // An unmounted drive often leaves an empty mount-point directory behind: never treat
+        // "everything vanished" as deletions.
+        if res.files.is_empty() && db.folder_file_count(f.id)? > 0 {
+            tracing::warn!(
+                "{} looks empty or unmounted; keeping its index",
+                f.path.display()
+            );
+            summary.skipped_folders.push(f.path.clone());
+            continue;
+        }
         let stats = db.sync_folder(f.id, &res.files, &protected)?;
         summary.added += stats.added;
         summary.changed += stats.changed;
@@ -211,8 +257,8 @@ fn index_images(
             match r {
                 Ok((px, meta)) => ready.push((f, px, meta)),
                 Err(e) => {
-                    let _ = lib.db.lock().set_error(f.id, &format!("{e:#}"));
-                    prog.file_done(lib, &f, 0, true);
+                    let failed = file_failed(lib, &f, &e).unwrap_or(true);
+                    prog.file_done(lib, &f, 0, failed);
                 }
             }
             if ready.len() >= batch {

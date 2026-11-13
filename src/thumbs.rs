@@ -32,6 +32,10 @@ impl ThumbKey {
 pub fn load(key: &ThumbKey, cache_dir: &Path) -> Result<Rgb> {
     let file = key.cache_file(cache_dir);
     if let Ok(d) = img::decode(&file, u32::MAX) {
+        // Mark as recently used for pruning (access times are often not maintained).
+        if let Ok(f) = std::fs::File::options().write(true).open(&file) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
         return Ok(d.rgb);
     }
     let rgb = generate(key)?;
@@ -68,7 +72,7 @@ fn save_jpeg(file: &Path, rgb: &Rgb) -> Result<()> {
     Ok(())
 }
 
-/// Deletes the oldest cached thumbnails until the cache is below `max_bytes`.
+/// Deletes the least recently used thumbnails until the cache is below `max_bytes`.
 /// Returns the number of files removed.
 pub fn prune(cache_dir: &Path, max_bytes: u64) -> usize {
     let mut files = Vec::new();
@@ -83,7 +87,7 @@ pub fn prune(cache_dir: &Path, max_bytes: u64) -> usize {
         for e in entries.flatten() {
             if let Ok(m) = e.metadata() {
                 total += m.len();
-                let t = m.accessed().or_else(|_| m.modified()).ok();
+                let t = m.modified().ok();
                 files.push((t, m.len(), e.path()));
             }
         }

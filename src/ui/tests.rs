@@ -111,8 +111,12 @@ fn results_and_video_detail_panel() {
     let d = tempfile::tempdir().unwrap();
     let lib = library(d.path());
     fake_install(&lib);
-    lib.add_folder(d.path()).unwrap();
     let mut app = App::new(&egui::Context::default(), lib);
+    // No real folder: adding one would start a background rescan that races the test.
+    app.snapshot.folders = vec![crate::store::db::Folder {
+        id: 1,
+        path: "/nowhere".into(),
+    }];
     app.results = vec![
         hit("/nowhere/clip.mp4", MediaKind::Video, Some(42.0)),
         hit("/nowhere/photo.jpg", MediaKind::Image, None),
@@ -124,8 +128,7 @@ fn results_and_video_detail_panel() {
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
         .build_ui(move |ui| app.show(ui));
-    // A background rescan may be running (spinner), so step instead of waiting to settle.
-    h.run_steps(5);
+    h.run();
     h.get_by_label_contains("Best 2 matches for “a dragon”");
     h.get_by_label("clip.mp4");
     h.get_by_label("Play at 0:42");
