@@ -12,18 +12,48 @@ Thanks for your interest! Recollect is a small project; issues and pull requests
 
 ## Before you open a pull request
 
+Run all of these; CI runs the first four on Linux, Windows and macOS:
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo nextest run          # or: cargo test
+cargo nextest run
 cargo test --doc
 cargo deny check           # when dependencies change
 ```
 
-Tests that need the real models are marked `#[ignore]`; run them with
-`cargo nextest run --run-ignored all` after `recollect models download`.
+You need the FFmpeg development libraries (see the README) and the `ffmpeg` command-line tool,
+which video tests use to generate tiny clips. Set `RECOLLECT_NO_GPU=1` to keep tests on the CPU.
 
-For UI changes, include a screenshot.
+Tests that need the real models are marked `#[ignore]`. Download the models
+(`recollect models download`, once per model, with `--model` to pick it), then point
+`RECOLLECT_TEST_MODELS` at a directory with one subdirectory per model id, each holding the
+downloaded files (`vision_model.onnx`, the text model, `tokenizer.json`):
+
+```
+$RECOLLECT_TEST_MODELS/clip-vit-b32/
+$RECOLLECT_TEST_MODELS/siglip-base-16/
+```
+
+(These are the `models/<id>` directories inside the data directory.) Then run
+`cargo nextest run --run-ignored all`. Models that are missing are skipped.
+
+- Changes that may affect **search quality** (preprocessing, models, segmenting): run
+  `recollect eval <queries.json> --root <dir>` before and after and include the numbers.
+- Changes that may affect **performance** (index, scanning, decoding): run
+  `recollect --home <scratch dir> bench search` or `bench rescan` and include the numbers. Use a
+  release build for measurements.
+- For UI changes, include a screenshot.
+
+## Commit messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/), e.g. `fix(video): handle files
+without a duration` or `feat(ui): keyboard navigation`.
+
+## Design
+
+Read [docs/design.md](docs/design.md) before larger changes; it explains the architecture and why
+things are built this way. Add user-visible changes to [CHANGELOG.md](CHANGELOG.md).
 
 ## Licensing
 

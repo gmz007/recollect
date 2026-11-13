@@ -1,35 +1,55 @@
 # Recollect
 
 **Find photos and video moments by describing them.** Type "kids on the beach at sunset" and
-Recollect finds the matching pictures and the moments in your videos — entirely on your own
+Recollect finds the matching pictures and the moments in your videos, entirely on your own
 computer.
 
 - **Local and private.** Indexing and search run on your machine. No cloud, no accounts, no
   telemetry. The only network access is a one-time model download that you confirm.
-- **Images and videos.** JPEG, PNG, WebP, GIF, BMP, TIFF; any video FFmpeg can decode.
-- **Fast.** Search over hundreds of thousands of items in a fraction of a second. Uses your GPU
-  (via WebGPU) when there is one, otherwise the CPU.
+- **Fast.** Uses your GPU (via WebGPU) when there is one, otherwise the CPU.
 - Linux, Windows and macOS.
 
 > Status: early development (v0.1). See [docs/design.md](docs/design.md) for how it works.
 
+## Features
+
+- Text search over images and video moments ("a dog in the snow").
+- Video results show the moment's timestamp; **Play at** opens the video at that time in mpv or VLC
+  when installed (otherwise in the default player).
+- **Find similar** to any result.
+- All / Images / Videos filter.
+- Background indexing with pause, resume and cancel; you can search while it runs.
+- Incremental rescans: new, changed and deleted files are picked up; unchanged files are skipped.
+- Keyboard: `Ctrl+F` focuses the search box, the arrow keys move the selection, `Enter` opens the
+  selected result, `Esc` clears the search.
+
 ## How it works
 
 Recollect uses a CLIP-style model (SigLIP or CLIP, run with ONNX Runtime) that maps both images and
-text into the same vector space. Every image, and frames sampled every ~2 seconds from every video,
-is turned into a vector once; a search turns your words into a vector and finds the closest ones.
-Nothing ever leaves your machine; your media files are only read, never modified.
+text into the same vector space. Every image, and frames sampled about every 2 seconds from every
+video, is turned into a vector once; a search turns your words into a vector and finds the closest
+ones. Your media files are only read, never modified.
+
+## Supported formats
+
+- Images: JPEG (`jpg`, `jpeg`, `jpe`, `jfif`), PNG, WebP, GIF, BMP, TIFF (`tif`, `tiff`).
+- Videos: `mp4`, `m4v`, `mov`, `mkv`, `webm`, `avi`, `wmv`, `mpg`, `mpeg`, `mts`, `m2ts`, `3gp`,
+  `ogv`, `flv` (anything your FFmpeg build can decode).
+
+Files are recognised by extension (case-insensitive). Hidden files and folders are skipped.
 
 ## Building
 
 Requirements:
 
-- Rust (stable, 1.90+)
-- FFmpeg development libraries (libavcodec, libavformat, libavutil, libswscale…) and `pkg-config`
+- Rust (stable, 1.90 or newer)
+- FFmpeg development libraries (libavcodec, libavformat, libavutil, libavfilter, libavdevice,
+  libswscale, libswresample), `pkg-config`, and clang (for `bindgen`)
   - Debian/Ubuntu: `sudo apt install libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config clang`
   - macOS: `brew install ffmpeg pkg-config`
-  - Windows: download a *shared* FFmpeg build (e.g. BtbN's LGPL build), set `FFMPEG_DIR`
-    to it, and have LLVM installed for `bindgen`.
+  - Windows: download a *shared* FFmpeg build (e.g. BtbN's LGPL build), set `FFMPEG_DIR` to it,
+    put its `bin` directory on `PATH`, and install LLVM for `bindgen` (set `LIBCLANG_PATH` to
+    LLVM's `bin` directory if it is not found).
 - On Linux, the usual GUI libraries (X11/Wayland, xkbcommon, Vulkan or OpenGL).
 
 ```bash
@@ -37,50 +57,123 @@ cargo build --release
 ./target/release/recollect          # start the app
 ```
 
-ONNX Runtime is downloaded by the `ort` crate at build time and its shared libraries are placed
-next to the binary; keep them together when you copy the app somewhere else.
+The `ort` crate downloads ONNX Runtime at build time and copies its shared libraries (ONNX Runtime
+and the WebGPU library Dawn) next to the binary. `build.rs` makes the binary look for them in its
+own directory, so **keep them together** with the executable when you copy the app elsewhere. See
+[docs/packaging.md](docs/packaging.md).
 
-## Using it
+## First run
 
 1. Start Recollect and add a folder with photos or videos.
-2. The first time, Recollect asks to download a model (about 0.6–0.8 GB from Hugging Face).
+2. Recollect asks before downloading a model from huggingface.co. Nothing is downloaded without
+   your consent.
 3. Indexing runs in the background; you can search right away while it works.
 
-There is also a command-line interface:
+### Models
 
-```bash
-recollect models list                 # available models; * marks the selected one
-recollect models download             # download the selected model (asks first)
-recollect index ~/Pictures ~/Videos   # add folders and index them
-recollect search "a dog in the snow"  # search from the terminal
-recollect status                      # library statistics and errors
-```
+| Id | Model | Download | License | Notes |
+|---|---|---|---|---|
+| `siglip-base-16` | SigLIP base/16 (Google) | 486 MB | Apache-2.0 | best quality; default with a discrete GPU |
+| `clip-vit-b32` | CLIP ViT-B/32 (OpenAI) | 608 MB | MIT | about 6x faster than SigLIP on a CPU; default without a GPU |
 
-Use `--model clip-vit-b32` for the faster, smaller model (recommended without a GPU), `--cpu` to
-never use the GPU, and `--home <dir>` (or `RECOLLECT_HOME`) to keep all data in one directory.
+Models are downloaded from the ONNX exports in the `Xenova/*` repositories on Hugging Face at a
+pinned revision and verified with SHA-256. Switch models in Settings, or for one run with
+`--model <id>` (see `recollect models list`). Each model keeps its own embeddings, so files must be indexed with the model you search with.
+
+## Command line
+
+Without a subcommand (or with `gui`) the app starts. Global options, valid with every subcommand:
+
+| Option | Meaning |
+|---|---|
+| `--home <dir>` | keep all data under this directory (also `RECOLLECT_HOME`) |
+| `--model <id>` | use this embedding model for this run |
+| `--cpu` | never use the GPU |
+
+| Command | What it does |
+|---|---|
+| `recollect gui` | start the graphical app (the default) |
+| `recollect models list` | list models; `*` marks the selected one |
+| `recollect models download [--yes]` | download the selected model; asks first unless `--yes` |
+| `recollect folders add <paths>...` | add library folders |
+| `recollect folders list` | list library folders |
+| `recollect folders remove <path>` | remove a library folder |
+| `recollect index [paths]...` | add the given folders (if any) and index everything new or changed |
+| `recollect search <query> [-n, --limit N] [--kind image\|video] [--json]` | search; default limit 20; `--json` prints JSON lines |
+| `recollect status` | library statistics and recent errors |
+| `recollect eval <queries.json> --root <dir> [--json]` | measure search quality with a query set; paths in the query set are relative to `--root` |
+| `recollect --home <scratch> bench search [--images N] [--videos N] [--segments N] [--queries N]` | search benchmark on synthetic data (defaults 200000 images, 20000 videos, 50 segments per video, 50 queries) |
+| `recollect --home <scratch> bench rescan [--files N]` | scan and unchanged-rescan time for a tree of empty files (default 200000) |
+
+`bench` requires `--home` pointing at a scratch directory.
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `RECOLLECT_HOME` | keep all data under this directory (same as `--home`); useful for portable installs |
+| `RECOLLECT_NO_GPU` | if set (any value), never use the GPU (same as `--cpu`) |
+| `RECOLLECT_LOG` | log filter, e.g. `info` or `recollect=debug`; default `warn`; logs go to stderr |
+| `RECOLLECT_FRAME_STATS` | if set, the GUI logs frame-time statistics every 10 seconds (for diagnosing slowness) |
+| `RECOLLECT_SEGMENT_TAU` | tuning knob: cosine similarity (default `0.90`) above which consecutive video frames are merged into one moment |
+| `RECOLLECT_TEST_MODELS` | tests only; see [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## Where data is stored
 
 | What | Linux | macOS | Windows |
 |---|---|---|---|
-| Library database, models | `~/.local/share/recollect` | `~/Library/Application Support/recollect` | `%APPDATA%\recollect\data` |
-| Thumbnails cache | `~/.cache/recollect` | `~/Library/Caches/recollect` | `%LOCALAPPDATA%\recollect\cache` |
-| Settings | `~/.config/recollect` | `~/Library/Application Support/recollect` | `%APPDATA%\recollect\config` |
+| Data: `library.db`, `models/`, `index-<model>.bin` | `~/.local/share/recollect` | `~/Library/Application Support/recollect` | `%APPDATA%\recollect\data` |
+| Cache: `thumbs/` | `~/.cache/recollect` | `~/Library/Caches/recollect` | `%LOCALAPPDATA%\recollect\cache` |
+| Config: `settings.toml` | `~/.config/recollect` | `~/Library/Application Support/recollect` | `%APPDATA%\recollect\config` |
 
-## Models
+- `library.db`: the library (folders, files, embeddings) in SQLite.
+- `models/`: downloaded models.
+- `index-<model>.bin`: a startup cache of the search index; it is rebuilt if missing or stale.
+- `thumbs/`: thumbnail cache; safe to delete.
+- `settings.toml`: your settings.
 
-| Model | License | Notes |
-|---|---|---|
-| SigLIP base patch16-224 (Google) | Apache-2.0 | best quality; default with a discrete GPU |
-| CLIP ViT-B/32 (OpenAI) | MIT | ~6× faster on CPU; default without a GPU |
+With `--home <dir>` or `RECOLLECT_HOME`, these live in `data/`, `cache/` and `config/` below that
+directory. Nothing is ever written inside your media folders.
 
-Models are downloaded from the ONNX exports in the `Xenova/*` repositories on Hugging Face at a
-pinned revision and verified with SHA-256.
+## Privacy
+
+- The only network access is the model download from huggingface.co, which happens only after you
+  agree.
+- ONNX Runtime telemetry is disabled.
+- FFmpeg is restricted to local files, so a crafted video cannot make it touch the network.
+- Your media is only read, never modified, and no data leaves your machine.
+
+## Performance
+
+On our test machine (8-core laptop, RTX 3060 Laptop GPU via WebGPU):
+
+- Search over 1.2 million vectors: about 40 ms.
+- Startup with 1.2 million vectors: 0.3 s (thanks to the index cache).
+- Indexing 12-megapixel photos: about 28 images/s on the CPU with CLIP, about 45 images/s on the GPU
+  with SigLIP.
+- Video: about 50-70x realtime.
+
+Your numbers will vary with hardware, photo size and codecs.
+
+## Troubleshooting
+
+- **No GPU, or GPU errors.** Recollect falls back to the CPU automatically. Force it with `--cpu`
+  or `RECOLLECT_NO_GPU=1`. On a CPU, CLIP is much faster than SigLIP (`--model clip-vit-b32`).
+- **"N files could not be read".** Files that failed to decode are listed in the app (and by
+  `recollect status`). Use **Retry failed files** after fixing the problem.
+- **A drive is not mounted.** Its files are kept in the library, not deleted; they reappear when the
+  drive is back.
+- **Something is wrong and you need details.** Run with `RECOLLECT_LOG=debug` and look at stderr.
+
+## More
+
+- [docs/design.md](docs/design.md): architecture and design decisions
+- [docs/packaging.md](docs/packaging.md): packaging notes
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute
+- [CHANGELOG.md](CHANGELOG.md): release notes
 
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
 at your option. FFmpeg and ONNX Runtime are separate projects with their own licenses; distributed
-binaries should use an LGPL build of FFmpeg.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
+binaries should use an LGPL build of FFmpeg. The models have their own licenses (see above).
