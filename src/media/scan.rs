@@ -86,13 +86,27 @@ pub fn scan(root: &Path, cancel: &dyn Fn() -> bool) -> ScanResult {
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    // Protects the whole directory from being treated as emptied.
+                    out.problems.push((dir.clone(), e.to_string()));
+                    continue;
+                }
+            };
             let name = entry.file_name();
             if name.to_string_lossy().starts_with('.') {
                 continue;
             }
             let path = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(e) => {
+                    out.problems.push((path, e.to_string()));
+                    continue;
+                }
+            };
             if ft.is_dir() {
                 stack.push(path);
                 continue;

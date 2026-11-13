@@ -88,6 +88,7 @@ pub struct App {
     ctx: egui::Context,
     status: Status,
     was_busy: bool,
+    jobs_seen: u64,
     consent_dismissed: bool,
     settings_open: bool,
     settings_draft: Settings,
@@ -130,6 +131,7 @@ impl App {
             ctx: ctx.clone(),
             status: Status::default(),
             was_busy: false,
+            jobs_seen: 0,
             consent_dismissed: false,
             settings_open: false,
             settings_draft: settings,
@@ -266,9 +268,12 @@ impl App {
                 self.rerun();
             }
         }
-        if self.was_busy && !busy {
+        let jobs = self.lib.jobs_finished();
+        if (self.was_busy && !busy) || jobs != self.jobs_seen {
+            self.jobs_seen = jobs;
             self.refresh_snapshot(true);
-            if self.lib.model_installed()
+            if !busy
+                && self.lib.model_installed()
                 && !self.snapshot.folders.is_empty()
                 && self.status.last_run.is_none()
                 && self.status.last_error.is_none()
@@ -358,6 +363,8 @@ impl App {
             // Cancels any running job first; runs in the background.
             self.lib.start_remove_folder(id);
             self.snapshot.folders.retain(|f| f.id != id);
+            // A fetch already in flight may predate the removal: fetch again after it.
+            self.snapshot_again = true;
         }
         ui.add_space(8.0);
         if ui.button("Add folder…").clicked()

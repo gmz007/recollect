@@ -4,7 +4,7 @@ use crate::library::Library;
 use crate::media::MediaKind;
 use crate::store::db::ItemInfo;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +51,8 @@ pub struct SearchHit {
 }
 
 const MAX_MOMENTS: usize = 10;
+/// Upper bound for candidates scanned when widening a search.
+const MAX_CANDIDATES: usize = 50_000;
 
 pub(crate) fn by_vector(
     lib: &Library,
@@ -58,18 +60,40 @@ pub(crate) fn by_vector(
     opts: &SearchOptions,
     exclude_file: Option<i64>,
 ) -> Result<Vec<SearchHit>> {
-    // Over-fetch: videos contribute many items per file, and re-scoring may reorder.
-    let k = (opts.limit * 4 + 100).min(5000);
-    let cands = {
-        let index = lib.index.read();
-        if q.len() != index.dim() {
-            anyhow::bail!("the query was made with a different model; please search again");
+    // Over-fetch: videos contribute many items per file, and re-scoring may reorder. If long
+    // videos crowd the candidates (few distinct files), widen the scan.
+    let mut k = (opts.limit * 4 + 100).min(5000);
+    let cands = loop {
+        let cands = {
+            let index = lib.index.read();
+            if q.len() != index.dim() {
+                anyhow::bail!("the query was made with a different model; please search again");
+            }
+            index.search_excluding(q, k, opts.kind, exclude_file)
+        };
+        let files: HashSet<i64> = cands.iter().map(|c| c.file_id).collect();
+        if files.len() >= opts.limit || cands.len() < k || k >= MAX_CANDIDATES {
+            break cands;
         }
-        index.search(q, k, opts.kind)
+        k = (k * 4).min(MAX_CANDIDATES);
     };
     if cands.is_empty() {
         return Ok(Vec::new());
     }
+    // Re-score only what can appear: the best few items of the first `limit` + margin files.
+    let mut per_file: HashMap<i64, usize> = HashMap::new();
+    let cands: Vec<_> = cands
+        .into_iter()
+        .filter(|c| {
+            let n = per_file.len();
+            let e = per_file.entry(c.file_id).or_insert(0);
+            if *e == 0 && n >= opts.limit + 20 {
+                return false;
+            }
+            *e += 1;
+            *e <= MAX_MOMENTS + 1
+        })
+        .collect();
     let ids: Vec<i64> = cands.iter().map(|c| c.item_id).collect();
     let db = lib.db.lock();
     // Exact re-scoring with the stored f32 vectors.
@@ -80,7 +104,6 @@ pub(crate) fn by_vector(
             let s = embs.get(&c.item_id).map(|e| dot(e, q)).unwrap_or(c.score);
             (c.item_id, c.file_id, s)
         })
-        .filter(|(_, f, _)| Some(*f) != exclude_file)
         .collect();
     scored.sort_by(|a, b| b.2.total_cmp(&a.2));
     let grouped = group_by_file(&scored, opts.limit);

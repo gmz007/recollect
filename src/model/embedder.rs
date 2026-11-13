@@ -151,7 +151,8 @@ impl VisionEncoder {
         // Warm-up catches EPs that load but cannot run this graph.
         let px = vec![0u8; 3 * (spec.image_size * spec.image_size) as usize];
         let warm: Vec<&[u8]> = vec![&px; 2];
-        v.embed(&warm).context("warm-up inference")?;
+        // Directly, not through `embed`: its GPU recovery would call back into this function.
+        v.embed_batch(&warm).context("warm-up inference")?;
         Ok(v)
     }
 
@@ -173,6 +174,11 @@ impl VisionEncoder {
     /// WebGPU occasionally fails a run ("Invalid Buffer"). The first failure rebuilds the GPU
     /// session and retries; a second one switches this encoder to the CPU for good.
     pub fn embed(&mut self, images: &[&[u8]]) -> Result<Vec<Vec<f32>>> {
+        // Validate inputs first so caller bugs are not mistaken for GPU failures.
+        let per = 3 * (self.spec.image_size * self.spec.image_size) as usize;
+        if let Some(bad) = images.iter().find(|i| i.len() != per) {
+            bail!("image buffer has {} bytes, expected {per}", bad.len());
+        }
         let mut out = Vec::with_capacity(images.len());
         let mut start = 0;
         while start < images.len() {
@@ -278,6 +284,10 @@ impl TextEncoder {
             output,
             needs_mask,
         })
+    }
+
+    pub fn spec(&self) -> &'static ModelSpec {
+        self.spec
     }
 
     /// Token ids exactly as the model expects them.

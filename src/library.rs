@@ -12,7 +12,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -115,6 +115,10 @@ pub struct Library {
     status: Mutex<Status>,
     pub(crate) control: Control,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// True while a background job runs (lock-free, polled by the UI every frame).
+    busy: Arc<AtomicBool>,
+    /// Incremented each time a background job finishes.
+    jobs_finished: Arc<AtomicU64>,
     text: Mutex<Option<TextEncoder>>,
     notifier: RwLock<Option<Notifier>>,
 }
@@ -157,6 +161,8 @@ impl Library {
             status: Mutex::new(Status::default()),
             control: Control::default(),
             worker: Mutex::new(None),
+            busy: Arc::new(AtomicBool::new(false)),
+            jobs_finished: Arc::new(AtomicU64::new(0)),
             text: Mutex::new(None),
             notifier: RwLock::new(None),
         }))
@@ -203,10 +209,12 @@ impl Library {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.worker
-            .lock()
-            .as_ref()
-            .is_some_and(|h| !h.is_finished())
+        self.busy.load(Ordering::Acquire)
+    }
+
+    /// Number of background jobs finished so far; changes whenever one ends (UI refresh cue).
+    pub fn jobs_finished(&self) -> u64 {
+        self.jobs_finished.load(Ordering::Acquire)
     }
 
     pub fn stats(&self) -> Result<Stats> {
@@ -257,22 +265,29 @@ impl Library {
     pub fn start_remove_folder(self: &Arc<Self>, folder_id: i64) {
         let lib = Arc::clone(self);
         std::thread::spawn(move || {
-            lib.cancel();
-            lib.wait();
-            let job = Arc::clone(&lib);
-            let res = lib.spawn(move || {
-                job.update_status(|s| s.activity = Activity::Removing);
-                let r = job.remove_folder(folder_id);
-                job.update_status(|s| {
-                    s.activity = Activity::Idle;
-                    if let Err(e) = r {
-                        s.last_error = Some(format!("Removing the folder failed: {e:#}"));
-                    }
+            // Another job may grab the worker between `wait` and `spawn` (e.g. an automatic
+            // rescan); cancel it too and retry.
+            for _ in 0..50 {
+                lib.cancel();
+                lib.wait();
+                let job = Arc::clone(&lib);
+                let res = lib.spawn(move || {
+                    job.update_status(|s| s.activity = Activity::Removing);
+                    let r = job.remove_folder(folder_id);
+                    job.update_status(|s| {
+                        s.activity = Activity::Idle;
+                        if let Err(e) = r {
+                            s.last_error = Some(format!("Removing the folder failed: {e:#}"));
+                        }
+                    });
                 });
-            });
-            if let Err(e) = res {
-                lib.update_status(|s| s.last_error = Some(format!("{e:#}")));
+                if res.is_ok() {
+                    return;
+                }
             }
+            lib.update_status(|s| {
+                s.last_error = Some("Could not remove the folder; try again.".into())
+            });
         });
     }
 
@@ -309,9 +324,9 @@ impl Library {
         let index = load_index(&self.db.lock(), spec)?;
         new.save(&self.paths.settings_path())?;
         *self.settings.write() = new;
-        *self.text.lock() = None;
         *self.model.write() = spec;
         *self.index.write() = index;
+        *self.text.lock() = None;
         Ok(())
     }
 
@@ -367,7 +382,7 @@ impl Library {
 
     fn spawn(&self, f: impl FnOnce() + Send + 'static) -> Result<()> {
         let mut w = self.worker.lock();
-        if w.as_ref().is_some_and(|h| !h.is_finished()) {
+        if self.busy.load(Ordering::Acquire) || w.as_ref().is_some_and(|h| !h.is_finished()) {
             bail!("another job is already running");
         }
         if let Some(h) = w.take() {
@@ -378,11 +393,31 @@ impl Library {
             s.last_error = None;
             s.paused = false;
         });
-        *w = Some(
-            std::thread::Builder::new()
-                .name("recollect-worker".into())
-                .spawn(f)?,
-        );
+        self.busy.store(true, Ordering::Release);
+        let busy = Arc::clone(&self.busy);
+        let finished = Arc::clone(&self.jobs_finished);
+        let job = move || {
+            // Reset even if the job panics.
+            struct Done(Arc<AtomicBool>, Arc<AtomicU64>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.1.fetch_add(1, Ordering::AcqRel);
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _done = Done(busy, finished);
+            f();
+        };
+        match std::thread::Builder::new()
+            .name("recollect-worker".into())
+            .spawn(job)
+        {
+            Ok(h) => *w = Some(h),
+            Err(e) => {
+                self.busy.store(false, Ordering::Release);
+                return Err(e.into());
+            }
+        }
         Ok(())
     }
 
@@ -398,7 +433,9 @@ impl Library {
 
     /// Waits for the background job to finish (CLI, tests, shutdown).
     pub fn wait(&self) {
-        if let Some(h) = self.worker.lock().take() {
+        // Take the handle first: joining while holding the lock would block `spawn` callers.
+        let handle = self.worker.lock().take();
+        if let Some(h) = handle {
             let _ = h.join();
         }
     }
@@ -417,7 +454,11 @@ impl Library {
     /// Text → vector with the current model (loads the text tower on first use).
     pub fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
         let mut guard = self.text.lock();
-        if guard.is_none() {
+        // Reload if missing or if the model changed since it was loaded.
+        if guard
+            .as_ref()
+            .is_none_or(|t| t.spec().id != self.model().id)
+        {
             if !self.model_installed() {
                 bail!("the model is not downloaded yet");
             }
@@ -575,6 +616,86 @@ mod tests {
         let err = lib.similar(item, &SearchOptions::default()).unwrap_err();
         assert!(err.to_string().contains("another model"), "{err}");
         assert!(search::by_vector(&lib, &[0.0; 512], &SearchOptions::default(), None).is_err());
+    }
+
+    #[test]
+    fn long_videos_do_not_crowd_out_other_files() {
+        let d = tempfile::tempdir().unwrap();
+        {
+            let lib = open(d.path());
+            let mut db = lib.db.lock();
+            let f = db.add_folder(Path::new("/lib")).unwrap();
+            let mut files = vec![ScannedFile {
+                path: "/lib/long.mp4".into(),
+                kind: MediaKind::Video,
+                size: 1,
+                mtime: 1,
+            }];
+            for i in 0..30 {
+                files.push(ScannedFile {
+                    path: format!("/lib/{i:02}.jpg").into(),
+                    kind: MediaKind::Image,
+                    size: 1,
+                    mtime: 1,
+                });
+            }
+            db.sync_folder(f, &files, &[]).unwrap();
+            let unit = |a: f32| {
+                let mut v = vec![0.0; 512];
+                v[0] = a.cos();
+                v[1] = a.sin();
+                v
+            };
+            let mut batch = Vec::new();
+            for row in db.pending(registry::CLIP_B32.id).unwrap() {
+                let items = if row.kind == MediaKind::Video {
+                    // 1000 segments all closer to the query than any image.
+                    (0..1000)
+                        .map(|i| NewItem {
+                            t_start: Some(i as f64 * 2.0),
+                            t_end: Some(i as f64 * 2.0 + 2.0),
+                            embedding: unit(0.01),
+                        })
+                        .collect()
+                } else {
+                    vec![NewItem {
+                        t_start: None,
+                        t_end: None,
+                        embedding: unit(0.5),
+                    }]
+                };
+                batch.push((row.id, FileMeta::default(), items));
+            }
+            db.put_items(registry::CLIP_B32.id, &batch).unwrap();
+        }
+        let lib = open(d.path());
+        let mut q = vec![0.0; 512];
+        q[0] = 1.0;
+        let hits = search::by_vector(
+            &lib,
+            &q,
+            &SearchOptions {
+                limit: 20,
+                kind: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 20);
+        assert_eq!(hits[0].kind, MediaKind::Video);
+        assert_eq!(hits[0].moments.len(), 10);
+        // "Find similar" from the video must skip the video's own segments.
+        let hits = lib
+            .similar(
+                hits[0].item_id,
+                &SearchOptions {
+                    limit: 20,
+                    kind: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 20);
+        assert!(hits.iter().all(|h| h.kind == MediaKind::Image));
     }
 
     #[test]

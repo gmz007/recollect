@@ -453,7 +453,8 @@ impl Db {
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(500) {
             let marks = vec!["?"; chunk.len()].join(",");
-            let mut st = self.conn.prepare_cached(&sql.replace('#', &marks))?;
+            // Not cached: the statement text varies with the chunk length.
+            let mut st = self.conn.prepare(&sql.replace('#', &marks))?;
             let rows = st.query_map(rusqlite::params_from_iter(chunk.iter()), &mut row)?;
             for r in rows {
                 out.push(r?);

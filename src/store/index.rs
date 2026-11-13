@@ -127,6 +127,17 @@ impl VectorIndex {
 
     /// Top `k` items by approximate cosine similarity to unit vector `q`, best first.
     pub fn search(&self, q: &[f32], k: usize, kind: Option<MediaKind>) -> Vec<Candidate> {
+        self.search_excluding(q, k, kind, None)
+    }
+
+    /// Like [`Self::search`], skipping all items of `exclude_file`.
+    pub fn search_excluding(
+        &self,
+        q: &[f32],
+        k: usize,
+        kind: Option<MediaKind>,
+        exclude_file: Option<i64>,
+    ) -> Vec<Candidate> {
         if k == 0 || self.is_empty() || q.len() != self.dim {
             return Vec::new();
         }
@@ -143,7 +154,9 @@ impl VectorIndex {
                 let mut heap = BinaryHeap::with_capacity(k + 1);
                 let end = ((b + 1) * BLOCK).min(n);
                 for r in b * BLOCK..end {
-                    if kind.is_some_and(|kd| self.kinds[r] != kd) {
+                    if kind.is_some_and(|kd| self.kinds[r] != kd)
+                        || exclude_file == Some(self.file_ids[r])
+                    {
                         continue;
                     }
                     let s = dot_i8(&self.data[r * dim..(r + 1) * dim], &qq);

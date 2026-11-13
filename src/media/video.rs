@@ -67,6 +67,10 @@ struct Stream {
     /// Nominal frame rate, used to time frames that carry no timestamp.
     fps: f64,
     last_t: Option<f64>,
+    /// Added to all times after a backwards timestamp jump (spliced/concatenated streams) so
+    /// sample times keep increasing.
+    offset: f64,
+    max_packet_t: f64,
     dec: ff::decoder::Video,
 }
 
@@ -112,6 +116,16 @@ fn open(path: &Path, threads: usize) -> Result<Stream> {
         .decoder()
         .video()
         .context("no decoder for this video codec")?;
+    // Don't spend time demuxing audio/subtitle packets we would drop anyway.
+    for i in 0..ictx.nb_streams() as usize {
+        if i != index {
+            // SAFETY: `i` is a valid stream index of this open input; only a field is written.
+            unsafe {
+                let st = *(*ictx.as_ptr()).streams.add(i);
+                (*st).discard = ff::ffi::AVDiscard::AVDISCARD_ALL;
+            }
+        }
+    }
     Ok(Stream {
         ictx,
         index,
@@ -120,6 +134,8 @@ fn open(path: &Path, threads: usize) -> Result<Stream> {
         duration,
         fps,
         last_t: None,
+        offset: 0.0,
+        max_packet_t: 0.0,
         dec,
     })
 }
@@ -259,21 +275,61 @@ fn rotate(rgb: Rgb, cw: u32) -> Rgb {
 
 impl Stream {
     fn time_of(&self, ts: i64) -> f64 {
-        (ts - self.start) as f64 * self.tb
+        (ts - self.start) as f64 * self.tb + self.offset
+    }
+
+    /// Records a packet's time, detecting backwards jumps of more than a few seconds.
+    fn note_packet_time(&mut self, p: &ff::Packet) {
+        let Some(ts) = p.pts().or(p.dts()) else {
+            return;
+        };
+        let t = self.time_of(ts);
+        if t + 5.0 < self.max_packet_t {
+            tracing::debug!(
+                "timestamp discontinuity: {t:.1}s after {:.1}s",
+                self.max_packet_t
+            );
+            self.offset += self.max_packet_t - t;
+        } else {
+            self.max_packet_t = self.max_packet_t.max(t);
+        }
     }
 
     /// Reads the next packet of the video stream; `None` at end of file.
     fn next_packet(&mut self) -> Result<Option<ff::Packet>> {
+        let mut again = 0;
         loop {
             let mut pkt = ff::Packet::empty();
             match pkt.read(&mut self.ictx) {
-                Ok(()) if pkt.stream() == self.index => return Ok(Some(pkt)),
+                Ok(()) if pkt.stream() == self.index => {
+                    self.note_packet_time(&pkt);
+                    return Ok(Some(pkt));
+                }
                 Ok(()) => {}
                 Err(ff::Error::Eof) => return Ok(None),
-                Err(e) if is_retryable(&e) => {}
+                Err(e) if is_retryable(&e) && again < 1000 => again += 1,
                 Err(e) => return Err(e).context("reading packet"),
             }
         }
+    }
+
+    /// Sends a packet, draining pending frames first if the decoder is full.
+    /// Returns false if the packet was rejected (corrupt data).
+    fn send(
+        &mut self,
+        p: &ff::Packet,
+        f: &mut dyn FnMut(f64, &ff::frame::Video) -> Result<bool>,
+    ) -> Result<bool> {
+        for _ in 0..3 {
+            match self.dec.send_packet(p) {
+                Ok(()) => return Ok(true),
+                Err(e) if is_retryable(&e) => {
+                    self.drain(f)?;
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+        Ok(false)
     }
 
     /// Receives all frames currently available and calls `f(time, frame)` for each; stops
@@ -323,7 +379,17 @@ pub fn sample(
     let mut gop_bytes = 0usize;
     // True while decoding an oversized GOP packet by packet (decoder state must be kept).
     let mut streaming = false;
-    while let Some(pkt) = s.next_packet()? {
+    loop {
+        let pkt = match s.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
+            Err(e) if st.emitted > 0 => {
+                // A damaged region late in a long file shouldn't discard everything before it.
+                tracing::warn!("{}: stopping at a read error: {e:#}", path.display());
+                break;
+            }
+            Err(e) => return Err(e),
+        };
         if cancel() {
             bail!("cancelled");
         }
@@ -363,9 +429,9 @@ pub fn sample(
     if st.emitted == 0 {
         bail!("no frames could be decoded");
     }
-    if st.info.duration <= 0.0 {
-        st.info.duration = (st.next_t - st.cfg.interval).max(0.0) + st.cfg.interval;
-    }
+    // Header durations can be missing or too short (crashed recordings); never report less
+    // than what was actually decoded.
+    st.info.duration = st.info.duration.max(st.next_t);
     Ok(st.info)
 }
 
@@ -414,9 +480,15 @@ impl SampleState {
         end: Option<f64>,
         on_frame: &mut dyn FnMut(Frame) -> Result<()>,
     ) -> Result<()> {
+        let mut handle = |t: f64, f: &ff::frame::Video| -> Result<bool> {
+            if self.due(t) && end.is_none_or(|e| t < e) {
+                self.emit(t, f, on_frame)?;
+            }
+            Ok(true)
+        };
         match p {
             Some(p) => {
-                if s.dec.send_packet(p).is_err() {
+                if !s.send(p, &mut handle)? {
                     return Ok(()); // corrupt packet: skip
                 }
             }
@@ -424,12 +496,7 @@ impl SampleState {
                 let _ = s.dec.send_eof();
             }
         }
-        s.drain(&mut |t, f| {
-            if self.due(t) && end.is_none_or(|e| t < e) {
-                self.emit(t, f, on_frame)?;
-            }
-            Ok(true)
-        })?;
+        s.drain(&mut handle)?;
         Ok(())
     }
 
@@ -464,20 +531,30 @@ impl SampleState {
         let short = first.is_key() && end.is_some_and(|e| e - start <= self.cfg.max_gap);
         if short {
             // Keyframe only, and only if a sample is due before the next GOP starts.
-            if end.is_some_and(|e| e <= self.next_t) && self.emitted > 0 {
+            // ... and not right after the previous sample (e.g. after a long GOP).
+            if self.emitted > 0
+                && (end.is_some_and(|e| e <= self.next_t)
+                    || start < self.next_t - self.cfg.interval / 2.0)
+            {
                 return Ok(());
             }
-            if s.dec.send_packet(first).is_err() {
-                return Ok(()); // corrupt keyframe: skip this GOP
+            let mut got = false;
+            if s.dec.send_packet(first).is_ok() {
+                let _ = s.dec.send_eof();
+                let mut res = Ok(());
+                s.drain(&mut |t, f| {
+                    got = true;
+                    res = self.emit(t, f, on_frame);
+                    Ok(false) // the first frame is all we want
+                })?;
+                s.dec.flush();
+                res?;
             }
-            let _ = s.dec.send_eof();
-            let mut res = Ok(());
-            s.drain(&mut |t, f| {
-                res = self.emit(t, f, on_frame);
-                Ok(false) // the first frame is all we want
-            })?;
-            s.dec.flush();
-            return res;
+            if got {
+                return Ok(());
+            }
+            // The keyframe alone decoded to nothing (e.g. needs following packets): decode the
+            // GOP in order instead.
         }
         // Long GOP: decode in order until no further sample is due inside it.
         for p in gop {
@@ -511,9 +588,12 @@ pub fn frame_at(path: &Path, t: f64, min_side: u32) -> Result<Rgb> {
         }
         s.drain(&mut |ft, f| {
             decoded += 1;
-            if ft + 0.02 >= target || decoded > 2000 {
+            if ft + 0.02 >= target {
                 found = Some(conv.convert(f)?);
                 return Ok(false);
+            }
+            if decoded > 3000 {
+                bail!("could not reach {t:.1}s (seeking failed)");
             }
             Ok(true)
         })?;
@@ -521,6 +601,7 @@ pub fn frame_at(path: &Path, t: f64, min_side: u32) -> Result<Rgb> {
             break;
         }
     }
+    let last_t = s.last_t;
     if found.is_none() {
         // Past the last frame (or decoder delay at EOF): take the last frame available.
         let _ = s.dec.send_eof();
@@ -531,6 +612,9 @@ pub fn frame_at(path: &Path, t: f64, min_side: u32) -> Result<Rgb> {
         })?;
         if let Some(f) = last {
             found = Some(conv.convert(&f)?);
+        } else if let Some(lt) = last_t.filter(|lt| *lt < target) {
+            // `t` lies past the last frame: return the last frame instead.
+            return frame_at(path, lt, min_side);
         }
     }
     found.ok_or_else(|| anyhow!("no frame at {t:.1}s"))
@@ -681,6 +765,28 @@ pub(crate) mod tests {
         let (ts, info) = sample_all(&out, SamplerConfig::default());
         assert!(ts.len() >= 9, "{ts:?}");
         assert!(info.duration >= 18.0, "{info:?}");
+    }
+
+    #[test]
+    fn frame_past_the_end_returns_the_last_frame() {
+        let d = tempfile::tempdir().unwrap();
+        let p = make_clip(d.path(), "e.mp4", 4, 10, &[]);
+        let f = frame_at(&p, 100.0, 90).unwrap();
+        assert_eq!((f.width, f.height), (320, 90));
+    }
+
+    #[test]
+    fn concatenated_timestamps_keep_increasing() {
+        let d = tempfile::tempdir().unwrap();
+        let a = make_clip(d.path(), "a.ts", 10, 10, &["-f", "mpegts"]);
+        // Byte-level concatenation: timestamps restart in the middle of the file.
+        let joined = d.path().join("joined.ts");
+        let mut bytes = std::fs::read(&a).unwrap();
+        bytes.extend(std::fs::read(&a).unwrap());
+        std::fs::write(&joined, bytes).unwrap();
+        let (ts, _) = sample_all(&joined, SamplerConfig::default());
+        assert!(ts.len() >= 8, "only {} samples: {ts:?}", ts.len());
+        assert!(ts.windows(2).all(|w| w[1] > w[0]), "{ts:?}");
     }
 
     #[test]

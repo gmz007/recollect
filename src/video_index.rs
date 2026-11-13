@@ -85,7 +85,8 @@ fn index_one(
     let cfg = SamplerConfig::default();
     let batch = enc.batch_size();
     let (tx, rx) = crossbeam_channel::bounded::<Sampled>(batch * 2);
-    let mut frames: Vec<(f64, Vec<f32>)> = Vec::new();
+    // Segments are merged as embeddings arrive: memory stays flat for very long videos.
+    let mut frames = Merger::new(segment_tau(), cfg.interval);
     let path = f.path.clone();
     let (info, embed_result) = std::thread::scope(|s| {
         let sampler = s.spawn(move || {
@@ -102,16 +103,17 @@ fn index_one(
             )
         });
         let mut pending: Vec<Sampled> = Vec::with_capacity(batch);
-        let mut embed =
-            |pending: &mut Vec<Sampled>, frames: &mut Vec<(f64, Vec<f32>)>| -> Result<()> {
-                if pending.is_empty() {
-                    return Ok(());
-                }
-                let px: Vec<&[u8]> = pending.iter().map(|p| p.1.as_slice()).collect();
-                let embs = enc.embed(&px).map_err(|e| ModelError(format!("{e:#}")))?;
-                frames.extend(pending.drain(..).map(|p| p.0).zip(embs));
-                Ok(())
-            };
+        let mut embed = |pending: &mut Vec<Sampled>, frames: &mut Merger| -> Result<()> {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let px: Vec<&[u8]> = pending.iter().map(|p| p.1.as_slice()).collect();
+            let embs = enc.embed(&px).map_err(|e| ModelError(format!("{e:#}")))?;
+            for (p, e) in pending.drain(..).zip(embs) {
+                frames.push(p.0, e);
+            }
+            Ok(())
+        };
         let mut result = Ok(());
         for item in rx.iter() {
             pending.push(item);
@@ -143,7 +145,7 @@ fn index_one(
         return Ok(None);
     }
     let info = info?;
-    let items = merge_segments(&frames, info.duration, cfg.interval, segment_tau());
+    let items = frames.finish(info.duration);
     let meta = FileMeta {
         width: Some(info.width),
         height: Some(info.height),
@@ -156,44 +158,77 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// Merges time-ordered frame embeddings into segments. A frame joins the current segment when
-/// it is similar enough to the segment's *first* frame (so slow drift still splits) and the
-/// segment is not too long. Each segment stores the normalized mean of its frames.
+/// Online segment merger: a frame joins the current segment when it is similar enough to the
+/// segment's *first* frame (so slow drift still splits) and the segment is not too long. Each
+/// segment stores the normalized mean of its frames. Only the open segment is kept in memory.
+pub(crate) struct Merger {
+    tau: f32,
+    interval: f64,
+    open: Option<(f64, f64, Vec<f32>, Vec<f32>)>, // (start, last frame t, first emb, sum)
+    done: Vec<NewItem>,
+}
+
+impl Merger {
+    pub fn new(tau: f32, interval: f64) -> Self {
+        Self {
+            tau,
+            interval,
+            open: None,
+            done: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, t: f64, emb: Vec<f32>) {
+        if let Some((t0, last, first, sum)) = &mut self.open
+            && t - *t0 <= MAX_SEGMENT_S
+            && dot(&emb, first) >= self.tau
+        {
+            sum.iter_mut().zip(&emb).for_each(|(s, x)| *s += x);
+            *last = t;
+            return;
+        }
+        self.close(Some(t));
+        self.open = Some((t, t, emb.clone(), emb));
+    }
+
+    fn close(&mut self, next_start: Option<f64>) {
+        if let Some((t0, last, _, mut sum)) = self.open.take() {
+            normalize(&mut sum);
+            let end = next_start.unwrap_or(last + self.interval).max(last).max(t0);
+            self.done.push(NewItem {
+                t_start: Some(t0),
+                t_end: Some(end),
+                embedding: sum,
+            });
+        }
+    }
+
+    /// Closes the last segment; `duration` (if known and plausible) caps its end.
+    pub fn finish(mut self, duration: f64) -> Vec<NewItem> {
+        self.close(None);
+        if let Some(last) = self.done.last_mut()
+            && duration > 0.0
+            && let (Some(s), Some(e)) = (last.t_start, last.t_end)
+        {
+            last.t_end = Some(e.min(duration).max(s));
+        }
+        self.done
+    }
+}
+
+/// Merges a complete list of frames.
+#[cfg(test)]
 pub(crate) fn merge_segments(
     frames: &[(f64, Vec<f32>)],
     duration: f64,
     interval: f64,
     tau: f32,
 ) -> Vec<NewItem> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < frames.len() {
-        let (t0, first) = (&frames[i].0, &frames[i].1);
-        let mut sum = first.clone();
-        let mut j = i + 1;
-        while j < frames.len()
-            && frames[j].0 - t0 <= MAX_SEGMENT_S
-            && dot(&frames[j].1, first) >= tau
-        {
-            sum.iter_mut().zip(&frames[j].1).for_each(|(s, x)| *s += x);
-            j += 1;
-        }
-        let last_t = frames[j - 1].0;
-        let next_t = frames.get(j).map(|f| f.0);
-        let end = next_t.unwrap_or(last_t + interval).min(if duration > 0.0 {
-            duration
-        } else {
-            f64::MAX
-        });
-        normalize(&mut sum);
-        out.push(NewItem {
-            t_start: Some(*t0),
-            t_end: Some(end.max(*t0)),
-            embedding: sum,
-        });
-        i = j;
+    let mut m = Merger::new(tau, interval);
+    for (t, e) in frames {
+        m.push(*t, e.clone());
     }
-    out
+    m.finish(duration)
 }
 
 #[cfg(test)]
@@ -223,6 +258,17 @@ mod tests {
         // Mean embedding is unit length.
         let n: f32 = segs[0].embedding.iter().map(|x| x * x).sum();
         assert!((n - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn too_short_header_duration_never_makes_empty_segments() {
+        let frames: Vec<(f64, Vec<f32>)> = (0..4).map(|i| (i as f64 * 2.0, v(i as f32))).collect();
+        let segs = merge_segments(&frames, 3.0, 2.0, 0.99);
+        assert_eq!(segs.len(), 4);
+        for s in &segs {
+            assert!(s.t_end.unwrap() >= s.t_start.unwrap());
+        }
+        assert_eq!(segs[1].t_end, Some(4.0));
     }
 
     #[test]
