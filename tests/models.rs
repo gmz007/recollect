@@ -149,6 +149,7 @@ fn cancel_resume_errors_and_search_end_to_end() {
             &SearchOptions {
                 limit: 5,
                 kind: None,
+                ..Default::default()
             },
         )
         .unwrap();

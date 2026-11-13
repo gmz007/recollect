@@ -6,7 +6,7 @@
 //! smooth.
 
 use super::workers::ThumbCache;
-use super::{App, Nav, Query, apply_nav_keys, fmt_time, platform};
+use super::{App, Nav, Query, apply_nav_keys, fmt_time, platform, take_plain_key};
 use crate::Library;
 use crate::library::Activity;
 use crate::media::MediaKind;
@@ -34,6 +34,7 @@ const RETRY_AFTER: Duration = Duration::from_secs(5);
 pub enum View {
     Timeline,
     RecentlyAdded,
+    Favorites,
     Folder(i64),
 }
 
@@ -342,13 +343,55 @@ pub fn date_index(items: &[TimelineItem]) -> Vec<YearEntry> {
 }
 
 fn fmt_taken(item: &TimelineItem) -> String {
-    let t = chrono::DateTime::from_timestamp(item.taken_at, 0)
+    fmt_taken_at(item.taken_at, Some(item.date_source))
+}
+
+/// "Saturday 4 July 2019, 12:30", with "(file date)" appended when the time is only the file's.
+pub fn fmt_taken_at(taken_at: i64, source: Option<DateSource>) -> String {
+    let t = chrono::DateTime::from_timestamp(taken_at, 0)
         .map(|d| d.naive_utc().format("%A %-d %B %Y, %H:%M").to_string())
         .unwrap_or_default();
-    if item.date_source == DateSource::File {
+    if source == Some(DateSource::File) {
         format!("{t} (file date)")
     } else {
         t
+    }
+}
+
+/// One "On this day" entry: an item of the album and how many years ago it was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OnThisDay {
+    pub index: usize,
+    pub years_ago: i32,
+}
+
+/// Most entries the "On this day" strip shows.
+const ON_THIS_DAY_MAX: usize = 30;
+
+/// Items taken on the same month and day as `today` in earlier years, newest first (at most
+/// [`ON_THIS_DAY_MAX`]). `index` points into `items`, whatever order they are in.
+pub fn on_this_day(items: &[TimelineItem], today: NaiveDate) -> Vec<OnThisDay> {
+    let mut hits: Vec<(i64, usize, i32)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            let d = date_of(it.taken_at);
+            (d.month() == today.month() && d.day() == today.day() && d.year() < today.year())
+                .then_some((it.taken_at, i, today.year() - d.year()))
+        })
+        .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then(items[a.1].path.cmp(&items[b.1].path)));
+    hits.truncate(ON_THIS_DAY_MAX);
+    hits.into_iter()
+        .map(|(_, index, years_ago)| OnThisDay { index, years_ago })
+        .collect()
+}
+
+fn years_ago_text(n: i32) -> String {
+    if n == 1 {
+        "1 year ago".to_string()
+    } else {
+        format!("{n} years ago")
     }
 }
 
@@ -436,6 +479,8 @@ pub(super) struct TimelineState {
     groups_key: Option<(u64, Group, bool)>,
     pub(super) dates: Vec<YearEntry>,
     layout: Option<Layout>,
+    /// "On this day" entries for the loaded items and the date they were computed for.
+    otd: Option<(u64, NaiveDate, Vec<OnThisDay>)>,
     layout_key: Option<(u64, Group, bool, i32, u32)>,
     pub(super) loaded: bool,
     awaiting: Option<(u64, TimelineFilter)>,
@@ -452,7 +497,7 @@ pub(super) struct TimelineState {
     scroll_to: Option<f32>,
     /// Item to scroll to once the layout is known; `true` aligns to its section header.
     pending: Option<(usize, bool)>,
-    keyboard_moved: bool,
+    pub(super) keyboard_moved: bool,
     /// Set when the grid was drawn; read (and cleared) at the start of the next frame.
     pub(super) shown: bool,
 }
@@ -472,6 +517,7 @@ impl TimelineState {
             groups_key: None,
             dates: Vec::new(),
             layout: None,
+            otd: None,
             layout_key: None,
             loaded: false,
             awaiting: None,
@@ -495,6 +541,18 @@ impl TimelineState {
         self.view != View::RecentlyAdded
     }
 
+    /// Entries of the "On this day" strip, recomputed only when the items or the date change.
+    fn on_this_day(&mut self, today: NaiveDate) -> &[OnThisDay] {
+        if self
+            .otd
+            .as_ref()
+            .is_none_or(|(g, d, _)| *g != self.generation || *d != today)
+        {
+            self.otd = Some((self.generation, today, on_this_day(&self.items, today)));
+        }
+        self.otd.as_ref().map_or(&[], |o| o.2.as_slice())
+    }
+
     pub(super) fn filter(&self, kind: Option<MediaKind>) -> TimelineFilter {
         TimelineFilter {
             folder: match self.view {
@@ -502,7 +560,7 @@ impl TimelineState {
                 _ => None,
             },
             kind,
-            favorites_only: false,
+            favorites_only: self.view == View::Favorites,
             album: None,
             order: match (self.view, self.newest_first) {
                 (View::RecentlyAdded, _) => TimelineOrder::AddedDesc,
@@ -633,16 +691,65 @@ pub(super) fn paint_play_badge(painter: &egui::Painter, rect: egui::Rect, label:
     painter.galley(min + Vec2::new(h + 2.0, 0.0), galley, Color32::WHITE);
 }
 
-/// Thumbnail, optional video badge and selection / hover outline.
+/// A five-pointed star centred on `c`, gold when `filled`, otherwise just an outline. (egui
+/// fills convex shapes only, so the star is drawn as a fan of triangles.)
+pub(super) fn paint_star(painter: &egui::Painter, c: egui::Pos2, radius: f32, filled: bool) {
+    let gold = Color32::from_rgb(255, 200, 40);
+    let pts: Vec<egui::Pos2> = (0..10)
+        .map(|i| {
+            let r = if i % 2 == 0 { radius } else { radius * 0.42 };
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            c + Vec2::new(a.cos(), a.sin()) * r
+        })
+        .collect();
+    if filled {
+        for i in 0..10 {
+            painter.add(egui::Shape::convex_polygon(
+                vec![c, pts[i], pts[(i + 1) % 10]],
+                gold,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+    let mut outline = pts.clone();
+    outline.push(pts[0]);
+    painter.add(egui::Shape::line(
+        outline,
+        egui::Stroke::new(
+            1.0,
+            if filled {
+                Color32::from_rgb(160, 110, 0)
+            } else {
+                gold
+            },
+        ),
+    ));
+}
+
+/// What is drawn on a tile besides its thumbnail.
+#[derive(Default)]
+pub(super) struct TileMarks {
+    /// Video badge text (a time).
+    pub badge: Option<String>,
+    pub favorite: bool,
+    pub selected: bool,
+    pub hovered: bool,
+}
+
+/// Thumbnail, optional video badge, favorite star and selection / hover outline.
 pub(super) fn paint_tile(
     ui: &egui::Ui,
     thumbs: &mut ThumbCache,
     key: &ThumbKey,
     rect: egui::Rect,
-    badge: Option<String>,
-    selected: bool,
-    hovered: bool,
+    marks: TileMarks,
 ) {
+    let TileMarks {
+        badge,
+        favorite,
+        selected,
+        hovered,
+    } = marks;
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
     let failed = thumbs.failed(key);
@@ -668,6 +775,11 @@ pub(super) fn paint_tile(
     }
     if let Some(label) = badge {
         paint_play_badge(&painter, rect, label);
+    }
+    if favorite && rect.width() > 60.0 {
+        let c = rect.right_top() + Vec2::new(-15.0, 15.0);
+        painter.circle_filled(c, 12.0, Color32::from_black_alpha(150));
+        paint_star(&painter, c, 8.0, true);
     }
     if selected {
         painter.rect_stroke(
@@ -831,6 +943,12 @@ impl App {
         {
             pick = Some(View::RecentlyAdded);
         }
+        if ui
+            .selectable_label(self.tl.view == View::Favorites, "Favorites")
+            .clicked()
+        {
+            pick = Some(View::Favorites);
+        }
         if let Some(v) = pick {
             self.set_view(v);
         }
@@ -847,7 +965,7 @@ impl App {
         let mut toggle = None;
         egui::ScrollArea::vertical()
             .id_salt("dates")
-            .max_height((ui.available_height() - 70.0).max(80.0))
+            .max_height((ui.available_height() - 44.0).max(80.0))
             .show(ui, |ui| {
                 for y in &self.tl.dates {
                     let label = format!("{} ({})", y.year, thousands(y.count));
@@ -934,14 +1052,25 @@ impl App {
             });
             return;
         }
+        if self.tl.view == View::Timeline {
+            self.on_this_day_strip(ui);
+        }
         self.timeline_toolbar(ui);
         if self.tl.items.is_empty() {
             if self.tl.awaiting.is_none() {
-                self.empty_state(
-                    ui,
-                    "Nothing to show yet",
-                    "Photos and videos appear here as soon as a folder has been scanned.",
-                );
+                if self.tl.view == View::Favorites {
+                    self.empty_state(
+                        ui,
+                        "No favorites yet",
+                        "Select a photo or video and press F to add it here.",
+                    );
+                } else {
+                    self.empty_state(
+                        ui,
+                        "Nothing to show yet",
+                        "Photos and videos appear here as soon as a folder has been scanned.",
+                    );
+                }
             }
             return;
         }
@@ -1003,9 +1132,12 @@ impl App {
                                     thumbs,
                                     &thumb_key(item),
                                     rect,
-                                    badge,
-                                    tl.selected == Some(i),
-                                    resp.hovered(),
+                                    TileMarks {
+                                        badge,
+                                        favorite: item.favorite,
+                                        selected: tl.selected == Some(i),
+                                        hovered: resp.hovered(),
+                                    },
                                 );
                             }
                             let name = file_name(item);
@@ -1058,11 +1190,75 @@ impl App {
         }
     }
 
+    /// Today's date; tests can pin it.
+    pub(super) fn today(&self) -> NaiveDate {
+        #[cfg(test)]
+        if let Some(d) = self.today_override {
+            return d;
+        }
+        chrono::Local::now().date_naive()
+    }
+
+    /// A strip of photos taken on today's date in earlier years, above the timeline.
+    fn on_this_day_strip(&mut self, ui: &mut egui::Ui) {
+        let today = self.today();
+        let entries: Vec<OnThisDay> = self.tl.on_this_day(today).to_vec();
+        if entries.is_empty() {
+            return;
+        }
+        ui.label(RichText::new("On this day").strong().size(16.0));
+        const SIZE: f32 = 88.0;
+        let mut open = None;
+        egui::ScrollArea::horizontal()
+            .id_salt("on-this-day")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (pos, e) in entries.iter().enumerate() {
+                        let item = &self.tl.items[e.index];
+                        ui.vertical(|ui| {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(Vec2::splat(SIZE), Sense::click());
+                            if ui.is_rect_visible(rect) {
+                                let badge = (item.kind == MediaKind::Video)
+                                    .then(|| fmt_time(item.duration.unwrap_or(0.0)));
+                                paint_tile(
+                                    ui,
+                                    &mut self.thumbs,
+                                    &thumb_key(item),
+                                    rect,
+                                    TileMarks {
+                                        badge,
+                                        favorite: item.favorite,
+                                        hovered: resp.hovered(),
+                                        ..Default::default()
+                                    },
+                                );
+                            }
+                            let name = file_name(item);
+                            let label = format!("On this day {name}");
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
+                            });
+                            if resp.clicked() {
+                                open = Some(pos);
+                            }
+                            resp.on_hover_text(format!("{name}\n{}", fmt_taken(item)));
+                            ui.label(RichText::new(years_ago_text(e.years_ago)).small());
+                        });
+                    }
+                });
+            });
+        ui.add_space(6.0);
+        if let Some(pos) = open {
+            let idx: Vec<usize> = entries.iter().map(|e| e.index).collect();
+            self.open_viewer_subset(&idx, pos);
+        }
+    }
+
     fn open_timeline_item(&mut self, i: usize) {
-        if let Some(item) = self.tl.items.get(i)
-            && let Err(e) = platform::open(&item.path)
-        {
-            self.notify(format!("{e:#}"));
+        if i < self.tl.items.len() {
+            self.open_viewer_timeline(i);
         }
     }
 
@@ -1076,6 +1272,12 @@ impl App {
             return;
         }
         let len = self.tl.items.len();
+        if take_plain_key(ctx, egui::Key::F)
+            && let Some(item) = self.tl.selected.and_then(|i| self.tl.items.get(i))
+        {
+            let (id, fav) = (item.file_id, !item.favorite);
+            self.set_favorite(id, fav);
+        }
         let layout = self.tl.layout.as_ref();
         let (next, enter) = apply_nav_keys(ctx, self.tl.selected, |sel, n| {
             // Nothing (valid) selected: any arrow picks the first item.
@@ -1135,8 +1337,10 @@ impl App {
         }
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Open").clicked() {
-                self.open_timeline_item(i);
+            if ui.button("Open").clicked()
+                && let Err(e) = platform::open(&item.path)
+            {
+                self.notify(format!("{e:#}"));
             }
             if ui.button("Show in folder").clicked()
                 && let Err(e) = platform::reveal(&item.path)
@@ -1152,6 +1356,14 @@ impl App {
                     item_id,
                     label: name.clone(),
                 });
+            }
+            let label = if item.favorite {
+                "Unfavorite"
+            } else {
+                "Favorite"
+            };
+            if ui.button(label).clicked() {
+                self.set_favorite(item.file_id, !item.favorite);
             }
         });
     }
@@ -1475,5 +1687,67 @@ mod tests {
         assert_eq!(reveal(100.0, 50.0, 400.0, 0.0), None);
         assert_eq!(reveal(500.0, 50.0, 400.0, 0.0), Some(150.0));
         assert_eq!(reveal(100.0, 50.0, 400.0, 300.0), Some(100.0));
+    }
+
+    #[test]
+    fn on_this_day_lists_earlier_years_newest_first() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let items = vec![
+            item(ts(2026, 7, 4, 9, 0, 0)),    // today, this year: not "earlier"
+            item(ts(2019, 7, 4, 8, 0, 0)),    // 7 years ago
+            item(ts(2019, 7, 5, 8, 0, 0)),    // next day
+            item(ts(2020, 6, 4, 8, 0, 0)),    // other month
+            item(ts(2024, 7, 4, 23, 59, 59)), // 2 years ago, late in the day
+            item(ts(2025, 7, 4, 0, 0, 0)),    // 1 year ago, first second of the day
+            item(ts(2019, 7, 4, 20, 0, 0)),   // same day as another 2019 photo
+        ];
+        let got = on_this_day(&items, today);
+        assert_eq!(
+            got,
+            vec![
+                OnThisDay {
+                    index: 5,
+                    years_ago: 1
+                },
+                OnThisDay {
+                    index: 4,
+                    years_ago: 2
+                },
+                OnThisDay {
+                    index: 6,
+                    years_ago: 7
+                },
+                OnThisDay {
+                    index: 1,
+                    years_ago: 7
+                },
+            ]
+        );
+        assert_eq!(years_ago_text(1), "1 year ago");
+        assert_eq!(years_ago_text(7), "7 years ago");
+        // A different day finds different photos; nothing matching gives an empty strip.
+        let other = NaiveDate::from_ymd_opt(2026, 7, 5).unwrap();
+        assert_eq!(on_this_day(&items, other).len(), 1);
+        assert!(on_this_day(&items, NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()).is_empty());
+        assert!(on_this_day(&[], today).is_empty());
+    }
+
+    #[test]
+    fn on_this_day_is_capped_and_ignores_the_list_order() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        // 40 earlier years on the same day, oldest first.
+        let items: Vec<_> = (1980..2020).map(|y| item(ts(y, 7, 4, 12, 0, 0))).collect();
+        let got = on_this_day(&items, today);
+        assert_eq!(got.len(), ON_THIS_DAY_MAX);
+        assert_eq!(items[got[0].index].taken_at, ts(2019, 7, 4, 12, 0, 0));
+        assert_eq!(got[0].years_ago, 7);
+        assert_eq!(got.last().unwrap().years_ago, 7 + 29);
+        // 29 February only matches 29 February.
+        let leap = vec![item(ts(2020, 2, 29, 12, 0, 0))];
+        assert!(on_this_day(&leap, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()).is_empty());
+        assert_eq!(
+            on_this_day(&leap, NaiveDate::from_ymd_opt(2028, 2, 29).unwrap()).len(),
+            1
+        );
     }
 }

@@ -136,6 +136,7 @@ pub fn run(lib: &Library, queries: &Path, root: &Path) -> Result<Report> {
             &SearchOptions {
                 limit: 10,
                 kind: Some(kind),
+                ..Default::default()
             },
         )?;
         let rank = hits.iter().position(|h| matches(h, &exp));
@@ -189,6 +190,8 @@ mod tests {
                 MediaKind::Image
             },
             mtime: 0,
+            taken_at: 0,
+            favorite: false,
             score: 0.5,
             t_start: t.map(|x| x.0),
             t_end: t.map(|x| x.1),

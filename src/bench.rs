@@ -111,6 +111,7 @@ pub fn search(
     let opts = SearchOptions {
         limit: 200,
         kind: None,
+        ..Default::default()
     };
     search::by_vector(&lib, &rng.unit(spec.dim), &opts, None)?; // warm caches
     let mut lat = Vec::with_capacity(queries);

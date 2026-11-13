@@ -1,0 +1,770 @@
+//! The viewer (lightbox): one photo or video frame as large as fits the window, with an info
+//! panel, keyboard navigation through the list it was opened from, and zoom.
+//!
+//! [`Viewer`] holds only view state and returns [`Action`]s for everything that touches the rest
+//! of the app; the `impl App` block at the bottom connects it to the grids.
+
+use super::preview::{self, Preview, PreviewKey, Previews};
+use super::timeline::{fmt_taken_at, paint_star};
+use super::workers::ThumbCache;
+use super::{App, Query, consume_plain_key, fmt_time, platform};
+use crate::media::MediaKind;
+use crate::media::metadata::DateSource;
+use crate::search::SearchHit;
+use crate::store::db::TimelineItem;
+use crate::thumbs::ThumbKey;
+use egui::{Color32, Pos2, Rect, RichText, Sense, Vec2};
+use std::path::PathBuf;
+
+/// A matching moment of a video (from a search hit).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct MomentChip {
+    pub item_id: i64,
+    pub t_start: f64,
+    pub t_end: f64,
+    pub score: f32,
+}
+
+/// One item of the list being viewed, from a timeline row or a search hit.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ViewerEntry {
+    pub file_id: i64,
+    /// A searchable item of the file, if it is indexed (what "Find similar" starts from).
+    pub item_id: Option<i64>,
+    pub path: PathBuf,
+    pub kind: MediaKind,
+    pub mtime: i64,
+    pub taken_at: i64,
+    /// Where `taken_at` comes from, when the list knew it (search hits do not).
+    pub date_source: Option<DateSource>,
+    pub duration: Option<f64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub favorite: bool,
+    pub camera: Option<String>,
+    /// Video position shown, in seconds: the matching moment of a search hit.
+    pub t: Option<f64>,
+    /// All matching moments (best first) when opened from a search hit.
+    pub moments: Vec<MomentChip>,
+}
+
+impl ViewerEntry {
+    pub fn from_timeline(it: &TimelineItem) -> Self {
+        Self {
+            file_id: it.file_id,
+            item_id: it.item_id,
+            path: it.path.clone(),
+            kind: it.kind,
+            mtime: it.mtime,
+            taken_at: it.taken_at,
+            date_source: Some(it.date_source),
+            duration: it.duration,
+            width: it.width,
+            height: it.height,
+            favorite: it.favorite,
+            camera: it.camera.clone(),
+            t: None,
+            moments: Vec::new(),
+        }
+    }
+
+    pub fn from_hit(h: &SearchHit) -> Self {
+        let mut moments = Vec::new();
+        if h.kind == MediaKind::Video {
+            moments.push(MomentChip {
+                item_id: h.item_id,
+                t_start: h.t_start.unwrap_or(0.0),
+                t_end: h.t_end.or(h.t_start).unwrap_or(0.0),
+                score: h.score,
+            });
+            moments.extend(h.moments.iter().map(|m| MomentChip {
+                item_id: m.item_id,
+                t_start: m.t_start,
+                t_end: m.t_end,
+                score: m.score,
+            }));
+        }
+        Self {
+            file_id: h.file_id,
+            item_id: Some(h.item_id),
+            path: h.path.clone(),
+            kind: h.kind,
+            mtime: h.mtime,
+            taken_at: h.taken_at,
+            date_source: None,
+            duration: h.duration,
+            width: h.width,
+            height: h.height,
+            favorite: h.favorite,
+            camera: None,
+            t: h.t_start,
+            moments,
+        }
+    }
+
+    fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Position of the frame shown for a video: the chosen moment, else 10 % of the length
+    /// (at most 5 s), like the timeline thumbnail.
+    fn frame_time(&self) -> Option<f64> {
+        (self.kind == MediaKind::Video).then(|| {
+            self.t
+                .unwrap_or_else(|| (self.duration.unwrap_or(0.0) * 0.1).clamp(0.0, 5.0))
+        })
+    }
+
+    fn thumb_key(&self) -> ThumbKey {
+        ThumbKey {
+            path: self.path.clone(),
+            mtime: self.mtime,
+            t_ms: self.frame_time().map(|t| (t * 1000.0) as i64),
+        }
+    }
+
+    fn dims(&self) -> Option<(u32, u32)> {
+        self.width.zip(self.height)
+    }
+
+    fn preview_key(&self, side: u32) -> PreviewKey {
+        PreviewKey {
+            path: self.path.clone(),
+            mtime: self.mtime,
+            t_ms: self.frame_time().map(|t| (t * 1000.0) as i64),
+            side,
+            min_side: preview::min_side_for(self.dims(), side),
+        }
+    }
+
+    /// The item "Find similar" should start from: the chosen moment's, for videos.
+    fn similar_item(&self) -> Option<i64> {
+        self.moments
+            .iter()
+            .find(|m| Some(m.t_start) == self.t)
+            .map(|m| m.item_id)
+            .or(self.item_id)
+    }
+}
+
+/// What the viewer asks the app to do.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Action {
+    Close,
+    Favorite(i64, bool),
+    Open(PathBuf),
+    Reveal(PathBuf),
+    PlayAt(PathBuf, f64),
+    FindSimilar { item_id: i64, label: String },
+}
+
+pub(super) struct Viewer {
+    entries: Vec<ViewerEntry>,
+    index: usize,
+    pub info: bool,
+    /// Showing the image at 100 % (one image pixel per screen pixel) instead of fitted.
+    zoom: bool,
+    /// Offset of the image centre from the centre of the view while zoomed.
+    pan: Vec2,
+}
+
+impl Viewer {
+    pub fn new(entries: Vec<ViewerEntry>, index: usize, info: bool) -> Self {
+        let index = index.min(entries.len().saturating_sub(1));
+        Self {
+            entries,
+            index,
+            info,
+            zoom: false,
+            pan: Vec2::ZERO,
+        }
+    }
+
+    pub fn current(&self) -> &ViewerEntry {
+        &self.entries[self.index]
+    }
+
+    /// Keeps the favorite mark of every entry for `file_id` in line with the library.
+    pub fn set_favorite(&mut self, file_id: i64, fav: bool) {
+        for e in self.entries.iter_mut().filter(|e| e.file_id == file_id) {
+            e.favorite = fav;
+        }
+    }
+
+    fn go(&mut self, to: usize) {
+        let to = to.min(self.entries.len() - 1);
+        if to != self.index {
+            self.index = to;
+            self.zoom = false;
+            self.pan = Vec2::ZERO;
+        }
+    }
+
+    fn toggle_zoom(&mut self) {
+        if self.current().kind == MediaKind::Image {
+            self.zoom = !self.zoom;
+            self.pan = Vec2::ZERO;
+        }
+    }
+
+    fn handle_keys(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        use egui::Key;
+        let n = self.entries.len();
+        let (esc, left, right, home, end, info, zoom, fav) = ctx.input_mut(|i| {
+            (
+                consume_plain_key(i, Key::Escape),
+                consume_plain_key(i, Key::ArrowLeft),
+                consume_plain_key(i, Key::ArrowRight),
+                consume_plain_key(i, Key::Home),
+                consume_plain_key(i, Key::End),
+                consume_plain_key(i, Key::I),
+                consume_plain_key(i, Key::Z),
+                consume_plain_key(i, Key::F),
+            )
+        });
+        if esc > 0 {
+            actions.push(Action::Close);
+        }
+        let mut target = self.index as i64;
+        target -= left as i64;
+        target += right as i64;
+        if home > 0 {
+            target = 0;
+        }
+        if end > 0 {
+            target = n as i64 - 1;
+        }
+        self.go(target.clamp(0, n as i64 - 1) as usize);
+        if left + right + home + end > 0
+            && let Some(id) = ctx.memory(|m| m.focused())
+        {
+            // A focused button would otherwise also move with the arrow keys.
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+        if info % 2 == 1 {
+            self.info = !self.info;
+        }
+        if zoom % 2 == 1 {
+            self.toggle_zoom();
+        }
+        if fav % 2 == 1 {
+            let e = self.current();
+            actions.push(Action::Favorite(e.file_id, !e.favorite));
+        }
+    }
+
+    /// Draws the viewer over the whole window and returns what the user asked for.
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        previews: &mut Previews,
+        thumbs: &mut ThumbCache,
+        can_find_similar: bool,
+    ) -> Vec<Action> {
+        let ctx = ui.ctx().clone();
+        let mut actions = Vec::new();
+        self.handle_keys(&ctx, &mut actions);
+        egui::Panel::top("viewer_top").show(ui, |ui| {
+            ui.add_space(6.0);
+            self.top_bar(ui, &mut actions);
+            ui.add_space(6.0);
+        });
+        if self.info {
+            egui::Panel::right("viewer_info")
+                .resizable(true)
+                .default_size(300.0)
+                .min_size(240.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.info_panel(ui, previews, can_find_similar, &mut actions)
+                    });
+                });
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(Color32::from_gray(16)))
+            .show(ui, |ui| self.canvas(ui, previews, thumbs));
+        actions
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.horizontal(|ui| {
+            if ui.button("Close").clicked() {
+                actions.push(Action::Close);
+            }
+            ui.add_space(8.0);
+            // The name is shown once: here while the info panel is closed, there while open.
+            if !self.info {
+                ui.label(RichText::new(self.current().name()).strong());
+            }
+            ui.label(RichText::new(format!("{} / {}", self.index + 1, self.entries.len())).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.toggle_value(&mut self.info, "Info");
+                if self.current().kind == MediaKind::Image {
+                    let label = if self.zoom {
+                        "Fit to window"
+                    } else {
+                        "Zoom to 100%"
+                    };
+                    if ui.button(label).clicked() {
+                        self.toggle_zoom();
+                    }
+                }
+                if !self.info {
+                    self.favorite_button(ui, actions);
+                }
+            });
+        });
+    }
+
+    fn favorite_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let e = self.current();
+        let label = if e.favorite { "Unfavorite" } else { "Favorite" };
+        if ui.button(label).clicked() {
+            actions.push(Action::Favorite(e.file_id, !e.favorite));
+        }
+    }
+
+    fn info_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        previews: &mut Previews,
+        can_find_similar: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        let e = self.current().clone();
+        let details = previews.details(e.file_id).cloned();
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(e.name()).strong());
+            if e.favorite {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                paint_star(ui.painter(), r.center(), 7.0, true);
+            }
+        });
+        ui.label(
+            RichText::new(
+                e.path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        let taken = details.as_ref().map_or(e.taken_at, |d| d.taken_at);
+        let source = details.as_ref().map(|d| d.date_source).or(e.date_source);
+        ui.label(fmt_taken_at(taken, source));
+        let camera = details
+            .as_ref()
+            .and_then(|d| d.camera.clone())
+            .or(e.camera.clone());
+        if let Some(c) = camera {
+            ui.label(RichText::new(c).small());
+        }
+        if let Some((w, h)) = e.dims() {
+            ui.label(format!("{w}×{h}"));
+        }
+        if let Some(s) = details.as_ref().and_then(|d| d.size) {
+            ui.label(fmt_size(s));
+        }
+        if let Some(d) = e.duration {
+            ui.label(format!("length {}", fmt_time(d)));
+        }
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if e.kind == MediaKind::Video
+                && ui
+                    .button(format!("Play at {}", fmt_time(e.t.unwrap_or(0.0))))
+                    .clicked()
+            {
+                actions.push(Action::PlayAt(e.path.clone(), e.t.unwrap_or(0.0)));
+            }
+            if ui.button("Open with default app").clicked() {
+                actions.push(Action::Open(e.path.clone()));
+            }
+            if ui.button("Show in folder").clicked() {
+                actions.push(Action::Reveal(e.path.clone()));
+            }
+            if can_find_similar
+                && let Some(item_id) = e.similar_item()
+                && ui.button("Find similar").clicked()
+            {
+                actions.push(Action::FindSimilar {
+                    item_id,
+                    label: e.name(),
+                });
+            }
+            self.favorite_button(ui, actions);
+        });
+        if e.moments.len() > 1 || (e.moments.len() == 1 && e.t.is_some()) {
+            ui.add_space(10.0);
+            ui.label(RichText::new("Matching moments").strong());
+            ui.horizontal_wrapped(|ui| {
+                for m in &e.moments {
+                    let label = format!("{} – {}", fmt_time(m.t_start), fmt_time(m.t_end));
+                    if ui
+                        .selectable_label(e.t == Some(m.t_start), label)
+                        .on_hover_text(format!("match {:.3}", m.score))
+                        .clicked()
+                    {
+                        self.entries[self.index].t = Some(m.t_start);
+                    }
+                }
+            });
+        }
+    }
+
+    /// The media area: preview (or the thumbnail until it is ready), zoom and previous / next.
+    fn canvas(&mut self, ui: &mut egui::Ui, previews: &mut Previews, thumbs: &mut ThumbCache) {
+        let ctx = ui.ctx().clone();
+        let area = ui.available_rect_before_wrap();
+        let resp = ui.allocate_rect(area, Sense::click_and_drag());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Viewer canvas"));
+        if resp.double_clicked() {
+            self.toggle_zoom();
+        }
+        let ppp = ctx.pixels_per_point();
+        let side = preview::fit_side(ctx.content_rect().size(), ppp);
+        let e = self.current().clone();
+        // Ask for the neighbours first (the newest request is decoded first), then the current
+        // item, and forget what is no longer wanted.
+        let mut wanted = Vec::new();
+        for i in [self.index + 1, self.index.wrapping_sub(1)] {
+            if let Some(n) = self.entries.get(i) {
+                let k = n.preview_key(side);
+                previews.get(&k);
+                wanted.push(k);
+            }
+        }
+        let fit_key = e.preview_key(side);
+        let zoom_key = (self.zoom && e.kind == MediaKind::Image)
+            .then(|| {
+                let longest = e.dims().map_or(preview::MAX_ZOOM_SIDE, |(w, h)| w.max(h));
+                longest.min(preview::MAX_ZOOM_SIDE)
+            })
+            .filter(|&s| s > side)
+            .map(|s| e.preview_key(s));
+        let mut tex = None;
+        let mut failed = false;
+        if let Some(k) = &zoom_key {
+            wanted.push(k.clone());
+        }
+        wanted.push(fit_key.clone());
+        match previews.get(&fit_key) {
+            Preview::Ready(t) => tex = Some(t.clone()),
+            Preview::Failed => failed = true,
+            Preview::Loading => {}
+        }
+        if let Some(k) = &zoom_key
+            && let Preview::Ready(t) = previews.get(k)
+        {
+            tex = Some(t.clone());
+        }
+        previews.retain_queued(&wanted);
+        let mut loading = false;
+        if tex.is_none() {
+            // Until the preview arrives, the (already cached) thumbnail stands in for it.
+            tex = thumbs.get(&e.thumb_key()).cloned();
+            loading = !failed;
+        }
+        let painter = ui.painter_at(area);
+        if let Some(tex) = tex {
+            let tex_size = tex.size_vec2();
+            let size = if self.zoom && !loading {
+                e.dims()
+                    .map_or(tex_size, |(w, h)| Vec2::new(w as f32, h as f32))
+                    / ppp
+            } else {
+                tex_size * (area.width() / tex_size.x).min(area.height() / tex_size.y)
+            };
+            if self.zoom && resp.dragged() {
+                self.pan += resp.drag_delta();
+            }
+            let slack = ((size - area.size()) / 2.0).max(Vec2::ZERO);
+            self.pan = self.pan.clamp(-slack, slack);
+            let centre = if self.zoom {
+                area.center() + self.pan
+            } else {
+                area.center()
+            };
+            painter.image(
+                tex.id(),
+                Rect::from_center_size(centre, size),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            if self.zoom && !loading {
+                ui.output_mut(|o| {
+                    o.cursor_icon = if resp.dragged() {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    }
+                });
+            }
+        }
+        if loading {
+            ui.put(
+                Rect::from_center_size(area.center(), Vec2::splat(28.0)),
+                egui::Spinner::new(),
+            );
+        } else if failed {
+            painter.text(
+                area.center() + Vec2::new(0.0, 40.0),
+                egui::Align2::CENTER_CENTER,
+                "Preview unavailable",
+                egui::FontId::proportional(15.0),
+                Color32::from_gray(180),
+            );
+        }
+        // Previous / next, drawn over the media.
+        let mid = area.center().y;
+        let prev = Rect::from_center_size(Pos2::new(area.left() + 34.0, mid), Vec2::splat(44.0));
+        let next = Rect::from_center_size(Pos2::new(area.right() - 34.0, mid), Vec2::splat(44.0));
+        if self.index > 0 && nav_button(ui, prev, "Previous", -1.0) {
+            self.go(self.index - 1);
+        }
+        if self.index + 1 < self.entries.len() && nav_button(ui, next, "Next", 1.0) {
+            self.go(self.index + 1);
+        }
+    }
+}
+
+/// A round button with a chevron; `dir` is -1 for "previous" and 1 for "next".
+fn nav_button(ui: &mut egui::Ui, rect: Rect, label: &str, dir: f32) -> bool {
+    let resp = ui.interact(
+        rect,
+        ui.make_persistent_id(("viewer-nav", label)),
+        Sense::click(),
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let alpha = if resp.hovered() { 200 } else { 110 };
+    let p = ui.painter();
+    p.circle_filled(
+        rect.center(),
+        rect.width() / 2.0,
+        Color32::from_black_alpha(alpha),
+    );
+    let c = rect.center();
+    let stroke = egui::Stroke::new(3.0, Color32::WHITE);
+    let (tip, tail) = (
+        c + Vec2::new(5.0 * dir, 0.0),
+        c + Vec2::new(-4.0 * dir, 0.0),
+    );
+    p.line_segment([tip, tail + Vec2::new(0.0, -11.0)], stroke);
+    p.line_segment([tip, tail + Vec2::new(0.0, 11.0)], stroke);
+    resp.on_hover_text(label).clicked()
+}
+
+/// `3.2 MB`, `812 KB`, `2.0 GB`.
+fn fmt_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= KB * KB * KB {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    } else if b >= KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// App wiring
+// ---------------------------------------------------------------------------------------------
+
+impl App {
+    pub(super) fn viewer_open(&self) -> bool {
+        self.viewer.is_some()
+    }
+
+    fn start_viewer(&mut self, entries: Vec<ViewerEntry>, index: usize) {
+        if entries.is_empty() {
+            return;
+        }
+        self.viewer = Some(Viewer::new(entries, index, self.viewer_info));
+    }
+
+    /// Opens the viewer on the whole album list at `i`.
+    pub(super) fn open_viewer_timeline(&mut self, i: usize) {
+        let entries = self
+            .tl
+            .items
+            .iter()
+            .map(ViewerEntry::from_timeline)
+            .collect();
+        self.tl.selected = Some(i);
+        self.start_viewer(entries, i);
+    }
+
+    /// Opens the viewer on the search results at `i`.
+    pub(super) fn open_viewer_results(&mut self, i: usize) {
+        let mut entries: Vec<ViewerEntry> =
+            self.results.iter().map(ViewerEntry::from_hit).collect();
+        if let (Some(e), Some(t)) = (entries.get_mut(i), self.selected_t)
+            && self.selected == Some(i)
+            && e.kind == MediaKind::Video
+        {
+            e.t = Some(t);
+        }
+        self.selected = Some(i);
+        self.start_viewer(entries, i);
+    }
+
+    /// Opens the viewer on a subset of the album (e.g. the "On this day" strip).
+    pub(super) fn open_viewer_subset(&mut self, items: &[usize], pos: usize) {
+        let entries = items
+            .iter()
+            .filter_map(|&i| self.tl.items.get(i))
+            .map(ViewerEntry::from_timeline)
+            .collect();
+        self.start_viewer(entries, pos);
+    }
+
+    /// Draws the viewer instead of the album and applies what it asks for.
+    pub(super) fn show_viewer(&mut self, ui: &mut egui::Ui) {
+        let Some(mut viewer) = self.viewer.take() else {
+            return;
+        };
+        let can_similar = self.snapshot.model_installed;
+        let actions = viewer.show(ui, &mut self.previews, &mut self.thumbs, can_similar);
+        self.viewer = Some(viewer);
+        for a in actions {
+            match a {
+                Action::Close => self.close_viewer(),
+                Action::Favorite(id, fav) => self.set_favorite(id, fav),
+                Action::Open(p) => {
+                    if let Err(e) = platform::open(&p) {
+                        self.notify(format!("{e:#}"));
+                    }
+                }
+                Action::Reveal(p) => {
+                    if let Err(e) = platform::reveal(&p) {
+                        self.notify(format!("{e:#}"));
+                    }
+                }
+                Action::PlayAt(p, t) => {
+                    if let Err(e) = platform::open_video_at(&p, t) {
+                        self.notify(format!("{e:#}"));
+                    }
+                }
+                Action::FindSimilar { item_id, label } => {
+                    self.viewer = None;
+                    self.tl.selected = None;
+                    self.query.clear();
+                    self.submit(Query::Similar { item_id, label });
+                }
+            }
+        }
+    }
+
+    /// Back to the grid with the item that was being viewed selected and scrolled into view.
+    pub(super) fn close_viewer(&mut self) {
+        let Some(v) = self.viewer.take() else {
+            return;
+        };
+        self.viewer_info = v.info;
+        let e = v.current();
+        if self.searching() {
+            if let Some(i) = self.results.iter().position(|h| h.file_id == e.file_id) {
+                self.selected = Some(i);
+                self.selected_t = e.t.or(self.results[i].t_start);
+                self.keyboard_moved = true;
+            }
+        } else if let Some(i) = self.tl.items.iter().position(|it| it.file_id == e.file_id) {
+            self.tl.selected = Some(i);
+            self.tl.keyboard_moved = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_naturally() {
+        assert_eq!(fmt_size(0), "0 B");
+        assert_eq!(fmt_size(1023), "1023 B");
+        assert_eq!(fmt_size(2048), "2 KB");
+        assert_eq!(fmt_size(3_355_443), "3.2 MB");
+        assert_eq!(fmt_size(3 << 30), "3.0 GB");
+    }
+
+    fn entry(kind: MediaKind) -> ViewerEntry {
+        ViewerEntry {
+            file_id: 1,
+            item_id: Some(10),
+            path: "/x/clip.mp4".into(),
+            kind,
+            mtime: 5,
+            taken_at: 0,
+            date_source: None,
+            duration: Some(100.0),
+            width: Some(1920),
+            height: Some(1080),
+            favorite: false,
+            camera: None,
+            t: None,
+            moments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn video_frames_follow_the_moment_or_the_thumbnail_rule() {
+        let mut v = entry(MediaKind::Video);
+        assert_eq!(v.frame_time(), Some(5.0)); // 10 % of 100 s, capped at 5 s
+        v.duration = Some(20.0);
+        assert_eq!(v.frame_time(), Some(2.0));
+        v.t = Some(42.5);
+        assert_eq!(v.frame_time(), Some(42.5));
+        assert_eq!(v.preview_key(1024).t_ms, Some(42_500));
+        assert_eq!(v.thumb_key().t_ms, Some(42_500));
+        assert_eq!(entry(MediaKind::Image).frame_time(), None);
+    }
+
+    #[test]
+    fn find_similar_starts_from_the_chosen_moment() {
+        let mut v = entry(MediaKind::Video);
+        v.moments = vec![
+            MomentChip {
+                item_id: 10,
+                t_start: 4.0,
+                t_end: 6.0,
+                score: 0.3,
+            },
+            MomentChip {
+                item_id: 11,
+                t_start: 60.0,
+                t_end: 62.0,
+                score: 0.2,
+            },
+        ];
+        v.t = Some(60.0);
+        assert_eq!(v.similar_item(), Some(11));
+        v.t = Some(4.0);
+        assert_eq!(v.similar_item(), Some(10));
+        v.t = None;
+        assert_eq!(v.similar_item(), Some(10));
+    }
+
+    #[test]
+    fn navigation_stays_inside_the_list() {
+        let mut v = Viewer::new(vec![entry(MediaKind::Image); 3], 1, true);
+        v.zoom = true;
+        v.go(2);
+        assert_eq!(v.index, 2);
+        assert!(!v.zoom, "moving on resets the zoom");
+        v.go(99);
+        assert_eq!(v.index, 2);
+        v.go(0);
+        assert_eq!(v.index, 0);
+        assert_eq!(Viewer::new(vec![entry(MediaKind::Image)], 7, true).index, 0);
+    }
+}

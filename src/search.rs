@@ -3,6 +3,7 @@
 use crate::library::Library;
 use crate::media::MediaKind;
 use crate::store::db::ItemInfo;
+use crate::store::index::ScanFilter;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -12,6 +13,10 @@ pub struct SearchOptions {
     /// Maximum number of files returned.
     pub limit: usize,
     pub kind: Option<MediaKind>,
+    /// Only items captured within this range (inclusive, local wall-clock seconds, see
+    /// `media::metadata`). Applied inside the index scan.
+    pub taken_range: Option<(i64, i64)>,
+    pub sort: SearchSort,
 }
 
 impl Default for SearchOptions {
@@ -19,8 +24,20 @@ impl Default for SearchOptions {
         Self {
             limit: 200,
             kind: None,
+            taken_range: None,
+            sort: SearchSort::Relevance,
         }
     }
+}
+
+/// How results are ordered. With a date order the best `limit` matches are still chosen by
+/// relevance; only their order changes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchSort {
+    #[default]
+    Relevance,
+    Newest,
+    Oldest,
 }
 
 /// A matching moment inside a video.
@@ -40,6 +57,9 @@ pub struct SearchHit {
     pub path: PathBuf,
     pub kind: MediaKind,
     pub mtime: i64,
+    /// Local wall-clock capture time; the file time if unknown.
+    pub taken_at: i64,
+    pub favorite: bool,
     pub score: f32,
     pub t_start: Option<f64>,
     pub t_end: Option<f64>,
@@ -70,7 +90,15 @@ pub(crate) fn by_vector(
             if q.len() != index.dim() {
                 anyhow::bail!("the query was made with a different model; please search again");
             }
-            index.search_excluding(q, k, opts.kind, exclude_file)
+            index.search_filtered(
+                q,
+                k,
+                &ScanFilter {
+                    kind: opts.kind,
+                    exclude_file,
+                    taken_range: opts.taken_range,
+                },
+            )
         };
         let files: HashSet<i64> = cands.iter().map(|c| c.file_id).collect();
         if files.len() >= opts.limit || cands.len() < k || k >= MAX_CANDIDATES {
@@ -124,7 +152,7 @@ pub(crate) fn by_vector(
         infos.len()
     );
     let moment_infos = &infos;
-    Ok(grouped
+    let mut hits: Vec<SearchHit> = grouped
         .into_iter()
         .filter_map(|(id, score, moments)| {
             let i = infos.get(&id)?;
@@ -134,6 +162,8 @@ pub(crate) fn by_vector(
                 path: i.path.clone(),
                 kind: i.kind,
                 mtime: i.mtime,
+                taken_at: i.taken_at,
+                favorite: i.favorite,
                 score,
                 t_start: i.t_start,
                 t_end: i.t_end,
@@ -154,7 +184,18 @@ pub(crate) fn by_vector(
                     .collect(),
             })
         })
-        .collect())
+        .collect();
+    sort_hits(&mut hits, opts.sort);
+    Ok(hits)
+}
+
+/// Orders hits by capture time (stable: equal times keep their relevance order).
+fn sort_hits(hits: &mut [SearchHit], sort: SearchSort) {
+    match sort {
+        SearchSort::Relevance => {}
+        SearchSort::Newest => hits.sort_by_key(|h| std::cmp::Reverse(h.taken_at)),
+        SearchSort::Oldest => hits.sort_by_key(|h| h.taken_at),
+    }
 }
 
 /// (best item id, best score, further (item id, score) moments)

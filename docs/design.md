@@ -74,9 +74,20 @@ index:
   of the memory of f32 and faster to scan; ranking with i8 scores matches f32 ranking in our
   quality measurements, so results are not re-scored;
 - the scan runs on all cores; on x86-64 an AVX2 build of the dot product is selected at runtime;
-- results are grouped per file (a video appears once, with its best moments).
+- results are grouped per file (a video appears once, with its best moments);
+- each vector also carries its file's **capture time** (the timeline's local wall-clock time, or the
+  file time when no date is known), so a date range is checked inside the scan with one integer
+  comparison. The column is filled from the database at startup and when indexing adds vectors;
+  when the date pass later learns a date for an already embedded file, the column is patched in
+  place and the database epoch moves so the cache on disk is rewritten.
 
 The full f32 vectors stay in SQLite (for "find similar" and future re-quantization).
+
+**Viewer previews.** The viewer decodes previews on its own worker threads at the window size
+(longest side at most 2048 px, DCT-scaled for JPEGs; a sharper variant up to 4096 px at 100 % zoom),
+keeps about eight textures in memory and prefetches the neighbouring items. Nothing is cached on
+disk; the thumbnail is shown scaled up until the preview is ready. Videos show a frame at the
+matching moment (or at 10 % of the length, at most 5 s).
 
 **Index cache.** Decoding every vector from SQLite at startup takes seconds at a million
 vectors, so the i8 index is also written to `data/index-<model>.bin`. Each change to stored items

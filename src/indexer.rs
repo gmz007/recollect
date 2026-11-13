@@ -94,9 +94,25 @@ fn read_dates(lib: &Library, summary: &mut RunSummary) -> Result<()> {
             return Ok(()); // a partly read chunk is simply read again next time
         }
         let caps: Vec<(i64, Capture)> = caps.into_iter().flatten().collect();
-        lib.db.lock().set_captures(&caps)?;
+        apply_captures(lib, &caps)?;
         done += chunk.len();
         summary.dates_read += caps.len();
+    }
+    Ok(())
+}
+
+/// Stores capture times. Files that were embedded before their date was known (it was
+/// unreadable at the time) have the fallback time in the search index; the in-memory column is
+/// patched in one pass, and the database write moves the epoch so the on-disk cache is
+/// rewritten instead of reused with the old time.
+pub(crate) fn apply_captures(lib: &Library, caps: &[(i64, Capture)]) -> Result<()> {
+    // Lock order: db, then index.
+    let mut db = lib.db.lock();
+    db.set_captures(caps)?;
+    let mut index = lib.index.write();
+    if !index.is_empty() {
+        let times = caps.iter().map(|(id, c)| (*id, c.taken_at)).collect();
+        index.set_taken(&times);
     }
     Ok(())
 }
@@ -388,10 +404,14 @@ pub(crate) fn write_items(
     // between (lock order: db, then index).
     let mut db = lib.db.lock();
     let ids = db.put_items(spec.id, &batch)?;
+    // Dates were read before embedding started, so the timeline's value is the right one.
+    let file_ids: Vec<i64> = batch.iter().map(|b| b.0).collect();
+    let taken = db.taken_times(&file_ids)?;
     let mut index = lib.index.write();
     for (((file_id, _, items), item_ids), kind) in batch.iter().zip(&ids).zip(kinds) {
+        let t = taken.get(file_id).copied().unwrap_or_default();
         for (it, id) in items.iter().zip(item_ids) {
-            index.add(*id, *file_id, kind, &it.embedding);
+            index.add(*id, *file_id, kind, t, &it.embedding);
         }
     }
     Ok(())

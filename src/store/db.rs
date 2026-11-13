@@ -156,6 +156,8 @@ pub struct StoredItem {
     pub id: i64,
     pub file_id: i64,
     pub kind: MediaKind,
+    /// Capture time of the file as the timeline shows it (see [`Db::taken_times`]).
+    pub taken_at: i64,
     pub embedding: Vec<f32>,
 }
 
@@ -172,6 +174,19 @@ pub struct ItemInfo {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub duration: Option<f64>,
+    pub favorite: bool,
+    /// Local wall-clock capture time; the file time if unknown.
+    pub taken_at: i64,
+}
+
+/// Facts about one file that list views do not carry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileDetails {
+    pub path: PathBuf,
+    pub taken_at: i64,
+    pub date_source: DateSource,
+    pub camera: Option<String>,
+    pub favorite: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -322,6 +337,16 @@ fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
         mtime: r.get(4)?,
         status: FileStatus::from_i64(r.get(5)?),
     })
+}
+
+fn any_items_of(conn: &Connection, files: impl Iterator<Item = i64>) -> Result<bool> {
+    let mut st = conn.prepare_cached("SELECT 1 FROM items WHERE file_id = ?1 LIMIT 1")?;
+    for f in files {
+        if st.exists([f])? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn bump_epoch(conn: &Connection) -> Result<()> {
@@ -696,8 +721,66 @@ impl Db {
                 ])?;
             }
         }
+        // Embedded files carry their capture time in the search index (and its cache), which
+        // the caller patches in memory; moving the epoch makes sure the cache is rewritten.
+        if any_items_of(&tx, batch.iter().map(|b| b.0))? {
+            bump_epoch(&tx)?;
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Capture times of files as the timeline shows them: the stored date, or the modification
+    /// time converted to local wall-clock when the date is not known yet.
+    pub fn taken_times(&self, file_ids: &[i64]) -> Result<HashMap<i64, i64>> {
+        let rows = self.by_ids(
+            "SELECT id, taken_at, mtime FROM files WHERE id IN (#)",
+            file_ids,
+            |r| {
+                let taken: Option<i64> = r.get(1)?;
+                let mtime: i64 = r.get(2)?;
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    taken.unwrap_or_else(|| local_wall_clock(mtime)),
+                ))
+            },
+        )?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Marks files as favorites (or not).
+    pub fn set_favorite(&mut self, file_ids: &[i64], fav: bool) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut upd = tx.prepare("UPDATE files SET favorite = ?2 WHERE id = ?1")?;
+            for id in file_ids {
+                upd.execute(params![id, fav as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Date source, camera and favorite flag of one file.
+    pub fn file_details(&self, file_id: i64) -> Result<Option<FileDetails>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT taken_at, mtime, date_source, camera, favorite, path FROM files WHERE id = ?1",
+                [file_id],
+                |r| {
+                    let taken: Option<i64> = r.get(0)?;
+                    let mtime: i64 = r.get(1)?;
+                    Ok(FileDetails {
+                        path: PathBuf::from(r.get::<_, String>(5)?),
+                        taken_at: taken.unwrap_or_else(|| local_wall_clock(mtime)),
+                        date_source: DateSource::from_i64(r.get::<_, Option<i64>>(2)?.unwrap_or(0)),
+                        camera: r.get(3)?,
+                        favorite: r.get::<_, i64>(4)? != 0,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Number of files per capture-time source (files without a date yet are not counted).
@@ -869,7 +952,7 @@ impl Db {
     /// Streams all items embedded with `model` (for building the in-memory index).
     pub fn for_each_item(&self, model: &str, mut f: impl FnMut(StoredItem)) -> Result<()> {
         let mut st = self.conn.prepare(
-            "SELECT items.id, items.file_id, files.kind, items.embedding FROM items
+            "SELECT items.id, items.file_id, files.kind, items.embedding, files.taken_at, files.mtime FROM items
              JOIN files ON files.id = items.file_id
              WHERE files.status = 1 AND files.model = ?1 ORDER BY items.id",
         )?;
@@ -879,6 +962,9 @@ impl Db {
                 id: r.get(0)?,
                 file_id: r.get(1)?,
                 kind: MediaKind::from_i64(r.get(2)?),
+                taken_at: r
+                    .get::<_, Option<i64>>(4)?
+                    .unwrap_or_else(|| local_wall_clock(r.get(5).unwrap_or(0))),
                 embedding: blob_to_emb(r.get_ref(3)?.as_blob()?),
             });
         }
@@ -918,7 +1004,7 @@ impl Db {
     pub fn item_info(&self, item_ids: &[i64]) -> Result<Vec<ItemInfo>> {
         let rows = self.by_ids(
             "SELECT items.id, items.file_id, files.path, files.kind, files.mtime, items.t_start, items.t_end,
-                    files.width, files.height, files.duration
+                    files.width, files.height, files.duration, files.favorite, files.taken_at
              FROM items JOIN files ON files.id = items.file_id WHERE items.id IN (#)",
             item_ids,
             |r| {
@@ -933,6 +1019,10 @@ impl Db {
                     width: r.get(7)?,
                     height: r.get(8)?,
                     duration: r.get(9)?,
+                    favorite: r.get::<_, i64>(10)? != 0,
+                    taken_at: r
+                        .get::<_, Option<i64>>(11)?
+                        .unwrap_or_else(|| local_wall_clock(r.get(4).unwrap_or(0))),
                 })
             },
         )?;

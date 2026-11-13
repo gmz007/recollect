@@ -5,7 +5,7 @@ use crate::config::{Paths, Settings};
 use crate::indexer;
 use crate::model::{Device, ModelSpec, TextEncoder, download, registry};
 use crate::search::{self, SearchHit, SearchOptions};
-use crate::store::db::{DateCounts, Folder, Stats, TimelineFilter, TimelineItem};
+use crate::store::db::{DateCounts, FileDetails, Folder, Stats, TimelineFilter, TimelineItem};
 use crate::store::{Db, VectorIndex};
 use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -336,6 +336,20 @@ impl Library {
         // Only the query holds the lock; conversion and sorting of a big library take longer.
         let rows = self.db.lock().timeline_rows(filter)?;
         Ok(rows.into_sorted(filter.order))
+    }
+
+    /// Marks files as favorites (or removes the mark).
+    pub fn set_favorite(&self, file_ids: &[i64], fav: bool) -> Result<()> {
+        self.db.lock().set_favorite(file_ids, fav)
+    }
+
+    /// Date source, camera and favorite flag of a file, and its size on disk if readable.
+    pub fn file_details(&self, file_id: i64) -> Result<Option<(FileDetails, Option<u64>)>> {
+        let Some(d) = self.db.lock().file_details(file_id)? else {
+            return Ok(None);
+        };
+        let size = std::fs::metadata(&d.path).ok().map(|m| m.len());
+        Ok(Some((d, size)))
     }
 
     /// Number of files per capture-date source.
@@ -743,7 +757,7 @@ fn load_index(db: &Db, spec: &ModelSpec) -> Result<VectorIndex> {
     let mut bad = 0usize;
     db.for_each_item(spec.id, |it| {
         if it.embedding.len() == spec.dim {
-            idx.add(it.id, it.file_id, it.kind, &it.embedding);
+            idx.add(it.id, it.file_id, it.kind, it.taken_at, &it.embedding);
         } else {
             bad += 1;
         }
@@ -778,7 +792,8 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use crate::media::{MediaKind, ScannedFile};
-    use crate::store::db::{FileMeta, NewItem};
+    use crate::search::SearchSort;
+    use crate::store::db::{FileMeta, FileRow, NewItem};
 
     fn open(dir: &Path) -> Arc<Library> {
         crate::gpu::force_cpu(true);
@@ -900,6 +915,7 @@ mod tests {
             &SearchOptions {
                 limit: 20,
                 kind: None,
+                ..Default::default()
             },
             None,
         )
@@ -914,6 +930,7 @@ mod tests {
                 &SearchOptions {
                     limit: 20,
                     kind: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1175,5 +1192,263 @@ mod tests {
         assert_eq!(lib.date_counts().unwrap().file, 1);
         // A second run has nothing left to read.
         assert_eq!(lib.index_blocking().unwrap().dates_read, 0);
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> i64 {
+        chrono::NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+    }
+
+    /// A unit vector at `angle` radians from the first axis (the query used below).
+    fn at_angle(angle: f32) -> Vec<f32> {
+        let mut v = vec![0.0; 512];
+        v[0] = angle.cos();
+        v[1] = angle.sin();
+        v
+    }
+
+    fn query() -> Vec<f32> {
+        at_angle(0.0)
+    }
+
+    fn names(hits: &[search::SearchHit]) -> Vec<String> {
+        hits.iter()
+            .map(|h| h.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Four images captured on known days. The better the match, the earlier its name: a, b, c, d.
+    /// By date: b (2022) is newest, then d (2021), a (2020), c (2019).
+    fn seed_dated(lib: &Library, undated: &[&str]) -> Vec<(FileRow, FileMeta, Vec<NewItem>)> {
+        let mut db = lib.db.lock();
+        let f = db.add_folder(Path::new("/lib")).unwrap();
+        let spec = [
+            ("a", 0.1, day(2020, 6, 1)),
+            ("b", 0.2, day(2022, 12, 31)),
+            ("c", 0.3, day(2019, 1, 10)),
+            ("d", 0.4, day(2021, 3, 5)),
+        ];
+        let files: Vec<_> = spec
+            .iter()
+            .map(|(n, _, _)| ScannedFile {
+                path: format!("/lib/{n}.jpg").into(),
+                kind: MediaKind::Image,
+                size: 1,
+                mtime: 1,
+            })
+            .collect();
+        db.sync_folder(f, &files, &[]).unwrap();
+        let rows = db.pending(registry::CLIP_B32.id).unwrap();
+        let caps: Vec<_> = rows
+            .iter()
+            .filter(|r| !undated.iter().any(|u| r.path.ends_with(format!("{u}.jpg"))))
+            .map(|r| {
+                let t = spec
+                    .iter()
+                    .find(|s| r.path.ends_with(format!("{}.jpg", s.0)));
+                let t = t.unwrap().2;
+                (
+                    r.id,
+                    crate::media::metadata::Capture {
+                        taken_at: t,
+                        source: crate::media::metadata::DateSource::Exif,
+                        camera: None,
+                        duration: None,
+                    },
+                )
+            })
+            .collect();
+        db.set_captures(&caps).unwrap();
+        rows.into_iter()
+            .map(|r| {
+                let a = spec
+                    .iter()
+                    .find(|s| r.path.ends_with(format!("{}.jpg", s.0)))
+                    .unwrap()
+                    .1;
+                let item = NewItem {
+                    t_start: None,
+                    t_end: None,
+                    embedding: at_angle(a),
+                };
+                (r, FileMeta::default(), vec![item])
+            })
+            .collect()
+    }
+
+    fn search_with(lib: &Library, range: Option<(i64, i64)>, sort: SearchSort) -> Vec<String> {
+        let opts = SearchOptions {
+            taken_range: range,
+            sort,
+            ..Default::default()
+        };
+        names(&search::by_vector(lib, &query(), &opts, None).unwrap())
+    }
+
+    fn check_date_search(lib: &Library) {
+        let all = |r| search_with(lib, None, r);
+        assert_eq!(
+            all(SearchSort::Relevance),
+            ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+        );
+        assert_eq!(
+            all(SearchSort::Newest),
+            ["b.jpg", "d.jpg", "a.jpg", "c.jpg"]
+        );
+        assert_eq!(
+            all(SearchSort::Oldest),
+            ["c.jpg", "a.jpg", "d.jpg", "b.jpg"]
+        );
+        // 2020 through 2021, inclusive of both whole years.
+        let range = Some((day(2020, 1, 1) - 43_200, day(2021, 12, 31) + 43_199));
+        assert_eq!(
+            search_with(lib, range, SearchSort::Relevance),
+            ["a.jpg", "d.jpg"]
+        );
+        assert_eq!(
+            search_with(lib, range, SearchSort::Newest),
+            ["d.jpg", "a.jpg"]
+        );
+        // The bounds themselves are inside the range.
+        let exact = Some((day(2019, 1, 10), day(2019, 1, 10)));
+        assert_eq!(search_with(lib, exact, SearchSort::Relevance), ["c.jpg"]);
+        assert!(
+            search_with(
+                lib,
+                Some((day(2023, 1, 1), day(2024, 1, 1))),
+                SearchSort::Newest
+            )
+            .is_empty()
+        );
+        // Hits carry their capture time.
+        let hits = search::by_vector(lib, &query(), &SearchOptions::default(), None).unwrap();
+        assert_eq!(hits[1].taken_at, day(2022, 12, 31));
+    }
+
+    #[test]
+    fn search_by_date_range_and_sort_from_the_database_and_from_indexing() {
+        // The index built from the database at startup.
+        let d = tempfile::tempdir().unwrap();
+        {
+            let lib = open(d.path());
+            let rows = seed_dated(&lib, &[]);
+            let batch: Vec<_> = rows.iter().map(|(r, m, i)| (r.id, *m, i.clone())).collect();
+            lib.db
+                .lock()
+                .put_items(registry::CLIP_B32.id, &batch)
+                .unwrap();
+        }
+        let lib = open(d.path());
+        assert_eq!(lib.indexed_items(), 4);
+        check_date_search(&lib);
+        // ...and through the cache.
+        lib.save_index_cache();
+        drop(lib);
+        let lib = open(d.path());
+        assert!(lib.loaded_from_cache());
+        check_date_search(&lib);
+
+        // The index filled while indexing (dates are known before embedding).
+        let d2 = tempfile::tempdir().unwrap();
+        let lib = open(d2.path());
+        let mut rows = seed_dated(&lib, &[]);
+        assert_eq!(lib.indexed_items(), 0);
+        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        assert_eq!(lib.indexed_items(), 4);
+        check_date_search(&lib);
+    }
+
+    #[test]
+    fn a_date_learned_later_updates_the_index_and_its_cache() {
+        let d = tempfile::tempdir().unwrap();
+        let id_b = {
+            let lib = open(d.path());
+            // File "b" is embedded before its date could be read: only its file time (1970)
+            // is known.
+            let mut rows = seed_dated(&lib, &["b"]);
+            let b = rows
+                .iter()
+                .find(|r| r.0.path.ends_with("b.jpg"))
+                .unwrap()
+                .0
+                .id;
+            crate::indexer::write_items(&lib, &mut rows).unwrap();
+            b
+        };
+        let lib = open(d.path());
+        assert_eq!(
+            search_with(&lib, None, SearchSort::Newest),
+            ["d.jpg", "a.jpg", "c.jpg", "b.jpg"]
+        );
+        lib.save_index_cache();
+        let epoch = lib.db.lock().items_epoch().unwrap();
+        let cap = |t| crate::media::metadata::Capture {
+            taken_at: t,
+            source: crate::media::metadata::DateSource::Exif,
+            camera: None,
+            duration: None,
+        };
+        crate::indexer::apply_captures(&lib, &[(id_b, cap(day(2022, 12, 31)))]).unwrap();
+        assert!(
+            lib.db.lock().items_epoch().unwrap() > epoch,
+            "the cache is stale now"
+        );
+        assert_eq!(
+            search_with(&lib, None, SearchSort::Newest),
+            ["b.jpg", "d.jpg", "a.jpg", "c.jpg"]
+        );
+        // The rewritten cache has the new date.
+        lib.save_index_cache();
+        drop(lib);
+        let lib = open(d.path());
+        assert!(lib.loaded_from_cache());
+        assert_eq!(search_with(&lib, None, SearchSort::Newest)[0], "b.jpg");
+        // A file without items leaves the epoch alone.
+        let epoch = lib.db.lock().items_epoch().unwrap();
+        crate::indexer::apply_captures(&lib, &[(9999, cap(5))]).unwrap();
+        assert_eq!(lib.db.lock().items_epoch().unwrap(), epoch);
+    }
+
+    #[test]
+    fn favorites_are_stored_and_found_in_search_hits_and_the_timeline() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        let mut rows = seed_dated(&lib, &[]);
+        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        let tl = |fav| {
+            lib.timeline(&TimelineFilter {
+                favorites_only: fav,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        assert!(tl(true).is_empty());
+        let b = tl(false)
+            .into_iter()
+            .find(|t| t.path.ends_with("b.jpg"))
+            .unwrap();
+        lib.set_favorite(&[b.file_id], true).unwrap();
+        assert_eq!(names_of(&tl(true)), ["b.jpg"]);
+        let hits = search::by_vector(&lib, &query(), &SearchOptions::default(), None).unwrap();
+        assert_eq!(
+            hits.iter()
+                .filter(|h| h.favorite)
+                .map(|h| h.file_id)
+                .collect::<Vec<_>>(),
+            [b.file_id]
+        );
+        lib.set_favorite(&[b.file_id], false).unwrap();
+        assert!(tl(true).is_empty());
+    }
+
+    fn names_of(items: &[TimelineItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| i.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
     }
 }

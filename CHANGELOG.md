@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Viewer: double-click or press `Enter` on a photo or video frame to open it as large as the
+  window allows, with an info panel, previous/next through the list you came from, 100 % zoom
+  with panning, and a large frame for videos (at the matching moment for search hits).
+- Favorites: mark items with `F` or the Favorite button; stars on tiles and a Favorites view in
+  the sidebar.
+- Search by date: a "When" selector (any time, this year, last year, a given year or a range of
+  years) and a "Sort" selector (relevance, newest, oldest) while searching.
+- "On this day" strip above the timeline with photos taken on today's date in earlier years.
+
+### Changed
+
+- The search index cache now records capture dates, so it is rebuilt once after updating.
+- Without a downloaded model the status bar says how many files will become searchable after the
+  download instead of "still waiting".
+
 ## [0.2.0] - 2026-11-14
 
 ### Added

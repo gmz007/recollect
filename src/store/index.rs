@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-const CACHE_MAGIC: &[u8; 8] = b"RCLXIDX2";
+const CACHE_MAGIC: &[u8; 8] = b"RCLXIDX3";
 
 /// Longest model name / library id accepted in a cache header.
 const MAX_NAME_LEN: usize = 256;
@@ -21,6 +21,18 @@ pub struct Candidate {
     pub kind: MediaKind,
     /// Approximate cosine similarity (from quantized vectors).
     pub score: f32,
+    /// Capture time (local wall-clock seconds, see [`VectorIndex::add`]).
+    pub taken_at: i64,
+}
+
+/// What a scan skips. All conditions must hold for a row to be considered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanFilter {
+    pub kind: Option<MediaKind>,
+    /// Skip every item of this file.
+    pub exclude_file: Option<i64>,
+    /// Keep only items captured within this range (inclusive, wall-clock seconds).
+    pub taken_range: Option<(i64, i64)>,
 }
 
 pub struct VectorIndex {
@@ -30,6 +42,8 @@ pub struct VectorIndex {
     item_ids: Vec<i64>,
     file_ids: Vec<i64>,
     kinds: Vec<MediaKind>,
+    /// Capture time of the item's file (local wall-clock seconds), parallel to `item_ids`.
+    taken: Vec<i64>,
 }
 
 /// Min-heap entry so the heap root is the weakest of the current top-k.
@@ -94,6 +108,7 @@ impl VectorIndex {
             item_ids: Vec::new(),
             file_ids: Vec::new(),
             kinds: Vec::new(),
+            taken: Vec::new(),
         }
     }
 
@@ -111,7 +126,7 @@ impl VectorIndex {
 
     /// Bytes used by the vectors.
     pub fn memory_bytes(&self) -> usize {
-        self.data.len() + self.item_ids.len() * (8 + 8 + 1)
+        self.data.len() + self.item_ids.len() * (8 + 8 + 1 + 8)
     }
 
     pub fn reserve(&mut self, n: usize) {
@@ -119,14 +134,34 @@ impl VectorIndex {
         self.item_ids.reserve(n);
         self.file_ids.reserve(n);
         self.kinds.reserve(n);
+        self.taken.reserve(n);
     }
 
-    pub fn add(&mut self, item_id: i64, file_id: i64, kind: MediaKind, v: &[f32]) {
+    /// Appends a vector. `taken_at` is the file's capture time as the timeline shows it: local
+    /// wall-clock seconds, or the file's modification time converted the same way when no date
+    /// is known.
+    pub fn add(&mut self, item_id: i64, file_id: i64, kind: MediaKind, taken_at: i64, v: &[f32]) {
         assert_eq!(v.len(), self.dim, "vector dimension mismatch");
         self.data.extend(quantize(v, self.scale));
         self.item_ids.push(item_id);
         self.file_ids.push(file_id);
         self.kinds.push(kind);
+        self.taken.push(taken_at);
+    }
+
+    /// Sets the capture time of every item of the given files (`file id -> time`). Used when the
+    /// date pass learns a date for a file that was already embedded: the in-memory column is
+    /// patched in place (one pass over the rows), and the database change that accompanies it
+    /// moves the epoch so the on-disk cache is rewritten rather than reused with old dates.
+    pub fn set_taken(&mut self, times: &std::collections::HashMap<i64, i64>) {
+        if times.is_empty() {
+            return;
+        }
+        for (f, t) in self.file_ids.iter().zip(self.taken.iter_mut()) {
+            if let Some(&new) = times.get(f) {
+                *t = new;
+            }
+        }
     }
 
     /// Saves the index to `path` (atomically), stamped with `model`, `library_id` and `epoch`.
@@ -186,6 +221,9 @@ impl VectorIndex {
             w.write_all(&v.to_le_bytes())?;
         }
         for v in &self.file_ids {
+            w.write_all(&v.to_le_bytes())?;
+        }
+        for v in &self.taken {
             w.write_all(&v.to_le_bytes())?;
         }
         w.write_all(
@@ -259,7 +297,7 @@ impl VectorIndex {
             .checked_add(name_len)?
             .checked_add(id_len)?;
         let expected = n
-            .checked_mul(8 + 8 + 1usize)?
+            .checked_mul(8 + 8 + 8 + 1usize)?
             .checked_add(n.checked_mul(dim)?)?
             .checked_add(header)?;
         if expected as u64 != file_len {
@@ -278,6 +316,7 @@ impl VectorIndex {
         };
         let item_ids = read_i64s(n)?;
         let file_ids = read_i64s(n)?;
+        let taken = read_i64s(n)?;
         let mut kinds = vec![0u8; n];
         r.read_exact(&mut kinds).ok()?;
         let mut raw = vec![0u8; n * dim];
@@ -294,6 +333,7 @@ impl VectorIndex {
             data,
             item_ids,
             file_ids,
+            taken,
             kinds: kinds
                 .into_iter()
                 .map(|k| MediaKind::from_i64(i64::from(k)))
@@ -317,6 +357,7 @@ impl VectorIndex {
                 self.item_ids[w] = self.item_ids[r];
                 self.file_ids[w] = self.file_ids[r];
                 self.kinds[w] = self.kinds[r];
+                self.taken[w] = self.taken[r];
             }
             w += 1;
         }
@@ -324,21 +365,28 @@ impl VectorIndex {
         self.item_ids.truncate(w);
         self.file_ids.truncate(w);
         self.kinds.truncate(w);
+        self.taken.truncate(w);
     }
 
     /// Top `k` items by approximate cosine similarity to unit vector `q`, best first.
     pub fn search(&self, q: &[f32], k: usize, kind: Option<MediaKind>) -> Vec<Candidate> {
-        self.search_excluding(q, k, kind, None)
+        self.search_filtered(
+            q,
+            k,
+            &ScanFilter {
+                kind,
+                ..Default::default()
+            },
+        )
     }
 
-    /// Like [`Self::search`], skipping all items of `exclude_file`.
-    pub fn search_excluding(
-        &self,
-        q: &[f32],
-        k: usize,
-        kind: Option<MediaKind>,
-        exclude_file: Option<i64>,
-    ) -> Vec<Candidate> {
+    /// Like [`Self::search`] with a [`ScanFilter`]; the filter is applied inside the scan.
+    pub fn search_filtered(&self, q: &[f32], k: usize, filter: &ScanFilter) -> Vec<Candidate> {
+        let ScanFilter {
+            kind,
+            exclude_file,
+            taken_range,
+        } = *filter;
         if k == 0 || self.is_empty() || q.len() != self.dim {
             return Vec::new();
         }
@@ -358,6 +406,7 @@ impl VectorIndex {
                 for r in b * BLOCK..end {
                     if kind.is_some_and(|kd| self.kinds[r] != kd)
                         || exclude_file == Some(self.file_ids[r])
+                        || taken_range.is_some_and(|(a, b)| self.taken[r] < a || self.taken[r] > b)
                     {
                         continue;
                     }
@@ -382,6 +431,7 @@ impl VectorIndex {
                 file_id: self.file_ids[r],
                 kind: self.kinds[r],
                 score: s as f32 / denom,
+                taken_at: self.taken[r],
             })
             .collect()
     }
@@ -428,6 +478,7 @@ mod tests {
                 } else {
                     MediaKind::Video
                 },
+                0,
                 v,
             );
         }
@@ -449,7 +500,7 @@ mod tests {
         let vs = rand_vecs(2000, d, 3);
         let mut idx = VectorIndex::new(d, 300.0);
         for (i, v) in vs.iter().enumerate() {
-            idx.add(i as i64, 0, MediaKind::Image, v);
+            idx.add(i as i64, 0, MediaKind::Image, 0, v);
         }
         let q = &rand_vecs(1, d, 99)[0];
         let mut exact: Vec<(f32, i64)> = vs
@@ -486,6 +537,7 @@ mod tests {
                 } else {
                     MediaKind::Image
                 },
+                1000 + i as i64,
                 v,
             );
         }
@@ -496,16 +548,19 @@ mod tests {
                 back.data.clone(),
                 back.item_ids.clone(),
                 back.file_ids.clone(),
-                back.kinds.clone()
+                back.kinds.clone(),
+                back.taken.clone()
             ),
             (
                 idx.data.clone(),
                 idx.item_ids.clone(),
                 idx.file_ids.clone(),
-                idx.kinds.clone()
+                idx.kinds.clone(),
+                idx.taken.clone()
             )
         );
         assert_eq!(back.search(&vs[10], 1, None)[0].item_id, 10);
+        assert_eq!(back.search(&vs[10], 1, None)[0].taken_at, 1010);
         assert!(
             VectorIndex::load(&p, "m", "lib", 16, 300.0, 8).is_none(),
             "stale epoch"
@@ -538,12 +593,42 @@ mod tests {
     }
 
     #[test]
+    fn taken_filter_is_applied_in_the_scan_and_can_be_patched() {
+        let mut idx = VectorIndex::new(2, 100.0);
+        // All vectors point the same way, so only the filter decides what is returned.
+        for (i, t) in [100, 200, 300, 400].into_iter().enumerate() {
+            idx.add(i as i64, i as i64, MediaKind::Image, t, &[1.0, 0.0]);
+        }
+        let ids = |idx: &VectorIndex, r: Option<(i64, i64)>| {
+            let f = ScanFilter {
+                taken_range: r,
+                ..Default::default()
+            };
+            let mut v: Vec<i64> = idx
+                .search_filtered(&[1.0, 0.0], 10, &f)
+                .iter()
+                .map(|c| c.item_id)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&idx, None), [0, 1, 2, 3]);
+        assert_eq!(ids(&idx, Some((200, 300))), [1, 2]); // inclusive on both ends
+        assert_eq!(ids(&idx, Some((500, 600))), Vec::<i64>::new());
+        idx.set_taken(&std::collections::HashMap::from([(0, 250)]));
+        assert_eq!(ids(&idx, Some((200, 300))), [0, 1, 2]);
+        // Removing files keeps the column aligned.
+        idx.remove_files(&HashSet::from([1]));
+        assert_eq!(ids(&idx, Some((300, 400))), [2, 3]);
+    }
+
+    #[test]
     fn remove_and_edge_cases() {
         let mut idx = VectorIndex::new(2, 100.0);
         assert!(idx.search(&[1.0, 0.0], 3, None).is_empty());
-        idx.add(1, 10, MediaKind::Image, &[1.0, 0.0]);
-        idx.add(2, 20, MediaKind::Image, &[0.0, 1.0]);
-        idx.add(3, 10, MediaKind::Video, &[0.6, 0.8]);
+        idx.add(1, 10, MediaKind::Image, 0, &[1.0, 0.0]);
+        idx.add(2, 20, MediaKind::Image, 0, &[0.0, 1.0]);
+        idx.add(3, 10, MediaKind::Video, 0, &[0.6, 0.8]);
         idx.remove_files(&HashSet::from([10]));
         assert_eq!(idx.len(), 1);
         let r = idx.search(&[0.0, 1.0], 5, None);

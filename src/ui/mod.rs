@@ -3,7 +3,10 @@
 
 mod frame_stats;
 mod platform;
+mod preview;
 mod timeline;
+mod viewer;
+mod when;
 mod workers;
 
 use crate::Library;
@@ -11,15 +14,18 @@ use crate::config::Settings;
 use crate::library::{Activity, Status};
 use crate::media::MediaKind;
 use crate::model::{download, registry};
-use crate::search::{SearchHit, SearchOptions};
+use crate::search::{SearchHit, SearchOptions, SearchSort};
 use crate::store::db::{Folder, Stats};
 use crate::thumbs::ThumbKey;
 use egui::{Align, Color32, Layout, RichText, Sense, Vec2};
 use frame_stats::FrameStats;
+use preview::Previews;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use timeline::{TimelineState, View};
+use viewer::Viewer;
+use when::DateFilter;
 pub use workers::Query;
 use workers::{SearchWorker, ThumbCache};
 
@@ -73,9 +79,19 @@ pub struct App {
     thumbs: ThumbCache,
     /// Album views (timeline, recently added, folder) shown while no search is active.
     tl: TimelineState,
+    /// The open viewer; while set it replaces the whole window.
+    viewer: Option<Viewer>,
+    /// Whether the viewer's info panel is open (kept across items).
+    viewer_info: bool,
+    previews: Previews,
     query: String,
     query_changed_at: Option<Instant>,
     kind: Option<MediaKind>,
+    /// Search narrowing and ordering (the "When" and "Sort" selectors).
+    date: DateFilter,
+    sort: SearchSort,
+    /// Years that have items in the timeline, newest first (feeds the "When" selector).
+    known_years: Vec<i32>,
     current: Option<Query>,
     awaiting: Option<u64>,
     results: Vec<SearchHit>,
@@ -107,6 +123,8 @@ pub struct App {
     consent_dismissed: bool,
     settings_open: bool,
     settings_draft: Settings,
+    #[cfg(test)]
+    today_override: Option<chrono::NaiveDate>,
 }
 
 impl App {
@@ -119,14 +137,21 @@ impl App {
         let settings = lib.settings();
         prune_thumbnails(&lib);
         let tl = TimelineState::new(Arc::clone(&lib), ctx);
+        let previews = Previews::new(ctx, Arc::clone(&lib), 2);
         let mut app = Self {
             lib,
             search,
             thumbs,
             tl,
+            viewer: None,
+            viewer_info: true,
+            previews,
             query: String::new(),
             query_changed_at: None,
             kind: None,
+            date: DateFilter::default(),
+            sort: SearchSort::Relevance,
+            known_years: Vec::new(),
             current: None,
             awaiting: None,
             results: Vec::new(),
@@ -154,6 +179,8 @@ impl App {
             consent_dismissed: false,
             settings_open: false,
             settings_draft: settings,
+            #[cfg(test)]
+            today_override: None,
         };
         app.snapshot = Snapshot::fetch(&app.lib);
         // Unit tests fake an installed model with placeholder files; never feed those to
@@ -220,6 +247,8 @@ impl App {
         let opts = SearchOptions {
             limit: 300,
             kind: self.kind,
+            taken_range: self.date.range(chrono::Datelike::year(&self.today())),
+            sort: self.sort,
         };
         self.awaiting = Some(self.search.submit(q.clone(), opts));
         self.current = Some(q);
@@ -235,6 +264,7 @@ impl App {
     /// Per-frame bookkeeping: results, status transitions, debounce, live refresh.
     fn update_state(&mut self, ctx: &egui::Context) {
         self.thumbs.begin_frame(ctx);
+        self.previews.begin_frame(ctx);
         self.poll_snapshot();
         self.status = self.lib.status();
         if let Some(r) = self.search.poll()
@@ -308,6 +338,12 @@ impl App {
             self.notice = None;
         }
         self.update_timeline();
+        if self.tl.view == View::Timeline && self.tl.loaded {
+            let years: Vec<i32> = self.tl.dates.iter().map(|y| y.year).collect();
+            if years != self.known_years {
+                self.known_years = years;
+            }
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -353,6 +389,18 @@ impl App {
                 }
             });
         });
+        if self.searching() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let year = chrono::Datelike::year(&self.today());
+                let mut changed = self.date.ui(ui, &self.known_years, year);
+                ui.add_space(12.0);
+                changed |= when::sort_ui(ui, &mut self.sort);
+                if changed {
+                    self.rerun();
+                }
+            });
+        }
     }
 
     fn library_panel(&mut self, ui: &mut egui::Ui) {
@@ -489,10 +537,13 @@ impl App {
             match &self.status.activity {
                 Activity::Idle => {
                     let waiting = self.snapshot.stats.pending;
+                    let model = self.snapshot.model_installed;
                     if let Some(r) = &self.status.last_run {
-                        ui.label(run_summary_text(r, waiting));
+                        ui.label(run_summary_text(r, waiting, model));
                     } else if self.status.last_error.is_some() {
                         ui.label(format!("Stopped. {waiting} files waiting."));
+                    } else if !model && waiting > 0 {
+                        ui.label(format!("{}.", waiting_for_model_text(waiting)));
                     } else {
                         ui.label("Ready.");
                     }
@@ -704,7 +755,7 @@ impl App {
             self.selected = Some(i);
             self.selected_t = self.results[i].t_start;
             if open {
-                self.open_hit(i);
+                self.open_viewer_results(i);
             }
         }
     }
@@ -734,9 +785,12 @@ impl App {
                 &mut self.thumbs,
                 &key,
                 rect,
-                badge,
-                selected,
-                resp.hovered(),
+                timeline::TileMarks {
+                    badge,
+                    favorite: hit.favorite,
+                    selected,
+                    hovered: resp.hovered(),
+                },
             );
         }
         let name = hit
@@ -829,6 +883,14 @@ impl App {
                     item_id,
                     label: name.clone(),
                 });
+            }
+            let label = if hit.favorite {
+                "Unfavorite"
+            } else {
+                "Favorite"
+            };
+            if ui.button(label).clicked() {
+                self.set_favorite(hit.file_id, !hit.favorite);
             }
         });
         if hit.kind == MediaKind::Video {
@@ -932,6 +994,7 @@ impl App {
                     // Old results and queries belong to the previous model.
                     self.consent_dismissed = false;
                     self.results.clear();
+                    self.viewer = None;
                     self.current = None;
                     self.query.clear();
                     self.result_label.clear();
@@ -977,10 +1040,19 @@ pub fn run_error(message: String) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }
 
-fn run_summary_text(r: &crate::library::RunSummary, waiting: usize) -> String {
+/// "168 files will be searchable after the model download".
+fn waiting_for_model_text(waiting: usize) -> String {
+    let files = if waiting == 1 { "file" } else { "files" };
+    format!("{waiting} {files} will be searchable after the model download")
+}
+
+fn run_summary_text(r: &crate::library::RunSummary, waiting: usize, model: bool) -> String {
     let mut parts = Vec::new();
     if r.cancelled {
         parts.push(format!("Stopped. {waiting} files waiting"));
+    } else if waiting > 0 && !model {
+        // Without a model nothing is embedded, so "still waiting" would suggest a problem.
+        parts.push(waiting_for_model_text(waiting));
     } else if waiting > 0 {
         parts.push(format!("Done, {waiting} files still waiting"));
     } else {
@@ -1048,6 +1120,11 @@ fn step(selected: Option<usize>, len: usize, cols: usize, key: Nav) -> Option<us
         Nav::Down if cur / cols < (len - 1) / cols => (cur + cols).min(len - 1),
         Nav::Up | Nav::Down => cur,
     })
+}
+
+/// True once if `key` was pressed without modifiers this frame (the press is consumed).
+fn take_plain_key(ctx: &egui::Context, key: egui::Key) -> bool {
+    ctx.input_mut(|i| consume_plain_key(i, key)) > 0
 }
 
 /// Removes and counts presses of `key` that carry no modifiers at all.
@@ -1143,9 +1220,35 @@ impl App {
             self.selected_t = next.and_then(|i| self.results[i].t_start);
             self.keyboard_moved = true;
         }
-        if enter && let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
-            self.open_hit(i);
+        if take_plain_key(ctx, egui::Key::F)
+            && let Some(h) = self.selected.and_then(|i| self.results.get(i))
+        {
+            let (id, fav) = (h.file_id, !h.favorite);
+            self.set_favorite(id, fav);
         }
+        if enter && let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
+            self.open_viewer_results(i);
+        }
+    }
+
+    /// Marks (or unmarks) a favorite everywhere it is shown right away, and stores it in the
+    /// background.
+    fn set_favorite(&mut self, file_id: i64, fav: bool) {
+        for it in self.tl.items.iter_mut().filter(|it| it.file_id == file_id) {
+            it.favorite = fav;
+        }
+        for h in self.results.iter_mut().filter(|h| h.file_id == file_id) {
+            h.favorite = fav;
+        }
+        if let Some(v) = &mut self.viewer {
+            v.set_favorite(file_id, fav);
+        }
+        let lib = Arc::clone(&self.lib);
+        std::thread::spawn(move || {
+            if let Err(e) = lib.set_favorite(&[file_id], fav) {
+                tracing::warn!("could not save the favorite mark: {e:#}");
+            }
+        });
     }
 
     /// Draws the whole app into `ui` (separate from `eframe::App` for headless UI tests).
@@ -1157,6 +1260,13 @@ impl App {
             ctx.request_repaint();
         }
         self.update_state(&ctx);
+        if self.viewer_open() {
+            // The viewer fills the window: no sidebar, top bar or grid while it is open.
+            self.grid_shown = false;
+            self.tl.shown = false;
+            self.show_viewer(ui);
+            return;
+        }
         let grid_was_shown = std::mem::take(&mut self.grid_shown);
         let timeline_was_shown = std::mem::take(&mut self.tl.shown);
         self.handle_navigation_keys(&ctx, grid_was_shown);

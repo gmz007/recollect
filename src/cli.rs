@@ -210,6 +210,7 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
             let opts = SearchOptions {
                 limit: *limit,
                 kind: kind.map(Into::into),
+                ..Default::default()
             };
             let hits = lib.search(query, &opts)?;
             print_hits(&hits, *json);

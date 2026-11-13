@@ -18,15 +18,24 @@ computer.
   with an adjustable tile size. Browsing works before the search model is downloaded.
 - **Date navigator** in the sidebar: jump to any year or month.
 - **Folder view** (click a folder in the sidebar) and **Recently added**.
+- **Viewer:** double-click or press `Enter` on any photo or video frame to see it as large as the
+  window allows, with an info panel (`I`: date, camera, size, folder), `←`/`→` to step through the
+  list you came from, `Home`/`End`, `Z` or a double-click for 100 % zoom (drag to pan) and `Esc` to
+  go back to the grid.
+- **Favorites:** press `F` on the selected item (or use the Favorite button) to star it; the
+  **Favorites** view in the sidebar lists them.
+- **On this day:** photos taken on today's date in earlier years, in a strip above the timeline.
 - Text search over images and video moments ("a dog in the snow").
 - Video results show the moment's timestamp; **Play at** opens the video at that time in mpv or VLC
   when installed (otherwise in the default player).
+- **Search by date and sort:** while searching, **When** limits results to a year or a range of
+  years, and **Sort** orders them by relevance, newest or oldest.
 - **Find similar** to any result.
 - All / Images / Videos filter (applies to the album views too).
 - Background indexing with pause, resume and cancel; you can search while it runs.
 - Incremental rescans: new, changed and deleted files are picked up; unchanged files are skipped.
 - Keyboard: `Ctrl+F` (`Cmd+F` on macOS) focuses the search box, the arrow keys move the selection, `Enter` opens the
-  selected result, `Esc` clears the selection.
+  selected item in the viewer, `F` toggles favorite, `Esc` clears the selection.
 
 ## How it works
 
@@ -134,7 +143,8 @@ Without a subcommand (or with `gui`) the app starts. Global options, valid with 
 
 - `library.db`: the library (folders, files, embeddings) in SQLite.
 - `models/`: downloaded models.
-- `index-<model>.bin`: a startup cache of the search index; it is rebuilt if missing or stale.
+- `index-<model>.bin`: a startup cache of the search index (vectors and capture dates); it is
+  rebuilt if missing, stale or written by an older version.
 - `thumbs/`: thumbnail cache; safe to delete.
 - `settings.toml`: your settings.
 

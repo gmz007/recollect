@@ -88,6 +88,8 @@ fn hit(path: &str, kind: crate::media::MediaKind, t: Option<f64>) -> crate::sear
         path: path.into(),
         kind,
         mtime: 0,
+        taken_at: 0,
+        favorite: false,
         score: 0.31,
         t_start: t,
         t_end: t.map(|t| t + 2.0),
@@ -179,9 +181,17 @@ fn arrow_keys_move_the_selection() {
 
 /// Three image results, nothing selected, ready for keyboard tests.
 fn grid_app(d: &std::path::Path) -> App {
+    grid_app_with(d, true)
+}
+
+/// `installed` false leaves the model missing, so a re-run search fails cleanly instead of
+/// loading placeholder files into ONNX Runtime.
+fn grid_app_with(d: &std::path::Path, installed: bool) -> App {
     use crate::media::MediaKind;
     let lib = library(d);
-    fake_install(&lib);
+    if installed {
+        fake_install(&lib);
+    }
     let mut app = App::new(&egui::Context::default(), lib);
     app.frame_stats = None;
     app.snapshot.folders = vec![crate::store::db::Folder {
@@ -366,11 +376,13 @@ fn clicking_a_folder_opens_its_view() {
     let app = album_app(d.path(), true);
     let mut h = album_harness(&app);
     assert_eq!(app.borrow().tl.view, View::Timeline);
+    // Switching views loads items in the background and shows a spinner meanwhile, so step a
+    // fixed number of frames instead of waiting for the UI to settle.
     h.get_by_label("nowhere").click();
-    h.run();
+    h.run_steps(3);
     assert_eq!(app.borrow().tl.view, View::Folder(1));
     h.get_by_label("Recently added").click();
-    h.run();
+    h.run_steps(3);
     assert_eq!(app.borrow().tl.view, View::RecentlyAdded);
     // No grouping choice for the recently added list.
     assert!(h.query_by_label("Group by").is_none());
@@ -404,4 +416,328 @@ fn selecting_a_timeline_item_shows_its_details() {
     h.key_press(egui::Key::ArrowRight);
     h.run();
     assert_eq!(app.borrow().tl.selected, Some(1));
+}
+
+// ---- Viewer, favorites, search options, On this day ----------------------------------------
+
+/// Runs frames until `cond` holds (background threads need a moment); panics after ~5 s.
+fn settle(h: &mut Harness<'_>, mut cond: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        h.run_steps(2);
+        if cond() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("condition not reached in time");
+}
+
+/// Like `album_harness` with short frames, so two clicks a frame apart still count as a double
+/// click (egui allows 0.3 s between them).
+fn quick_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
+    let app = Rc::clone(app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_step_dt(0.05)
+        .build_ui(move |ui| app.borrow_mut().show(ui));
+    h.run();
+    h
+}
+
+/// Two clicks on a tile, a frame apart, near its top left corner (the tile may move a little
+/// when the first click opens the detail panel).
+fn double_click(h: &mut Harness<'_>, label: &str) {
+    let pos = h.get_by_label(label).rect().min + egui::vec2(12.0, 12.0);
+    h.event(egui::Event::PointerMoved(pos));
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.step();
+    }
+    h.run_steps(3);
+    assert!(
+        h.query_by_label(label).is_none(),
+        "the viewer should be open"
+    );
+}
+
+#[test]
+fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    h.get_by_label("Item img1.jpg").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    // The viewer replaces the album: no grid, no sidebar.
+    h.get_by_label("img1.jpg");
+    h.get_by_label("1 / 240");
+    h.get_by_label("Close");
+    h.get_by_label("Next");
+    h.get_by_label("Info");
+    assert!(
+        h.query_by_label("Previous").is_none(),
+        "nothing before the first item"
+    );
+    assert!(h.query_by_label("Item img1.jpg").is_none());
+    assert!(h.query_by_label("Timeline").is_none());
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(3);
+    h.get_by_label("img2.jpg");
+    h.get_by_label("Previous");
+    assert!(h.query_by_label("img1.jpg").is_none());
+    h.key_press(egui::Key::End);
+    h.run_steps(3);
+    h.get_by_label("240 / 240");
+    assert!(h.query_by_label("Next").is_none());
+    h.key_press(egui::Key::Home);
+    h.run_steps(3);
+    h.get_by_label("1 / 240");
+    h.get_by_label("Next").click();
+    h.run_steps(3);
+    h.get_by_label("img2.jpg");
+    // Esc returns to the grid with the item selected.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    assert_eq!(app.borrow().tl.selected, Some(1));
+    h.get_by_label("Item img2.jpg");
+    h.get_by_label("Timeline");
+}
+
+#[test]
+fn double_click_opens_the_viewer_and_the_info_panel_toggles() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    double_click(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    h.get_by_label("img1.jpg");
+    h.get_by_label_contains("Sunday 15 December 2019");
+    h.get_by_label("Test Camera");
+    h.get_by_label("4000×3000");
+    h.get_by_label("Open with default app");
+    h.get_by_label("Show in folder");
+    h.get_by_label("Find similar");
+    h.get_by_label("Favorite");
+    // `I` hides the panel (the name moves to the top bar) and shows it again.
+    h.key_press(egui::Key::I);
+    h.run_steps(3);
+    h.get_by_label("img1.jpg");
+    assert!(h.query_by_label("Open with default app").is_none());
+    h.get_by_label("Favorite");
+    h.key_press(egui::Key::I);
+    h.run_steps(3);
+    h.get_by_label("Open with default app");
+    // Zoom toggles with Z and with the button.
+    h.get_by_label("Zoom to 100%");
+    h.key_press(egui::Key::Z);
+    h.run_steps(3);
+    h.get_by_label("Fit to window").click();
+    h.run_steps(3);
+    h.get_by_label("Zoom to 100%");
+    // Close button.
+    h.get_by_label("Close").click();
+    h.run_steps(3);
+    assert_eq!(app.borrow().tl.selected, Some(0));
+}
+
+#[test]
+fn viewer_from_a_search_hit_offers_the_moments_of_a_video() {
+    let d = tempfile::tempdir().unwrap();
+    let mut app = grid_app(d.path());
+    app.results[0] = hit("/nowhere/clip.mp4", MediaKind::Video, Some(42.0));
+    for (i, h) in app.results.iter_mut().enumerate() {
+        h.file_id = i as i64 + 1;
+    }
+    app.selected = Some(0);
+    app.selected_t = Some(42.0);
+    let app = Rc::new(RefCell::new(app));
+    let mut h = album_harness(&app);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    h.get_by_label("clip.mp4");
+    h.get_by_label("Play at 0:42");
+    h.get_by_label("Matching moments");
+    h.get_by_label("0:42 – 0:44");
+    h.get_by_label("1:40 – 1:44").click();
+    h.run_steps(3);
+    h.get_by_label("Play at 1:40");
+    // Next goes to the following hit (an image).
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(3);
+    h.get_by_label("b.jpg");
+    assert!(h.query_by_label("Matching moments").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert_eq!(app.borrow().selected, Some(1));
+}
+
+/// A library with three dated files in the database, so favorites can round-trip through it.
+fn favorites_app(d: &std::path::Path) -> (Arc<Library>, Rc<RefCell<App>>) {
+    use crate::media::ScannedFile;
+    use crate::media::metadata::{Capture, DateSource};
+    let lib = library(d);
+    {
+        let mut db = lib.db.lock();
+        let f = db.add_folder(std::path::Path::new("/nowhere")).unwrap();
+        let files: Vec<ScannedFile> = ["a", "b", "c"]
+            .iter()
+            .map(|n| ScannedFile {
+                path: format!("/nowhere/{n}.jpg").into(),
+                kind: MediaKind::Image,
+                size: 1,
+                mtime: 1,
+            })
+            .collect();
+        db.sync_folder(f, &files, &[]).unwrap();
+        let caps: Vec<_> = db
+            .pending("none")
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                (
+                    r.id,
+                    Capture {
+                        taken_at: 1_500_000_000 + i as i64 * 86_400,
+                        source: DateSource::Exif,
+                        camera: None,
+                        duration: None,
+                    },
+                )
+            })
+            .collect();
+        db.set_captures(&caps).unwrap();
+    }
+    let mut app = App::new(&egui::Context::default(), Arc::clone(&lib));
+    app.frame_stats = None;
+    (lib, Rc::new(RefCell::new(app)))
+}
+
+#[test]
+fn f_marks_a_favorite_and_the_favorites_view_lists_it() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = favorites_app(d.path());
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    h.get_by_label("Item b.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("Favorite");
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    // The grid and the detail panel change at once...
+    h.get_by_label("Unfavorite");
+    assert!(app.borrow().tl.items.iter().any(|it| it.favorite));
+    // ...and the mark is stored.
+    let fav = crate::store::db::TimelineFilter {
+        favorites_only: true,
+        ..Default::default()
+    };
+    settle(&mut h, || lib.timeline(&fav).unwrap().len() == 1);
+    h.get_by_label("Favorites").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.view == View::Favorites && a.tl.items.len() == 1
+    });
+    h.get_by_label("Item b.jpg");
+    assert!(h.query_by_label("Item a.jpg").is_none());
+    // F again removes the mark; the view keeps the item until it is reloaded.
+    h.get_by_label("Item b.jpg").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    h.get_by_label("Favorite");
+    settle(&mut h, || lib.timeline(&fav).unwrap().is_empty());
+}
+
+#[test]
+fn favorites_toggle_in_the_viewer() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    double_click(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    h.get_by_label("Favorite").click();
+    h.run_steps(3);
+    h.get_by_label("Unfavorite");
+    assert!(app.borrow().tl.items[0].favorite);
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    h.get_by_label("Favorite");
+    assert!(!app.borrow().tl.items[0].favorite);
+}
+
+#[test]
+fn search_shows_the_when_and_sort_selectors() {
+    let d = tempfile::tempdir().unwrap();
+    let app = Rc::new(RefCell::new(grid_app_with(d.path(), false)));
+    let mut h = album_harness(&app);
+    h.get_by_label("When");
+    h.get_by_label("Sort");
+    assert_eq!(app.borrow().date.when, super::when::When::Any);
+    h.get_by_label("When").click();
+    h.run_steps(3);
+    h.get_by_label("Last year").click();
+    h.run_steps(3);
+    assert_eq!(app.borrow().date.when, super::when::When::LastYear);
+}
+
+#[test]
+fn browsing_has_no_when_and_sort_selectors() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let h = album_harness(&app);
+    assert!(h.query_by_label("When").is_none());
+}
+
+#[test]
+fn on_this_day_strip_opens_the_viewer_on_its_own_list() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    // 15 March: one photo per year from 2000 to 2019 was taken on that day.
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("On this day");
+    h.get_by_label("7 years ago");
+    h.get_by_label("26 years ago");
+    // Newest first: 2019 comes first. March 2019 is img10 in `spread_items` (Dec = 1).
+    h.get_by_label("On this day img10.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("img10.jpg");
+    h.get_by_label("1 / 20");
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(3);
+    h.get_by_label("2 / 20");
+    h.get_by_label("img22.jpg"); // March 2018
+    // Not in the other views.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.get_by_label("Recently added").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("On this day").is_none());
+}
+
+#[test]
+fn the_status_bar_does_not_blame_waiting_without_a_model() {
+    let r = crate::library::RunSummary::default();
+    let without = super::run_summary_text(&r, 168, false);
+    assert!(
+        without.starts_with("168 files will be searchable after the model download"),
+        "{without}"
+    );
+    assert!(!without.contains("waiting"));
+    assert!(super::run_summary_text(&r, 168, true).contains("168 files still waiting"));
+    assert!(super::run_summary_text(&r, 0, false).starts_with("Up to date"));
+    assert_eq!(
+        super::waiting_for_model_text(1),
+        "1 file will be searchable after the model download"
+    );
 }
