@@ -204,17 +204,10 @@ fn paint(
 
     let show_controls = (hovered || tile.picking || tile.checked) && !small;
     if hovered {
-        // A soft shade in the top corner keeps the circle readable on bright photos.
-        painter.rect_filled(
-            Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0)),
-            CornerRadius {
-                nw: style::TILE_RADIUS,
-                ne: style::TILE_RADIUS,
-                sw: 0,
-                se: 0,
-            },
-            Color32::from_black_alpha(48),
-        );
+        // Soft shades at the top and bottom keep the circle, the star and the time readable
+        // on bright photos, without a visible edge.
+        painter.add(fade(rect, true, 64.0, 105, style::TILE_RADIUS as f32));
+        painter.add(fade(rect, false, 64.0, 105, style::TILE_RADIUS as f32));
     }
     if show_controls {
         let c = circle_center(rect);
@@ -259,6 +252,37 @@ fn paint(
             egui::StrokeKind::Inside,
         );
     }
+}
+
+/// A black fade over the top or bottom edge of `rect`: `alpha` at the edge, falling smoothly to
+/// nothing `height` points inside. The outer corners follow the tile's rounded corners.
+fn fade(rect: Rect, top: bool, height: f32, alpha: u8, radius: f32) -> egui::Shape {
+    let height = height.min(rect.height());
+    let mut mesh = egui::Mesh::default();
+    // Rows from the edge inwards: a few close together where the corner curves, then the rest.
+    let steps = [0.0, 0.1, 0.25, 0.45, 0.7, 1.0];
+    let mut rows: Vec<f32> = (0..=4).map(|i| radius * i as f32 / 4.0).collect();
+    rows.extend(steps.iter().map(|t| t * height).filter(|&y| y > radius));
+    rows.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    for (i, &d) in rows.iter().enumerate() {
+        let inset = if d < radius {
+            radius - (radius * radius - (radius - d) * (radius - d)).sqrt()
+        } else {
+            0.0
+        };
+        let t = (d / height).clamp(0.0, 1.0);
+        let a = (alpha as f32 * (1.0 - t) * (1.0 - t)).round() as u8;
+        let color = Color32::from_black_alpha(a);
+        let y = if top { rect.min.y + d } else { rect.max.y - d };
+        mesh.colored_vertex(Pos2::new(rect.min.x + inset, y), color);
+        mesh.colored_vertex(Pos2::new(rect.max.x - inset, y), color);
+        if i > 0 {
+            let k = (i * 2) as u32;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k + 1, k);
+        }
+    }
+    egui::Shape::mesh(mesh)
 }
 
 fn circle_center(rect: Rect) -> Pos2 {

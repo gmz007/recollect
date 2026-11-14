@@ -88,33 +88,6 @@ fn segment(
         .clicked()
 }
 
-/// A text with a drop-down arrow, for menu buttons.
-fn dropdown_job(ui: &egui::Ui, label: &str) -> egui::text::LayoutJob {
-    let color = ui.visuals().widgets.inactive.fg_stroke.color;
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        label,
-        0.0,
-        egui::TextFormat {
-            font_id: egui::TextStyle::Button.resolve(ui.style()),
-            color,
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    job.append(
-        icons::ICON_ARROW_DROP_DOWN.codepoint,
-        2.0,
-        egui::TextFormat {
-            font_id: style::icon_font_id(icons::ICON_ARROW_DROP_DOWN, 20.0),
-            color,
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    job
-}
-
 impl App {
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
@@ -176,7 +149,7 @@ impl App {
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                self.open_settings();
+                self.open_settings_at(super::settings::Section::SmartSearch);
             }
             return;
         }
@@ -339,15 +312,16 @@ impl App {
                     } else {
                         "Oldest first"
                     };
-                    if style::icon_button_framed(ui, icons::ICON_SWAP_VERT, label).clicked() {
-                        self.tl.newest_first = !self.tl.newest_first;
-                    }
+                    style::chip(ui, &format!("Sort: {label}"), label, |ui| {
+                        ui.selectable_value(&mut self.tl.newest_first, true, "Newest first");
+                        ui.selectable_value(&mut self.tl.newest_first, false, "Oldest first");
+                    });
                     let current = match self.tl.group {
                         Group::Day => "Days",
                         Group::Month => "Months",
                         Group::Year => "Years",
                     };
-                    let job = dropdown_job(ui, current);
+                    let job = style::dropdown_job(ui, current);
                     let r = ui.menu_button(job, |ui| {
                         for (g, name) in [
                             (Group::Day, "Days"),
@@ -366,11 +340,12 @@ impl App {
         ui.add_space(8.0);
     }
 
-    /// Header of the search results.
+    /// Header of the search results: what was asked, how many were found, and chips that
+    /// narrow and order them.
     pub(super) fn results_header(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let title = match &self.current {
-            Some(super::Query::Similar { label, .. }) => format!("Similar to “{label}”"),
+            Some(super::Query::Similar { label, .. }) => format!("Photos similar to {label}"),
             _ => format!("Results for “{}”", self.result_label),
         };
         let photos = self
@@ -380,10 +355,15 @@ impl App {
             .count();
         let videos = self.results.len() - photos;
         let subtitle = count_text(photos, videos);
+        let year = chrono::Datelike::year(&self.today());
+        let mut changed = false;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
+                    ui.add(
+                        egui::Label::new(RichText::new(title).text_style(egui::TextStyle::Heading))
+                            .truncate(),
+                    );
                     if self.awaiting.is_some() {
                         ui.spinner();
                     }
@@ -395,12 +375,37 @@ impl App {
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if style::icon_label_button(ui, icons::ICON_CLOSE, "Clear search").clicked() {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if style::icon_button_framed(ui, icons::ICON_CLOSE, "Clear search").clicked() {
                     self.clear_search();
                 }
+                changed |= super::when::sort_ui(ui, &mut self.sort);
+                changed |= self.type_chip(ui);
+                changed |= self.date.ui(ui, &self.known_years, year);
             });
         });
-        ui.add_space(4.0);
+        if changed {
+            self.rerun();
+        }
+        ui.add_space(8.0);
+    }
+
+    /// The "Type" chip of the results header. It shares its state with the filter in the top
+    /// bar. Returns true when the choice changed (the caller re-runs the search).
+    fn type_chip(&mut self, ui: &mut egui::Ui) -> bool {
+        let before = self.kind;
+        let name = |k: Option<MediaKind>| match k {
+            None => "Everything",
+            Some(MediaKind::Image) => "Photos",
+            Some(MediaKind::Video) => "Videos",
+        };
+        let text = format!("Type: {}", name(before));
+        style::chip(ui, &text, &text, |ui| {
+            for k in [None, Some(MediaKind::Image), Some(MediaKind::Video)] {
+                ui.selectable_value(&mut self.kind, k, name(k));
+            }
+        });
+        before != self.kind
     }
 
     /// The card that explains smart search and asks to turn it on, shown above the grid until
@@ -433,7 +438,7 @@ impl App {
                 "Recollect can find photos when you describe them, like “birthday cake”. \
                  This needs a one-time download of {} MB{quality} and works offline afterwards. \
                  Your photos never leave this computer.",
-                spec.total_size() / 1_000_000
+                spec.size_mb()
             ));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -452,7 +457,7 @@ impl App {
                     ui.label(format!("{}, {} licence", spec.name, spec.license));
                     ui.label(format!("Downloaded once from huggingface.co/{}", spec.repo));
                     if ui.button("Choose another…").clicked() {
-                        self.open_settings();
+                        self.open_settings_at(super::settings::Section::SmartSearch);
                     }
                 });
         });

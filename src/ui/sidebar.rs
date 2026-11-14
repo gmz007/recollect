@@ -64,8 +64,8 @@ pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
         Activity::Downloading { done, total, .. } => (
             format!(
                 "Downloading smart search… {} of {} MB",
-                thousands((*done / 1_000_000) as usize),
-                thousands((*total / 1_000_000) as usize)
+                thousands(mb(*done)),
+                thousands(mb(*total))
             ),
             Some(*done as f32 / (*total).max(1) as f32),
         ),
@@ -91,6 +91,11 @@ pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
             )
         }
     })
+}
+
+/// Bytes as whole megabytes (1 MB = 1,000,000 bytes), rounded to the nearest.
+pub(super) fn mb(bytes: u64) -> usize {
+    (bytes.div_ceil(500_000) / 2) as usize
 }
 
 /// A full-width sidebar row. Returns the row's rectangle and response.
@@ -309,7 +314,7 @@ impl App {
         }
     }
 
-    /// "N files couldn't be read", with a way to try them again.
+    /// "N files couldn't be opened", with a way to try them again.
     fn failed_files(&mut self, ui: &mut egui::Ui) {
         let failed = self.snapshot.stats.errors;
         if failed == 0 {
@@ -317,7 +322,7 @@ impl App {
         }
         ui.add_space(10.0);
         egui::CollapsingHeader::new(format!(
-            "{} {} couldn't be read",
+            "{} {} couldn't be opened",
             thousands(failed),
             if failed == 1 { "file" } else { "files" }
         ))
@@ -339,12 +344,7 @@ impl App {
                 .add_enabled(!self.lib.is_busy(), egui::Button::new("Try again"))
                 .clicked()
             {
-                match self.lib.retry_errors() {
-                    Ok(_) => self.start_indexing(),
-                    Err(_) => {
-                        self.notify_error("Couldn't try those files again. Please try later.")
-                    }
-                }
+                self.retry_failed();
             }
         });
     }
@@ -448,13 +448,12 @@ impl App {
         });
     }
 
-    /// Opens the settings window with the current settings.
-    pub(super) fn open_settings(&mut self) {
-        self.settings_draft = self.lib.settings();
-        if self.settings_draft.model.is_none() {
-            self.settings_draft.model = Some(self.lib.model().id.to_string());
+    /// Marks the files that couldn't be opened for another try and starts looking at them.
+    pub(super) fn retry_failed(&mut self) {
+        match self.lib.retry_errors() {
+            Ok(_) => self.start_indexing(),
+            Err(_) => self.notify_error("Couldn't try those files again. Please try later."),
         }
-        self.settings_open = true;
     }
 
     /// Adds a folder to the library (it is scanned in the background).

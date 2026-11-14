@@ -18,7 +18,7 @@ computer.
   plain wording throughout. Notices appear as small toasts at the bottom instead of a status bar.
 - **Photos** (the timeline): all your photos and videos grouped by day, month or year (the
   **Months** menu above the grid), from the capture date in the file (falling back to the file
-  date), newest or oldest first (the sort button), with a thumbnail size slider. Browsing works
+  date), newest or oldest first (the **Newest first** menu), with a thumbnail size slider. Browsing works
   before smart search is turned on.
 - **Jump to date** in the sidebar: jump to any year or month.
 - **Folders** (click one in the sidebar; **+** opens *Add a folder* with your Pictures, Videos,
@@ -27,7 +27,29 @@ computer.
 - **Viewer:** click any photo or video (or press `Enter` on the one you are on) to see it as large
   as the window allows, with an info panel (`I`: date, camera, size, folder), `←`/`→` to step through the
   list you came from, `Home`/`End`, `Z` or a double-click for 100 % zoom (drag to pan; up to 4096 px
-  per side, so very large photos are scaled down to that) and `Esc` to go back to the grid.
+  per side, so very large photos are scaled down to that) and `Esc` to go back to the grid. The
+  top bar has icon buttons (each with a tooltip) for **Back**, **Favorite**, **Add to album…**,
+  **Info**, **Open with default app**, **Show in folder** and **Zoom**, the position ("7 of 689")
+  in the middle, and, on a video, a **Play at 1:23** button.
+- **Search results** say "Results for “beach”" (or "Photos similar to …") with the number of
+  photos and videos found, and three menus on the right: **When**, **Type** (Everything, Photos or
+  Videos, the same choice as the filter in the top bar) and **Sort** (Best match, Newest, Oldest);
+  **×** clears the search.
+- **Settings** (the gear in the top bar) opens a sheet with a list of sections. Changes apply at
+  once; only switching smart search asks first, because it makes Recollect look at your photos
+  again.
+  - **Appearance:** colors (match my computer, light, dark) and text size (normal, large).
+  - **Smart search:** whether it is on, off or downloading; a choice between *Best quality* and
+    *Faster* with their download sizes; whether to use the graphics card; a folded **Details**
+    part with the name, license and source of what it downloads.
+  - **Library:** your folders (**Stop showing…** asks first and never touches your files),
+    **Add a folder…**, how many photos and videos are ready for search and how many couldn't be
+    opened (**Show** lists them, **Try again** retries), and **Check for new photos**. A folded
+    **Advanced** part has the technical options.
+  - **Storage:** how much room previews may take, and where Recollect keeps its data, with an
+    **Open folder** button for each.
+  - **About:** the version, the privacy promise (nothing leaves your computer; the only use of
+    the internet is the smart-search download) and the licenses of what Recollect is built on.
 - **Favorites:** click the star that appears in the corner of a tile when you point at it (or
   press `F` on the item you are on) to mark it; the **Favorites** view in the sidebar lists them.
 - **Albums:** make your own albums (**New album…** in the sidebar, or from any **Add to album…**

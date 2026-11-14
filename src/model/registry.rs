@@ -137,6 +137,11 @@ impl ModelSpec {
         self.files.iter().map(|f| f.size).sum()
     }
 
+    /// The download size in whole megabytes (1 MB = 1,000,000 bytes), rounded to the nearest.
+    pub fn size_mb(&self) -> u64 {
+        self.total_size().div_ceil(500_000) / 2
+    }
+
     pub fn url(&self, file: &ModelFile) -> String {
         format!(
             "https://huggingface.co/{}/resolve/{}/{}",

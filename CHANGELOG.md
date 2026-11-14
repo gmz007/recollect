@@ -24,6 +24,16 @@ All notable changes to this project are documented here. The format is based on
 - A selection bar ("3 selected" with Add to album…, Favorite, Unfavorite, Remove from album,
   Cancel) that replaces the heading while items are selected.
 - Toast notifications (errors have a close button and stay longer).
+- A **Settings** sheet with Appearance, Smart search, Library, Storage and About sections and a
+  folded Advanced part. Changes apply at once; switching between *Best quality* and *Faster*
+  smart search asks first. Library shows the folders (with **Stop showing…**), plain counts, the
+  files that couldn't be opened with **Try again**, and **Check for new photos**; Storage sets the
+  space for previews and shows where Recollect keeps its data.
+- Search results header: "Results for “beach”" (or "Photos similar to …") with a count, **When**,
+  **Type** and **Sort** menus, and a **Clear search** button.
+- Viewer top bar with icon buttons and tooltips (Back, Favorite, Add to album…, Info, Open with
+  default app, Show in folder, Zoom), the position ("7 of 689") in the middle and a
+  **Play at 1:23** button on videos.
 
 ### Changed
 
@@ -37,6 +47,13 @@ All notable changes to this project are documented here. The format is based on
   search" instead of "indexing", "Check for new photos" instead of "Rescan", no scores or timings.
   Settings keeps technical options under **Advanced**.
 - Error and info toasts last 10 and 5 seconds (was 8 and 6).
+- The sort control in view headers says what it is set to ("Newest first" menu) instead of an
+  arrow icon.
+- Dialogs (add a folder, albums, confirmations) now dim the window behind them and block clicks
+  there until they are answered.
+- The shade on a hovered tile fades smoothly at the top and bottom instead of ending in a hard
+  edge.
+- Files that couldn't be read are described as "couldn't be opened".
 
 ## [0.4.0] - 2026-11-14
 

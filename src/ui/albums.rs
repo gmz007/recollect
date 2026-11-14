@@ -107,29 +107,52 @@ pub(super) fn items_text(n: usize) -> String {
     }
 }
 
+/// The entries of the "Add to album…" menus: the albums, then "New album…".
+fn album_menu_items(ui: &mut egui::Ui, albums: &[AlbumInfo], choice: &mut Option<AlbumChoice>) {
+    egui::ScrollArea::vertical()
+        .max_height(280.0)
+        .show(ui, |ui| {
+            for a in albums {
+                let b = ui.button(short_name(&a.name, SHORT_NAME_CHARS));
+                if b.on_hover_text(&a.name).clicked() {
+                    *choice = Some(AlbumChoice::Existing(a.id));
+                    ui.close();
+                }
+            }
+        });
+    if !albums.is_empty() {
+        ui.separator();
+    }
+    if ui.button("New album…").clicked() {
+        *choice = Some(AlbumChoice::New);
+        ui.close();
+    }
+}
+
 /// The "Add to album…" menu button: the albums, then "New album…".
 pub(super) fn album_menu(ui: &mut egui::Ui, albums: &[AlbumInfo]) -> Option<AlbumChoice> {
     let mut choice = None;
     style::icon_menu_button(ui, icons::ICON_PLAYLIST_ADD, "Add to album…", |ui| {
-        egui::ScrollArea::vertical()
-            .max_height(280.0)
-            .show(ui, |ui| {
-                for a in albums {
-                    let b = ui.button(short_name(&a.name, SHORT_NAME_CHARS));
-                    if b.on_hover_text(&a.name).clicked() {
-                        choice = Some(AlbumChoice::Existing(a.id));
-                        ui.close();
-                    }
-                }
-            });
-        if !albums.is_empty() {
-            ui.separator();
-        }
-        if ui.button("New album…").clicked() {
-            choice = Some(AlbumChoice::New);
-            ui.close();
-        }
+        album_menu_items(ui, albums, &mut choice);
     });
+    choice
+}
+
+/// The same menu behind an icon-only button (for toolbars).
+pub(super) fn album_menu_icon(ui: &mut egui::Ui, albums: &[AlbumInfo]) -> Option<AlbumChoice> {
+    let mut choice = None;
+    let r = ui.scope(|ui| {
+        // Like the other toolbar icons: no box until hovered.
+        let w = &mut ui.visuals_mut().widgets.inactive;
+        w.weak_bg_fill = egui::Color32::TRANSPARENT;
+        w.bg_stroke = egui::Stroke::NONE;
+        ui.menu_button(style::icon_text(icons::ICON_PLAYLIST_ADD, 22.0), |ui| {
+            album_menu_items(ui, albums, &mut choice);
+        })
+    });
+    let r = r.inner.response;
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Add to album…"));
+    r.on_hover_text("Add to album…");
     choice
 }
 
@@ -344,6 +367,7 @@ impl App {
             || self.add_folder_dialog.is_some()
             || self.stop_folder.is_some()
             || self.help_open
+            || self.model_confirm.is_some()
     }
 
     /// True when keys must not reach the views: a text field has focus, Settings is open or an
@@ -360,6 +384,7 @@ impl App {
         self.add_folder_dialog = None;
         self.stop_folder = None;
         self.help_open = false;
+        self.model_confirm = None;
         if self.delete_album.as_ref().is_some_and(|d| !d.pending) {
             self.delete_album = None;
         }
@@ -673,16 +698,15 @@ impl App {
     }
 }
 
-/// A centred window without collapse and resize handles, used by the album dialogs.
+/// A centred dialog over a dimmed backdrop, used by the album and folder dialogs.
 pub(super) fn modal_window(
     ctx: &egui::Context,
     title: &str,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ctx.content_rect().center())
-        .show(ctx, add_contents);
+    egui::Modal::new(egui::Id::unique(("dialog", title))).show(ctx, |ui| {
+        ui.label(style::semibold(title).size(17.0));
+        ui.add_space(8.0);
+        add_contents(ui);
+    });
 }

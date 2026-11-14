@@ -79,7 +79,12 @@ fn clicking_the_disabled_search_field_opens_settings() {
         .click();
     h.run();
     assert!(app.borrow().settings_open);
-    h.get_by_label("Appearance");
+    assert_eq!(
+        app.borrow().settings_section,
+        super::settings::Section::SmartSearch
+    );
+    h.get_by_label("Smart search");
+    h.get_by_label("Download and turn on (608 MB)");
 }
 
 #[test]
@@ -97,19 +102,258 @@ fn empty_library_invites_adding_a_folder() {
 }
 
 #[test]
-fn settings_window_offers_appearance_and_smart_search() {
+fn settings_sheet_lists_its_sections() {
     let d = tempfile::tempdir().unwrap();
     let lib = library(d.path());
     fake_install(&lib);
     let mut h = harness(lib);
     h.get_by_label("Settings").click();
     h.run();
+    // Appearance is first; every section can be reached from the list on the left.
     h.get_by_label("Appearance");
-    h.get_by_label("Smart search");
-    h.get_by_label_contains("Best quality  (");
-    h.get_by_label_contains("Faster  (");
+    for section in ["Appearance", "Smart search", "Library", "Storage", "About"] {
+        h.get_by_label(&format!("{section} settings"));
+    }
+    h.get_by_label("Close settings").click();
+    h.run();
+    assert!(h.query_by_label("Close settings").is_none());
+}
+
+/// Opens Settings on `section` by its list entry.
+fn open_section(h: &mut Harness<'_>, section: &str) {
+    if h.query_by_label("Close settings").is_none() {
+        h.get_by_label("Settings").click();
+        h.run();
+    }
+    h.get_by_label(&format!("{section} settings")).click();
+    h.run();
+}
+
+#[test]
+fn appearance_changes_apply_at_once() {
+    use crate::config::{TextSize, Theme};
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    let mut h = harness(Arc::clone(&lib));
+    open_section(&mut h, "Appearance");
+    h.get_by_label("Match my computer");
+    h.get_by_label("Dark").click();
+    h.run();
+    assert_eq!(lib.settings().theme, Theme::Dark);
+    assert!(h.ctx.global_style().visuals.dark_mode);
+    h.get_by_label("Light").click();
+    h.run();
+    assert_eq!(lib.settings().theme, Theme::Light);
+    h.get_by_label("Large").click();
+    h.run();
+    assert_eq!(lib.settings().text_size, TextSize::Large);
+    assert!((h.ctx.zoom_factor() - 1.15).abs() < 1e-6);
+    h.get_by_label("Normal").click();
+    h.run();
+    assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
+    // The choices are saved to disk, not only kept in memory.
+    let saved = crate::config::Settings::load(&lib.paths().settings_path()).unwrap();
+    assert_eq!(
+        (saved.theme, saved.text_size),
+        (Theme::Light, TextSize::Normal)
+    );
+}
+
+#[test]
+fn smart_search_settings_show_status_and_confirm_a_switch() {
+    use crate::library::Activity;
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    fake_install(&lib);
+    let mut h = harness(Arc::clone(&lib));
+    open_section(&mut h, "Smart search");
+    h.get_by_label("On — faster");
+    h.get_by_label("Best quality");
+    let described = |h: &Harness<'_>, title: &str| {
+        h.get_by_label(title)
+            .accesskit_node()
+            .description()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        described(&h, "Best quality"),
+        "Finds photos most reliably. Works best on computers with a graphics card. 486 MB."
+    );
+    assert_eq!(
+        described(&h, "Faster"),
+        "Quicker on older computers. 608 MB."
+    );
     h.get_by_label("Use the graphics card when available");
-    h.get_by_label("Advanced");
+    h.get_by_label("Details");
+    assert!(h.query_by_label_contains("huggingface").is_none());
+    // The graphics card option is saved at once.
+    h.get_by_label("Use the graphics card when available")
+        .click();
+    h.run();
+    assert!(!lib.settings().use_gpu);
+    // Status in words while things happen.
+    lib.update_status(|s| {
+        s.activity = Activity::Downloading {
+            model: "m".into(),
+            done: 120_000_000,
+            total: 485_000_000,
+        }
+    });
+    h.run_steps(2);
+    h.get_by_label("Downloading… 120 of 485 MB");
+    lib.update_status(|s| s.activity = Activity::LoadingModel);
+    h.run_steps(2);
+    h.get_by_label("Getting your photos ready…");
+    lib.update_status(|s| s.activity = Activity::Idle);
+    h.run_steps(2);
+    // Choosing the other option asks first and explains what happens.
+    h.get_by_label("Best quality").click();
+    h.run_steps(3);
+    h.get_by_label("Switch to Best quality?");
+    h.get_by_label_contains("look at all your photos again");
+    h.get_by_label_contains("one-time download of 486 MB");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Switch to Best quality?").is_none());
+    assert_eq!(lib.model().id, registry::CLIP_B32.id, "nothing changed yet");
+    h.get_by_label("Best quality").click();
+    h.run_steps(3);
+    h.get_by_label("Switch").click();
+    settle(&mut h, || lib.model().id == registry::SIGLIP_B16.id);
+    assert_eq!(
+        lib.settings().model.as_deref(),
+        Some(registry::SIGLIP_B16.id)
+    );
+}
+
+#[test]
+fn smart_search_can_be_turned_on_from_settings() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    open_section(&mut h, "Smart search");
+    h.get_by_label("Off");
+    h.get_by_label("Download and turn on (608 MB)");
+}
+
+#[test]
+fn library_settings_show_counts_and_retry_unreadable_files() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 3);
+    let mut h = quick_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    lib.wait();
+    let ids: Vec<i64> = ["p0.jpg", "p1.jpg", "p2.jpg"]
+        .iter()
+        .map(|n| file_id_of(&lib, n))
+        .collect();
+    {
+        let db = lib.db.lock();
+        for id in &ids {
+            db.set_error(*id, "broken").unwrap();
+        }
+    }
+    app.borrow_mut().refresh_snapshot(true);
+    settle(&mut h, || app.borrow().snapshot.stats.errors == 3);
+    open_section(&mut h, "Library");
+    assert!(
+        h.get_all_by_label("nowhere").count() >= 2,
+        "sidebar and settings"
+    );
+    h.get_by_label("3 photos · 3 couldn't be opened");
+    h.get_by_label("Stop showing nowhere…");
+    h.get_by_label("Add a folder…");
+    assert!(
+        h.query_by_label("Try again").is_none(),
+        "hidden until asked for"
+    );
+    h.get_by_label("Show").click();
+    h.run_steps(3);
+    h.get_by_label("p0.jpg");
+    h.get_by_label("Hide");
+    let before = lib.jobs_finished();
+    h.get_by_label("Try again").click();
+    settle(&mut h, || lib.jobs_finished() > before);
+    assert!(app.borrow().notices.current().is_none());
+    // Check for new photos is offered here too (the sidebar has a button of the same name).
+    assert!(
+        !h.get_all_by_label("Check for new photos")
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
+    // Stopping a folder asks the same question as in the sidebar.
+    h.get_by_label("Stop showing nowhere…").click();
+    h.run_steps(3);
+    h.get_by_label("Stop showing “nowhere”?");
+    h.get_by_label("Your files stay where they are.");
+    assert_eq!(lib.folders().unwrap().len(), 1);
+    h.get_all_by_label("Cancel").last().unwrap().click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Your files stay where they are.")
+            .is_none()
+    );
+    assert_eq!(lib.folders().unwrap().len(), 1);
+    assert!(app.borrow().settings_open, "the sheet stays open");
+}
+
+#[test]
+fn storage_settings_set_the_preview_space_and_show_where_data_lives() {
+    use egui_kittest::kittest::Queryable as _;
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    let mut h = harness(Arc::clone(&lib));
+    open_section(&mut h, "Storage");
+    assert!(h.get_all_by_label("Space for previews").count() >= 1);
+    h.get_by_label("Where Recollect keeps its data");
+    h.get_by_label("Open folder for library");
+    h.get_by_label("Open folder for previews");
+    h.get_by_label("Open folder for settings");
+    h.get_by_label(&lib.paths().data.display().to_string());
+    assert_eq!(lib.settings().thumb_cache_mb, 1024);
+    h.get_by_role(egui::accesskit::Role::Slider)
+        .set_value_accesskit(2048.0);
+    h.run_steps(3);
+    assert_eq!(lib.settings().thumb_cache_mb, 2048);
+    let saved = crate::config::Settings::load(&lib.paths().settings_path()).unwrap();
+    assert_eq!(saved.thumb_cache_mb, 2048);
+}
+
+#[test]
+fn about_states_the_privacy_promise_and_the_version() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = harness(library(d.path()));
+    open_section(&mut h, "About");
+    h.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
+    h.get_by_label("Your photos stay private");
+    h.get_by_label_contains("never leave it");
+    h.get_by_label_contains("one-time download for smart search");
+    h.get_by_label("Open-source licenses").click();
+    h.run_steps(3);
+    h.get_by_label("Inter typeface: SIL Open Font License 1.1");
+    h.get_by_label("Material Symbols icons: Apache License 2.0");
+    h.get_by_label("ONNX Runtime: MIT License");
+    h.get_by_label("FFmpeg: GNU LGPL");
+}
+
+#[test]
+fn escape_closes_the_sheet_and_the_topmost_question_first() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    fake_install(&lib);
+    let mut h = harness(lib);
+    open_section(&mut h, "Smart search");
+    h.get_by_label("Best quality").click();
+    h.run_steps(3);
+    h.get_by_label("Switch to Best quality?");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.query_by_label("Switch to Best quality?").is_none());
+    h.get_by_label("Close settings");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.query_by_label("Close settings").is_none());
 }
 
 #[test]
@@ -207,7 +451,7 @@ fn results_show_a_plain_header_and_square_tiles() {
     h.get_by_label("Result movie.mp4");
     h.get_by_label("Result photo.jpg");
     h.get_by_label("Clear search");
-    assert!(h.query_by_label_contains("match").is_none());
+    assert!(h.query_by_label_contains("score").is_none());
     assert!(h.query_by_label_contains(" ms").is_none());
 }
 
@@ -413,7 +657,7 @@ fn timeline_shows_month_headers_and_regroups() {
     h.get_by_label("December 2019 · 1");
     h.get_by_label("240 photos");
     h.get_by_label("Thumbnail size");
-    h.get_by_label("Newest first");
+    h.get_by_label("Sort: Newest first");
     // The "Months" menu regroups the timeline.
     h.get_by_label("Months").click();
     h.run();
@@ -426,10 +670,12 @@ fn timeline_shows_month_headers_and_regroups() {
     h.get_by_label("Days").click();
     h.run();
     h.get_by_label("Sunday 15 December 2019 · 1");
-    // The sort button flips the order.
-    h.get_by_label("Newest first").click();
+    // The sort menu says what it is set to and flips the order.
+    h.get_by_label("Sort: Newest first").click();
     h.run();
-    h.get_by_label("Oldest first");
+    h.get_by_label("Oldest first").click();
+    h.run();
+    h.get_by_label("Sort: Oldest first");
     assert!(!app.borrow().tl.newest_first);
 }
 
@@ -576,8 +822,8 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
     h.run_steps(3);
     // The viewer replaces the album: no grid, no sidebar.
     h.get_by_label("img1.jpg");
-    h.get_by_label("1 / 240");
-    h.get_by_label("Close");
+    h.get_by_label("1 of 240");
+    h.get_by_label("Back");
     h.get_by_label("Next");
     h.get_by_label("Info");
     assert!(
@@ -593,11 +839,11 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
     assert!(h.query_by_label("img1.jpg").is_none());
     h.key_press(egui::Key::End);
     h.run_steps(3);
-    h.get_by_label("240 / 240");
+    h.get_by_label("240 of 240");
     assert!(h.query_by_label("Next").is_none());
     h.key_press(egui::Key::Home);
     h.run_steps(3);
-    h.get_by_label("1 / 240");
+    h.get_by_label("1 of 240");
     h.get_by_label("Next").click();
     h.run_steps(3);
     h.get_by_label("img2.jpg");
@@ -625,15 +871,16 @@ fn clicking_opens_the_viewer_and_the_info_panel_toggles() {
     h.get_by_label("Show in folder");
     h.get_by_label("Find similar");
     h.get_by_label("Favorite");
-    // `I` hides the panel (the name moves to the top bar) and shows it again.
+    // `I` hides the panel (the name moves to the top bar) and shows it again; the buttons stay.
     h.key_press(egui::Key::I);
     h.run_steps(3);
     h.get_by_label("img1.jpg");
-    assert!(h.query_by_label("Open with default app").is_none());
+    assert!(h.query_by_label("Find similar").is_none());
+    h.get_by_label("Open with default app");
     h.get_by_label("Favorite");
     h.key_press(egui::Key::I);
     h.run_steps(3);
-    h.get_by_label("Open with default app");
+    h.get_by_label("Find similar");
     // Zoom toggles with Z and with the button.
     h.get_by_label("Zoom to 100%");
     h.key_press(egui::Key::Z);
@@ -641,8 +888,8 @@ fn clicking_opens_the_viewer_and_the_info_panel_toggles() {
     h.get_by_label("Fit to window").click();
     h.run_steps(3);
     h.get_by_label("Zoom to 100%");
-    // Close button.
-    h.get_by_label("Close").click();
+    // Back button.
+    h.get_by_label("Back").click();
     h.run_steps(3);
     assert_eq!(app.borrow().tl.selected, Some(0));
 }
@@ -808,18 +1055,33 @@ fn favorites_toggle_in_the_viewer() {
 }
 
 #[test]
-fn search_shows_the_when_and_sort_selectors() {
+fn search_shows_the_when_type_and_sort_chips() {
     let d = tempfile::tempdir().unwrap();
     let app = Rc::new(RefCell::new(grid_app_with(d.path(), false)));
     let mut h = album_harness(&app);
-    h.get_by_label("When");
-    h.get_by_label("Sort");
+    h.get_by_label("When: Any time");
+    h.get_by_label("Type: Everything");
+    h.get_by_label("Sort: Best match");
     assert_eq!(app.borrow().date.when, super::when::When::Any);
-    h.get_by_label("When").click();
+    h.get_by_label("When: Any time").click();
     h.run_steps(3);
     h.get_by_label("Last year").click();
     h.run_steps(3);
     assert_eq!(app.borrow().date.when, super::when::When::LastYear);
+    h.get_by_label("When: Last year");
+    // The type chip shares its state with the filter in the top bar.
+    h.get_by_label("Type: Everything").click();
+    h.run_steps(3);
+    h.get_by_label("Videos").click();
+    h.run_steps(3);
+    assert_eq!(app.borrow().kind, Some(MediaKind::Video));
+    h.get_by_label("Type: Videos");
+    h.get_by_label("Sort: Best match").click();
+    h.run_steps(3);
+    h.get_by_label("Oldest").click();
+    h.run_steps(3);
+    assert_eq!(app.borrow().sort, crate::search::SearchSort::Oldest);
+    h.get_by_label("Sort: Oldest");
 }
 
 #[test]
@@ -827,7 +1089,7 @@ fn browsing_has_no_when_and_sort_selectors() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let h = album_harness(&app);
-    assert!(h.query_by_label("When").is_none());
+    assert!(h.query_by_label_contains("When:").is_none());
 }
 
 #[test]
@@ -844,10 +1106,10 @@ fn on_this_day_strip_opens_the_viewer_on_its_own_list() {
     h.get_by_label("On this day img10.jpg").click();
     h.run_steps(3);
     h.get_by_label("img10.jpg");
-    h.get_by_label("1 / 20");
+    h.get_by_label("1 of 20");
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
-    h.get_by_label("2 / 20");
+    h.get_by_label("2 of 20");
     h.get_by_label("img22.jpg"); // March 2018
     // Not in the other views.
     h.key_press(egui::Key::Escape);
@@ -1475,7 +1737,15 @@ fn keys_do_not_reach_the_grid_behind_a_dialog_and_enter_never_deletes() {
     let (lib, app, mut h) = album_view(d.path(), 3, album_harness);
     h.get_by_label("Delete album…").click();
     h.run_steps(3);
-    click_with(&mut h, "Item p1.jpg", egui::Modifiers::COMMAND);
+    // Clicks do not reach the grid behind the dialog either: select straight in the state.
+    {
+        let mut a = app.borrow_mut();
+        let id = a.tl.items[1].file_id;
+        a.tl.sel.only(id);
+        a.picking = true;
+        a.tl.selected = Some(1);
+    }
+    h.run_steps(2);
     h.get_by_label("The photos and videos in it are not deleted.");
     // Enter, F and arrows behind the dialog do nothing.
     for key in [egui::Key::Enter, egui::Key::F, egui::Key::ArrowRight] {
@@ -1877,6 +2147,7 @@ fn visible_text(h: &Harness<'_>) -> Vec<String> {
         let n = node.accesskit_node();
         out.extend(n.label());
         out.extend(n.value());
+        out.extend(n.description());
     }
     out
 }
@@ -1884,6 +2155,10 @@ fn visible_text(h: &Harness<'_>) -> Vec<String> {
 fn banned_words_in(texts: &[String]) -> Vec<String> {
     let mut found = Vec::new();
     for t in texts {
+        // File system paths are shown as they are (Settings > Storage).
+        if t.starts_with('/') {
+            continue;
+        }
         for word in t
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -1932,6 +2207,14 @@ fn the_main_screens_use_no_technical_words() {
         check("timeline, smart search off", &h);
     }
     {
+        let d1 = tempfile::tempdir().unwrap();
+        let app = album_app(d1.path(), false);
+        let mut h = album_harness(&app);
+        open_section(&mut h, "Smart search");
+        h.get_by_label("Download and turn on (608 MB)");
+        check("settings: smart search off", &h);
+    }
+    {
         let d2 = tempfile::tempdir().unwrap();
         let app = album_app(d2.path(), true);
         let mut h = album_harness(&app);
@@ -1973,6 +2256,28 @@ fn the_main_screens_use_no_technical_words() {
             .notify_error("Couldn't save your favorite. Try again in a moment.");
         h.run_steps(2);
         check("error toast", &h);
+        // Settings, every section. The Advanced and Details parts stay folded away.
+        {
+            let mut a = app.borrow_mut();
+            a.snapshot.stats.images = 240;
+            a.snapshot.stats.indexed = 238;
+            a.snapshot.stats.errors = 2;
+            a.snapshot.errors = vec![("/nowhere/x.jpg".into(), "unreadable".into())];
+            a.failed_open = true;
+        }
+        for section in ["Appearance", "Smart search", "Library", "Storage", "About"] {
+            open_section(&mut h, section);
+            check(&format!("settings: {section}"), &h);
+        }
+        open_section(&mut h, "Smart search");
+        h.get_by_label("Best quality").click();
+        h.run_steps(3);
+        h.get_by_label("Switch to Best quality?");
+        check("settings: switching", &h);
+        h.get_by_label("Cancel").click();
+        h.run_steps(3);
+        h.get_by_label("Close settings").click();
+        h.run_steps(3);
         // Help.
         h.get_by_label("Help").click();
         h.run_steps(3);
@@ -2006,4 +2311,60 @@ fn the_main_screens_use_no_technical_words() {
         seen.iter()
             .any(|t| t.starts_with("Getting your photos ready for search"))
     );
+}
+
+#[test]
+fn the_viewer_toolbar_has_labelled_icon_buttons() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    for label in [
+        "Back",
+        "Favorite",
+        "Add to album…",
+        "Info",
+        "Open with default app",
+        "Show in folder",
+        "Zoom to 100%",
+        "1 of 240",
+    ] {
+        h.get_by_label(label);
+    }
+    // Info shows and hides the details panel.
+    h.get_by_label("Find similar");
+    h.get_by_label("Info").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Find similar").is_none());
+    assert!(!app.borrow().viewer.as_ref().unwrap().info);
+    h.get_by_label("Info").click();
+    h.run_steps(3);
+    h.get_by_label("Find similar");
+    // Favorite is filled once marked, and the button says what it would undo.
+    h.get_by_label("Favorite").click();
+    h.run_steps(3);
+    h.get_by_label("Unfavorite");
+    // Back closes the viewer and returns to the grid.
+    h.get_by_label("Back").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    h.get_by_label("Item img1.jpg");
+}
+
+#[test]
+fn results_header_titles_searches_and_similar_photos() {
+    let d = tempfile::tempdir().unwrap();
+    let mut app = grid_app(d.path());
+    app.current = Some(super::Query::Similar {
+        item_id: 1,
+        label: "beach.jpg".into(),
+    });
+    app.result_label = "similar to beach.jpg".into();
+    let app = Rc::new(RefCell::new(app));
+    let h = album_harness(&app);
+    h.get_by_label("Photos similar to beach.jpg");
+    h.get_by_label("3 photos");
+    h.get_by_label("Clear search");
+    assert!(h.query_by_label_contains("score").is_none());
 }

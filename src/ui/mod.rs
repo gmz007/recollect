@@ -7,6 +7,7 @@ mod frame_stats;
 mod platform;
 mod preview;
 mod selection;
+mod settings;
 mod sidebar;
 mod style;
 mod tiles;
@@ -16,10 +17,8 @@ mod when;
 mod workers;
 
 use crate::Library;
-use crate::config::{Settings, TextSize, Theme};
 use crate::library::{Activity, Status};
 use crate::media::MediaKind;
-use crate::model::{download, registry};
 use crate::search::{SearchHit, SearchOptions, SearchSort};
 use crate::store::db::{AlbumInfo, Folder, Stats};
 use crate::thumbs::ThumbKey;
@@ -239,7 +238,11 @@ pub struct App {
     last_prune: Instant,
     consent_dismissed: bool,
     settings_open: bool,
-    settings_draft: Settings,
+    settings_section: settings::Section,
+    /// A smart-search choice waiting for the user to confirm the switch.
+    model_confirm: Option<&'static str>,
+    /// Settings > Library lists the files that couldn't be opened.
+    failed_open: bool,
     #[cfg(test)]
     today_override: Option<chrono::NaiveDate>,
 }
@@ -251,7 +254,6 @@ impl App {
         let c = ctx.clone();
         let search = SearchWorker::new(Arc::clone(&lib), move || c.request_repaint());
         let thumbs = ThumbCache::new(ctx, lib.paths().thumbs_dir(), 3);
-        let settings = lib.settings();
         prune_thumbnails(&lib);
         let tl = TimelineState::new(Arc::clone(&lib), ctx);
         let previews = Previews::new(ctx, Arc::clone(&lib), 2);
@@ -310,7 +312,9 @@ impl App {
             last_prune: Instant::now(),
             consent_dismissed: false,
             settings_open: false,
-            settings_draft: settings,
+            settings_section: settings::Section::default(),
+            model_confirm: None,
+            failed_open: false,
             #[cfg(test)]
             today_override: None,
         };
@@ -590,16 +594,6 @@ impl App {
         if !self.selection_bar_ui(ui) {
             self.results_header(ui);
         }
-        let year = chrono::Datelike::year(&self.today());
-        ui.horizontal(|ui| {
-            let mut changed = self.date.ui(ui, &self.known_years, year);
-            ui.add_space(12.0);
-            changed |= when::sort_ui(ui, &mut self.sort);
-            if changed {
-                self.rerun();
-            }
-        });
-        ui.add_space(8.0);
         if self.results.is_empty() {
             if self.awaiting.is_none()
                 && self.result_error.is_none()
@@ -743,134 +737,6 @@ impl App {
                 None
             },
         }
-    }
-
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.settings_open;
-        let mut apply = false;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                ui.label(style::semibold("Appearance").size(16.0));
-                ui.horizontal(|ui| {
-                    ui.label("Colors");
-                    for (t, name) in [
-                        (Theme::System, "Match my computer"),
-                        (Theme::Light, "Light"),
-                        (Theme::Dark, "Dark"),
-                    ] {
-                        ui.radio_value(&mut self.settings_draft.theme, t, name);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Text size");
-                    ui.radio_value(&mut self.settings_draft.text_size, TextSize::Normal, "Normal");
-                    ui.radio_value(&mut self.settings_draft.text_size, TextSize::Large, "Large");
-                });
-                ui.add_space(12.0);
-                ui.label(style::semibold("Smart search").size(16.0));
-                let current = self
-                    .settings_draft
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| self.lib.model().id.to_string());
-                for m in registry::MODELS {
-                    let installed = download::is_installed(&self.lib.paths().models_dir(), m);
-                    let (name, about) = if m.id == registry::SIGLIP_B16.id {
-                        (
-                            "Best quality",
-                            "Finds the right photos more often. Works best with a graphics card.",
-                        )
-                    } else {
-                        (
-                            "Faster",
-                            "Quicker on older computers, a little less accurate.",
-                        )
-                    };
-                    let text = format!(
-                        "{name}  ({} MB{})",
-                        m.total_size() / 1_000_000,
-                        if installed { ", downloaded" } else { "" }
-                    );
-                    if ui
-                        .radio(current == m.id, text)
-                        .on_hover_text(about)
-                        .clicked()
-                    {
-                        self.settings_draft.model = Some(m.id.to_string());
-                    }
-                    ui.label(RichText::new(about).small().weak());
-                }
-                ui.label(
-                    RichText::new(
-                        "Changing this prepares your photos for search again, which can take a while.",
-                    )
-                    .small()
-                    .weak(),
-                );
-                ui.add_space(8.0);
-                ui.checkbox(
-                    &mut self.settings_draft.use_gpu,
-                    "Use the graphics card when available",
-                );
-                egui::CollapsingHeader::new("Advanced")
-                    .id_salt("settings-advanced")
-                    .show(ui, |ui| {
-                        let mut threads = self.settings_draft.decode_threads();
-                        let max = std::thread::available_parallelism()
-                            .map(|n| n.get())
-                            .unwrap_or(4);
-                        if ui
-                            .add(egui::Slider::new(&mut threads, 1..=max).text("indexing threads"))
-                            .changed()
-                        {
-                            self.settings_draft.index_threads = Some(threads);
-                        }
-                        ui.add(
-                            egui::Slider::new(&mut self.settings_draft.thumb_cache_mb, 64..=8192)
-                                .text("MB thumbnail cache"),
-                        );
-                    });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        apply = true;
-                    }
-                });
-            });
-        if apply {
-            let switching = self
-                .settings_draft
-                .model
-                .as_deref()
-                .is_some_and(|m| m != self.lib.model().id);
-            if switching && self.lib.is_busy() {
-                self.notify(
-                    "Wait for the current task to finish (or cancel it) before changing smart search.",
-                );
-            } else if let Err(e) = self.lib.apply_settings(self.settings_draft.clone()) {
-                self.notify_error(format!("Couldn't save your settings. {e:#}"));
-            } else {
-                open = false;
-                if switching {
-                    // Old results and queries belong to the previous model.
-                    self.consent_dismissed = false;
-                    self.results = Arc::default();
-                    self.end_viewer();
-                    self.current = None;
-                    self.query.clear();
-                    self.result_label.clear();
-                    self.selected = None;
-                }
-                self.refresh_snapshot(true);
-                prune_thumbnails(&self.lib);
-            }
-        }
-        self.settings_open = open;
     }
 }
 
@@ -1197,10 +1063,15 @@ impl App {
             ui.set_style(ctx.global_style());
         }
         self.update_state(&ctx);
-        if self.dialog_open()
+        if (self.dialog_open() || self.settings_open)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            self.cancel_album_dialogs();
+            // The topmost thing closes first: a question, otherwise the Settings sheet.
+            if self.dialog_open() {
+                self.cancel_album_dialogs();
+            } else {
+                self.settings_open = false;
+            }
         }
         if self.viewer_open() {
             // The viewer fills the window: no sidebar, top bar or grid while it is open.
@@ -1244,8 +1115,9 @@ impl App {
                 }
             });
         if self.settings_open {
-            self.settings_window(&ctx);
+            self.settings_sheet(&ctx);
         }
+        self.model_confirm_dialog(&ctx);
         if self.help_open {
             self.help_window(&ctx);
         }

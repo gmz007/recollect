@@ -348,6 +348,73 @@ pub fn icon_menu_button<R>(
     r
 }
 
+/// A text with a drop-down arrow, for menu buttons.
+pub fn dropdown_job(ui: &egui::Ui, label: &str) -> egui::text::LayoutJob {
+    let color = ui.visuals().widgets.inactive.fg_stroke.color;
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        label,
+        0.0,
+        egui::TextFormat {
+            font_id: TextStyle::Button.resolve(ui.style()),
+            color,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.append(
+        icons::ICON_ARROW_DROP_DOWN.codepoint,
+        2.0,
+        egui::TextFormat {
+            font_id: icon_font_id(icons::ICON_ARROW_DROP_DOWN, 20.0),
+            color,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// A drop-down "chip": `text` with an arrow that opens a menu. The chip is named `accessible`
+/// for assistive technology.
+pub fn chip<R>(
+    ui: &mut egui::Ui,
+    accessible: &str,
+    text: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Response {
+    let job = dropdown_job(ui, text);
+    let r = ui.menu_button(job, add_contents).response;
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), accessible));
+    r
+}
+
+/// A frameless icon button for toolbars: tooltip `tooltip`, named `label` for assistive
+/// technology, drawn in `color` (default: the normal text colour) and highlighted when
+/// `selected`.
+pub fn toolbar_icon(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    label: &str,
+    tooltip: &str,
+    color: Option<Color32>,
+    selected: bool,
+) -> Response {
+    let mut text = icon_text(icon, 22.0);
+    if let Some(c) = color {
+        text = text.color(c);
+    }
+    let b = egui::Button::new(text)
+        .frame(selected)
+        .selected(selected)
+        .min_size(Vec2::splat(34.0));
+    let r = ui.add(b).on_hover_text(tooltip);
+    r.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
+    });
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// A rounded card frame on the surface colour.
 pub fn card(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new()

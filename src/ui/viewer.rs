@@ -9,7 +9,7 @@
 //! that snapshot while it is open, so reloads of the grid behind it do not move the photos
 //! under the user; favorite marks changed meanwhile are tracked separately.
 
-use super::albums::{AlbumChoice, album_menu};
+use super::albums::AlbumChoice;
 use super::preview::{self, Preview, PreviewKey, Previews};
 use super::style::{self, icons};
 use super::timeline::fmt_taken_at;
@@ -378,7 +378,7 @@ impl Viewer {
                 .min_size(240.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.info_panel(ui, previews, can_find_similar, albums, &mut actions)
+                        self.info_panel(ui, previews, can_find_similar, &mut actions)
                     });
                 });
         }
@@ -389,53 +389,153 @@ impl Viewer {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui, albums: &[AlbumInfo], actions: &mut Vec<Action>) {
+        let pal = style::Palette::of(ui.ctx());
+        let full = ui.max_rect();
         ui.horizontal(|ui| {
-            if ui.button("Close").clicked() {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if style::toolbar_icon(ui, icons::ICON_ARROW_BACK, "Back", "Back", None, false)
+                .clicked()
+            {
                 actions.push(Action::Close);
             }
-            ui.add_space(8.0);
             // The name is shown once: here while the info panel is closed, there while open.
             if !self.info {
-                ui.label(RichText::new(self.current().name()).strong());
+                ui.add_space(8.0);
+                ui.scope(|ui| {
+                    ui.set_max_width((full.width() * 0.28).max(80.0));
+                    ui.add(egui::Label::new(style::semibold(self.current().name())).truncate());
+                });
             }
-            ui.label(RichText::new(format!("{} / {}", self.index + 1, self.len())).weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.toggle_value(&mut self.info, "Info");
+                ui.spacing_mut().item_spacing.x = 4.0;
                 if self.current().kind == MediaKind::Image {
-                    let label = if self.zoom {
-                        "Fit to window"
+                    let (icon, label) = if self.zoom {
+                        (icons::ICON_ZOOM_OUT, "Fit to window")
                     } else {
-                        "Zoom to 100%"
+                        (icons::ICON_ZOOM_IN, "Zoom to 100%")
                     };
-                    if ui
-                        .button(label)
-                        .on_hover_text(
-                            "One image pixel per screen pixel; photos larger than \
-                             4096 px on a side are scaled down to that first",
-                        )
-                        .clicked()
-                    {
+                    let tip = if self.zoom {
+                        label.to_string()
+                    } else {
+                        "Zoom to 100% (one image pixel per screen pixel; photos larger than \
+                         4096 px on a side are scaled down to that first)"
+                            .to_string()
+                    };
+                    if style::toolbar_icon(ui, icon, label, &tip, None, self.zoom).clicked() {
                         self.toggle_zoom();
                     }
                 }
-                if !self.info {
-                    self.album_button(ui, albums, actions);
-                    self.favorite_button(ui, actions);
+                let path = self.current().path.clone();
+                if style::toolbar_icon(
+                    ui,
+                    icons::ICON_FOLDER_OPEN,
+                    "Show in folder",
+                    "Show in folder",
+                    None,
+                    false,
+                )
+                .clicked()
+                {
+                    actions.push(Action::Reveal(path.clone()));
+                }
+                if style::toolbar_icon(
+                    ui,
+                    icons::ICON_OPEN_IN_NEW,
+                    "Open with default app",
+                    "Open with default app",
+                    None,
+                    false,
+                )
+                .clicked()
+                {
+                    actions.push(Action::Open(path.clone()));
+                }
+                if style::toolbar_icon(
+                    ui,
+                    icons::ICON_INFO,
+                    "Info",
+                    "Photo details",
+                    None,
+                    self.info,
+                )
+                .clicked()
+                {
+                    self.info = !self.info;
+                }
+                self.album_button(ui, albums, actions);
+                self.favorite_button(ui, actions);
+                let e = self.current().clone();
+                if e.kind == MediaKind::Video {
+                    let t = e.t.unwrap_or(0.0);
+                    let label = format!("Play at {}", fmt_time(t));
+                    let mut job = egui::text::LayoutJob::default();
+                    for (text, font, gap) in [
+                        (
+                            icons::ICON_PLAY_ARROW.codepoint,
+                            style::icon_font_id(icons::ICON_PLAY_ARROW, 20.0),
+                            0.0,
+                        ),
+                        (
+                            label.as_str(),
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            4.0,
+                        ),
+                    ] {
+                        job.append(
+                            text,
+                            gap,
+                            egui::TextFormat {
+                                font_id: font,
+                                color: pal.on_accent,
+                                valign: egui::Align::Center,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    let b = egui::Button::new(job).fill(pal.accent);
+                    let r = ui.add(b);
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+                    if r.on_hover_text("Play this video").clicked() {
+                        actions.push(Action::PlayAt(e.path.clone(), t));
+                    }
+                    ui.add_space(8.0);
                 }
             });
         });
+        // The position sits in the middle of the bar, whatever is on either side.
+        let pos = format!("{} of {}", self.index + 1, self.len());
+        let galley = ui.painter().layout_no_wrap(
+            pos.clone(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            pal.text_secondary,
+        );
+        let centre = Pos2::new(full.center().x, full.top() + 6.0 + 17.0);
+        ui.put(
+            Rect::from_center_size(centre, galley.size() + Vec2::splat(2.0)),
+            egui::Label::new(RichText::new(pos).color(pal.text_secondary)),
+        );
     }
 
     fn favorite_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let e = self.current();
-        let label = if e.favorite { "Unfavorite" } else { "Favorite" };
-        if ui.button(label).clicked() {
+        let pal = style::Palette::of(ui.ctx());
+        let (icon, label, color) = if e.favorite {
+            (icons::ICON_STAR, "Unfavorite", Some(pal.favorite))
+        } else {
+            (icons::ICON_STAR.outlined(), "Favorite", None)
+        };
+        let tip = if e.favorite {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        };
+        if style::toolbar_icon(ui, icon, label, tip, color, false).clicked() {
             actions.push(Action::Favorite(e.file_id, !e.favorite));
         }
     }
 
     fn album_button(&self, ui: &mut egui::Ui, albums: &[AlbumInfo], actions: &mut Vec<Action>) {
-        if let Some(c) = album_menu(ui, albums) {
+        if let Some(c) = super::albums::album_menu_icon(ui, albums) {
             actions.push(Action::AddToAlbum(self.current().file_id, c));
         }
     }
@@ -445,7 +545,6 @@ impl Viewer {
         ui: &mut egui::Ui,
         previews: &mut Previews,
         can_find_similar: bool,
-        albums: &[AlbumInfo],
         actions: &mut Vec<Action>,
     ) {
         let e = self.current.clone();
@@ -490,33 +589,15 @@ impl Viewer {
         if let Some(d) = e.duration {
             ui.label(format!("length {}", fmt_time(d)));
         }
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            if e.kind == MediaKind::Video
-                && ui
-                    .button(format!("Play at {}", fmt_time(e.t.unwrap_or(0.0))))
-                    .clicked()
-            {
-                actions.push(Action::PlayAt(e.path.clone(), e.t.unwrap_or(0.0)));
-            }
-            if ui.button("Open with default app").clicked() {
-                actions.push(Action::Open(e.path.clone()));
-            }
-            if ui.button("Show in folder").clicked() {
-                actions.push(Action::Reveal(e.path.clone()));
-            }
-            if can_find_similar
-                && let Some(item_id) = e.similar_item()
-                && ui.button("Find similar").clicked()
-            {
+        if can_find_similar && let Some(item_id) = e.similar_item() {
+            ui.add_space(8.0);
+            if ui.button("Find similar").clicked() {
                 actions.push(Action::FindSimilar {
                     item_id,
                     label: e.name(),
                 });
             }
-            self.favorite_button(ui, actions);
-            self.album_button(ui, albums, actions);
-        });
+        }
         if e.moments.len() > 1 || (e.moments.len() == 1 && e.t.is_some()) {
             ui.add_space(10.0);
             ui.label(RichText::new("Matching moments").strong());

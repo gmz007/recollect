@@ -1,5 +1,6 @@
 //! The "When" and "Sort" choices that narrow and order search results.
 
+use super::style;
 use crate::search::SearchSort;
 use chrono::NaiveDate;
 
@@ -62,21 +63,20 @@ impl DateFilter {
         }
     }
 
-    /// Draws the selectors; `years` are the years that have items, newest first. Returns true
-    /// when something changed.
+    /// Draws the "When" chip (and, for a custom range, the "From" and "To" chips); `years` are
+    /// the years that have items, newest first. Returns true when something changed.
     pub fn ui(&mut self, ui: &mut egui::Ui, years: &[i32], this_year: i32) -> bool {
         let before = *self;
-        egui::ComboBox::from_label("When")
-            .selected_text(self.label())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.when, When::Any, "Any time");
-                ui.selectable_value(&mut self.when, When::ThisYear, "This year");
-                ui.selectable_value(&mut self.when, When::LastYear, "Last year");
-                for &y in years {
-                    ui.selectable_value(&mut self.when, When::Year(y), y.to_string());
-                }
-                ui.selectable_value(&mut self.when, When::Custom, "Custom…");
-            });
+        let text = format!("When: {}", self.label());
+        style::chip(ui, &text, &text, |ui| {
+            ui.selectable_value(&mut self.when, When::Any, "Any time");
+            ui.selectable_value(&mut self.when, When::ThisYear, "This year");
+            ui.selectable_value(&mut self.when, When::LastYear, "Last year");
+            for &y in years {
+                ui.selectable_value(&mut self.when, When::Year(y), y.to_string());
+            }
+            ui.selectable_value(&mut self.when, When::Custom, "Custom…");
+        });
         if self.when == When::Custom {
             if before.when != When::Custom {
                 // Start from the most recent year with items.
@@ -93,39 +93,43 @@ impl DateFilter {
                     .min(self.from),
                 years.iter().copied().max().unwrap_or(self.to).max(self.to),
             );
-            for (label, value) in [("From", &mut self.from), ("To", &mut self.to)] {
-                egui::ComboBox::from_label(label)
-                    .selected_text(value.to_string())
-                    .show_ui(ui, |ui| {
-                        for y in (lo..=hi).rev() {
-                            ui.selectable_value(value, y, y.to_string());
-                        }
-                    });
+            // Right-to-left layouts add the last chip first.
+            let rtl = ui.layout().prefer_right_to_left();
+            let mut chips = [("To", &mut self.to), ("From", &mut self.from)];
+            if !rtl {
+                chips.reverse();
+            }
+            for (label, value) in chips {
+                let text = format!("{label}: {value}");
+                style::chip(ui, &text, &text, |ui| {
+                    for y in (lo..=hi).rev() {
+                        ui.selectable_value(value, y, y.to_string());
+                    }
+                });
             }
         }
         *self != before
     }
 }
 
-/// Draws the "Sort" selector; returns true when it changed.
+/// Draws the "Sort" chip; returns true when it changed.
 pub fn sort_ui(ui: &mut egui::Ui, sort: &mut SearchSort) -> bool {
     let before = *sort;
     let name = |s: SearchSort| match s {
-        SearchSort::Relevance => "Relevance",
+        SearchSort::Relevance => "Best match",
         SearchSort::Newest => "Newest",
         SearchSort::Oldest => "Oldest",
     };
-    egui::ComboBox::from_label("Sort")
-        .selected_text(name(*sort))
-        .show_ui(ui, |ui| {
-            for s in [
-                SearchSort::Relevance,
-                SearchSort::Newest,
-                SearchSort::Oldest,
-            ] {
-                ui.selectable_value(sort, s, name(s));
-            }
-        });
+    let text = format!("Sort: {}", name(*sort));
+    style::chip(ui, &text, &text, |ui| {
+        for s in [
+            SearchSort::Relevance,
+            SearchSort::Newest,
+            SearchSort::Oldest,
+        ] {
+            ui.selectable_value(sort, s, name(s));
+        }
+    });
     *sort != before
 }
 
