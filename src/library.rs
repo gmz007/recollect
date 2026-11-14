@@ -75,7 +75,18 @@ pub struct Status {
     pub activity: Activity,
     pub paused: bool,
     pub last_error: Option<String>,
+    /// Counts every time an error was recorded, so a repeat of the same message is still
+    /// noticed as a new failure.
+    pub error_seq: u64,
     pub last_run: Option<RunSummary>,
+}
+
+impl Status {
+    /// Records a failure (and counts it, see [`Status::error_seq`]).
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.last_error = Some(message.into());
+        self.error_seq += 1;
+    }
 }
 
 /// Pause / cancel signalling shared with worker threads.
@@ -178,6 +189,8 @@ pub struct AlbumWrite {
 pub struct Library {
     paths: Paths,
     settings: RwLock<Settings>,
+    /// Incremented whenever the settings change (a cheap way to notice without copying them).
+    settings_version: AtomicU64,
     model: RwLock<&'static ModelSpec>,
     pub(crate) db: Mutex<Db>,
     pub(crate) index: RwLock<VectorIndex>,
@@ -398,6 +411,7 @@ impl Library {
         let lib = Arc::new(Self {
             paths,
             settings: RwLock::new(settings),
+            settings_version: AtomicU64::new(0),
             model: RwLock::new(spec),
             db: Mutex::new(db),
             index: RwLock::new(index),
@@ -483,6 +497,11 @@ impl Library {
 
     pub fn settings(&self) -> Settings {
         self.settings.read().clone()
+    }
+
+    /// Changes whenever the settings do.
+    pub fn settings_version(&self) -> u64 {
+        self.settings_version.load(Ordering::Acquire)
     }
 
     pub fn model(&self) -> &'static ModelSpec {
@@ -737,7 +756,7 @@ impl Library {
                         let _ = lib.start_indexing();
                     }
                 }
-                Err(e) => lib.update_status(|s| s.last_error = Some(format!("{e:#}"))),
+                Err(e) => lib.update_status(|s| s.set_error(format!("{e:#}"))),
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
@@ -767,9 +786,7 @@ impl Library {
         let lib = Arc::clone(self);
         std::thread::spawn(move || {
             if let Err(e) = lib.remove_folder(folder_id) {
-                lib.update_status(|s| {
-                    s.last_error = Some(format!("Removing the folder failed: {e:#}"))
-                });
+                lib.update_status(|s| s.set_error(format!("Removing the folder failed: {e:#}")));
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
@@ -781,27 +798,43 @@ impl Library {
         self.index.write().remove_files(ids);
     }
 
-    /// Applies new settings. A model change runs as a background job (it rebuilds the vector
-    /// index); nothing is persisted unless the change is applied.
-    pub fn apply_settings(self: &Arc<Self>, new: Settings) -> Result<()> {
-        let target = new.model.as_deref().unwrap_or(self.model().id);
-        let spec = registry::get(target).ok_or_else(|| anyhow!("unknown model '{target}'"))?;
-        if spec.id == self.model().id {
-            new.save(&self.paths.settings_path())?;
-            *self.settings.write() = new;
-            self.notify();
+    /// Changes only the settings `f` touches and saves them, atomically with respect to other
+    /// callers: a change made meanwhile (say, while a smart-search switch is running) is kept.
+    /// The smart-search choice itself is not changed here; use [`Self::set_model`].
+    pub fn update_settings(&self, f: impl FnOnce(&mut Settings)) -> Result<()> {
+        let mut guard = self.settings.write();
+        let mut new = guard.clone();
+        f(&mut new);
+        new.model = guard.model.clone();
+        if new == *guard {
             return Ok(());
+        }
+        new.save(&self.paths.settings_path())?;
+        *guard = new;
+        self.settings_version.fetch_add(1, Ordering::AcqRel);
+        drop(guard);
+        self.notify();
+        Ok(())
+    }
+
+    /// Makes `id` the smart-search choice. Switching rebuilds the vector index, so it runs as a
+    /// background job; the choice is stored when the switch completes and nothing else in the
+    /// settings is touched.
+    pub fn set_model(self: &Arc<Self>, id: &str) -> Result<()> {
+        let spec = registry::get(id).ok_or_else(|| anyhow!("unknown model '{id}'"))?;
+        if spec.id == self.model().id {
+            return self.store_model(spec);
         }
         let lib = Arc::clone(self);
         self.spawn(move || {
             lib.update_status(|s| s.activity = Activity::SwitchingModel);
-            let res = lib.switch_model(spec, new);
+            let res = lib.switch_model(spec);
             let ok = res.is_ok();
             lib.update_status(|s| {
                 s.activity = Activity::Idle;
                 s.last_run = None;
                 if let Err(e) = res {
-                    s.last_error = Some(format!("Switching models failed: {e:#}"));
+                    s.set_error(format!("Switching models failed: {e:#}"));
                 }
             });
             if ok {
@@ -811,13 +844,28 @@ impl Library {
         })
     }
 
-    fn switch_model(&self, spec: &'static ModelSpec, new: Settings) -> Result<()> {
+    /// Stores `spec` as the model field of the settings, leaving every other field as it is.
+    fn store_model(&self, spec: &'static ModelSpec) -> Result<()> {
+        let mut guard = self.settings.write();
+        if guard.model.as_deref() == Some(spec.id) {
+            return Ok(());
+        }
+        let mut new = guard.clone();
+        new.model = Some(spec.id.to_string());
+        new.save(&self.paths.settings_path())?;
+        *guard = new;
+        self.settings_version.fetch_add(1, Ordering::AcqRel);
+        drop(guard);
+        self.notify();
+        Ok(())
+    }
+
+    fn switch_model(&self, spec: &'static ModelSpec) -> Result<()> {
         // Index and model change together under the db lock (order db → index), so a cache save
         // never sees one of them without the other.
         let db = self.db.lock();
         let index = load_index(&db, spec)?;
-        new.save(&self.paths.settings_path())?;
-        *self.settings.write() = new;
+        self.store_model(spec)?;
         *self.index.write() = index;
         *self.model.write() = spec;
         drop(db);
@@ -850,9 +898,7 @@ impl Library {
                 lib.cancel();
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            lib.update_status(|s| {
-                s.last_error = Some("Model download failed: another job would not stop".into())
-            });
+            lib.update_status(|s| s.set_error("Model download failed: another job would not stop"));
         });
         Ok(())
     }
@@ -880,7 +926,7 @@ impl Library {
                 if let Err(e) = res
                     && !lib.control.is_cancelled()
                 {
-                    s.last_error = Some(format!("Model download failed: {e:#}"));
+                    s.set_error(format!("Model download failed: {e:#}"));
                 }
             });
             if ok && !lib.control.is_cancelled() {
@@ -905,7 +951,7 @@ impl Library {
             s.paused = false;
             match res {
                 Ok(sum) => s.last_run = Some(sum),
-                Err(e) => s.last_error = Some(format!("Indexing failed: {e:#}")),
+                Err(e) => s.set_error(format!("Indexing failed: {e:#}")),
             }
         });
     }
@@ -1183,11 +1229,7 @@ mod tests {
                 .is_empty()
         );
 
-        let new = Settings {
-            model: Some(registry::SIGLIP_B16.id.into()),
-            ..lib.settings()
-        };
-        lib.apply_settings(new).unwrap();
+        lib.set_model(registry::SIGLIP_B16.id).unwrap();
         lib.wait();
         assert_eq!(lib.status().last_error, None);
         assert_eq!(lib.model().id, registry::SIGLIP_B16.id);
@@ -1198,6 +1240,59 @@ mod tests {
         let err = lib.similar(item, &SearchOptions::default()).unwrap_err();
         assert!(err.to_string().contains("another model"), "{err}");
         assert!(search::by_vector(&lib, &[0.0; 512], &SearchOptions::default(), None).is_err());
+    }
+
+    #[test]
+    fn a_settings_change_during_a_model_switch_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        {
+            // The switch job waits for the database while the user changes the theme.
+            let _db = lib.db.lock();
+            lib.set_model(registry::SIGLIP_B16.id).unwrap();
+            lib.update_settings(|s| {
+                s.theme = crate::config::Theme::Dark;
+                s.use_gpu = false;
+            })
+            .unwrap();
+        }
+        lib.wait();
+        assert_eq!(lib.status().last_error, None);
+        assert_eq!(lib.model().id, registry::SIGLIP_B16.id);
+        let saved = Settings::load(&lib.paths().settings_path()).unwrap();
+        assert_eq!(saved.model.as_deref(), Some(registry::SIGLIP_B16.id));
+        assert_eq!(saved.theme, crate::config::Theme::Dark);
+        assert!(!saved.use_gpu);
+        assert_eq!(lib.settings(), saved);
+    }
+
+    #[test]
+    fn update_settings_leaves_the_model_choice_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        let before = lib.settings().model;
+        lib.update_settings(|s| {
+            s.model = Some("something-else".into());
+            s.search_prompt_dismissed = true;
+        })
+        .unwrap();
+        assert_eq!(lib.settings().model, before);
+        assert!(lib.settings().search_prompt_dismissed);
+        let saved = Settings::load(&lib.paths().settings_path()).unwrap();
+        assert!(saved.search_prompt_dismissed);
+    }
+
+    #[test]
+    fn every_recorded_error_is_counted_even_when_the_text_repeats() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        assert_eq!(lib.status().error_seq, 0);
+        lib.update_status(|s| s.set_error("disk full"));
+        let first = lib.status().error_seq;
+        lib.update_status(|s| s.set_error("disk full"));
+        let st = lib.status();
+        assert_eq!(st.last_error.as_deref(), Some("disk full"));
+        assert_eq!(st.error_seq, first + 1);
     }
 
     #[test]

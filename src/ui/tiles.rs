@@ -29,7 +29,10 @@ pub(super) struct Tile<'a> {
     pub picking: bool,
     /// Whether assistive technology should hear "selected".
     pub selected: bool,
-    pub tip: String,
+    /// Whether the tile has a selection circle (a tile that only opens has none).
+    pub selectable: bool,
+    /// The hover text, built only when the tile is hovered.
+    pub tip: &'a dyn Fn() -> String,
 }
 
 /// What the user did to a tile this frame.
@@ -126,16 +129,26 @@ pub(super) fn show(
     let circle_zone = Rect::from_min_size(rect.min, Vec2::splat(ZONE));
     let star_zone =
         Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - ZONE), Vec2::splat(ZONE));
-    let circle = ui.interact(circle_zone, id.with("select"), Sense::click());
+    let circle = ui.interact(
+        circle_zone,
+        id.with("select"),
+        if tile.selectable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
     let star = ui.interact(star_zone, id.with("favorite"), Sense::click());
     let select_label = if tile.checked {
         format!("Deselect {}", tile.name)
     } else {
         format!("Select {}", tile.name)
     };
-    circle.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::CheckBox, true, tile.checked, &select_label)
-    });
+    if tile.selectable {
+        circle.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::CheckBox, true, tile.checked, &select_label)
+        });
+    }
     let star_label = if tile.favorite {
         format!("Remove {} from favorites", tile.name)
     } else {
@@ -161,14 +174,17 @@ pub(super) fn show(
     } else if resp.clicked() {
         event = Some((TileEvent::Click, ClickMods::of_click(ui.ctx())));
     }
-    let hand = hovered && (circle.hovered() || star.hovered() || resp.hovered());
+    let hand =
+        hovered && ((tile.selectable && circle.hovered()) || star.hovered() || resp.hovered());
     if hand {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let resp = if circle.hovered() || star.hovered() {
+    let resp = if (tile.selectable && circle.hovered()) || star.hovered() {
         resp
     } else {
-        resp.on_hover_text(tile.tip.clone())
+        resp.on_hover_ui(|ui| {
+            ui.label((tile.tip)());
+        })
     };
     TileOut { resp, event }
 }
@@ -191,18 +207,36 @@ fn paint(
         painter.add(shape);
     } else {
         painter.rect_filled(rect, radius, pal.surface);
-        if failed && rect.width() > 110.0 {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Preview unavailable",
-                egui::TextStyle::Small.resolve(ui.style()),
+        if failed {
+            // A picture that is not there: the icon alone on small tiles, with a line of
+            // text on larger ones.
+            let wide = rect.width() > 110.0;
+            let size = (rect.width() * 0.3).clamp(14.0, 32.0);
+            let centre = if wide {
+                rect.center() - Vec2::new(0.0, 10.0)
+            } else {
+                rect.center()
+            };
+            paint_icon(
+                &painter,
+                centre,
+                icons::ICON_BROKEN_IMAGE,
+                size,
                 pal.text_secondary,
             );
+            if wide {
+                painter.text(
+                    rect.center() + Vec2::new(0.0, size / 2.0 + 2.0),
+                    egui::Align2::CENTER_CENTER,
+                    "Preview unavailable",
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    pal.text_secondary,
+                );
+            }
         }
     }
 
-    let show_controls = (hovered || tile.picking || tile.checked) && !small;
+    let show_controls = tile.selectable && (hovered || tile.picking || tile.checked) && !small;
     if hovered {
         // Soft shades at the top and bottom keep the circle, the star and the time readable
         // on bright photos, without a visible edge.

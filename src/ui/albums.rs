@@ -138,15 +138,43 @@ pub(super) fn album_menu(ui: &mut egui::Ui, albums: &[AlbumInfo]) -> Option<Albu
     choice
 }
 
-/// The same menu behind an icon-only button (for toolbars).
-pub(super) fn album_menu_icon(ui: &mut egui::Ui, albums: &[AlbumInfo]) -> Option<AlbumChoice> {
+/// The same menu behind a toolbar button: an icon, with `text` next to it when there is room.
+pub(super) fn album_menu_icon(
+    ui: &mut egui::Ui,
+    albums: &[AlbumInfo],
+    text: Option<&str>,
+) -> Option<AlbumChoice> {
     let mut choice = None;
     let r = ui.scope(|ui| {
         // Like the other toolbar icons: no box until hovered.
         let w = &mut ui.visuals_mut().widgets.inactive;
         w.weak_bg_fill = egui::Color32::TRANSPARENT;
         w.bg_stroke = egui::Stroke::NONE;
-        ui.menu_button(style::icon_text(icons::ICON_PLAYLIST_ADD, 22.0), |ui| {
+        let mut job = egui::text::LayoutJob::default();
+        let color = ui.visuals().widgets.inactive.fg_stroke.color;
+        job.append(
+            icons::ICON_PLAYLIST_ADD.codepoint,
+            0.0,
+            egui::TextFormat {
+                font_id: style::icon_font_id(icons::ICON_PLAYLIST_ADD, 22.0),
+                color,
+                valign: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+        if let Some(text) = text {
+            job.append(
+                text,
+                6.0,
+                egui::TextFormat {
+                    font_id: egui::TextStyle::Button.resolve(ui.style()),
+                    color,
+                    valign: egui::Align::Center,
+                    ..Default::default()
+                },
+            );
+        }
+        ui.menu_button(job, |ui| {
             album_menu_items(ui, albums, &mut choice);
         })
     });
@@ -632,7 +660,12 @@ impl App {
         } else {
             self.tl.sel.len()
         };
-        if count == 0 || !self.picking {
+        let picking = if searching {
+            self.result_picking
+        } else {
+            self.picking
+        };
+        if count == 0 || !picking {
             return false;
         }
         let in_album = !searching && matches!(self.tl.view, View::Album(_));
@@ -691,6 +724,7 @@ impl App {
     /// Drops the selection of whatever grid is shown.
     pub(super) fn clear_selection(&mut self) {
         self.picking = false;
+        self.result_picking = false;
         self.selected = None;
         self.result_sel.clear();
         self.tl.selected = None;

@@ -3,14 +3,13 @@
 //! smart-search choice asks first, because it makes Recollect look at every photo again.
 
 use super::albums::modal_window;
-use super::sidebar::{mb, nav_row};
+use super::sidebar::nav_row;
 use super::style::{self, Palette, icons};
 use super::timeline::thousands;
 use super::{App, folder_labels, platform, prune_thumbnails};
 use crate::config::{Settings, TextSize, Theme};
 use crate::library::Activity;
-use crate::model::download;
-use crate::model::registry::{self, ModelSpec};
+use crate::model::registry::{self, ModelSpec, megabytes};
 use crate::store::db::Stats;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
@@ -87,8 +86,8 @@ pub(super) fn smart_search_status(
     match activity {
         Activity::Downloading { done, total, .. } => format!(
             "Downloading… {} of {} MB",
-            thousands(mb(*done)),
-            thousands(mb(*total))
+            thousands(megabytes(*done) as usize),
+            thousands(megabytes(*total) as usize)
         ),
         Activity::Idle if installed => format!("On — {}", quality_name(spec).to_lowercase()),
         Activity::Idle => "Off".to_string(),
@@ -344,17 +343,18 @@ impl App {
         self.settings_open = true;
     }
 
-    /// Changes one or more settings and saves them at once.
-    fn change_settings(&mut self, f: impl FnOnce(&mut Settings)) {
-        let before = self.lib.settings();
-        let mut s = before.clone();
-        f(&mut s);
-        if s == before {
-            return;
+    /// Changes the settings `f` touches (and only those) and saves them at once.
+    pub(super) fn change_settings(&mut self, f: impl FnOnce(&mut Settings)) {
+        match self.lib.update_settings(f) {
+            Ok(()) => self.settings = self.lib.settings(),
+            Err(e) => self.notify_error(format!("Couldn't save your settings. {e:#}")),
         }
-        if let Err(e) = self.lib.apply_settings(s) {
-            self.notify_error(format!("Couldn't save your settings. {e:#}"));
-        }
+    }
+
+    /// Remembers that the user did (or no longer does) not want the smart-search invitation
+    /// above the photos.
+    pub(super) fn set_search_prompt_dismissed(&mut self, dismissed: bool) {
+        self.change_settings(|s| s.search_prompt_dismissed = dismissed);
     }
 
     /// The sheet itself. Closed by its × button, by Esc and by a click outside it.
@@ -439,11 +439,16 @@ impl App {
                                     );
                                 });
                                 ui.add_space(6.0);
+                                // A scrollbar that takes its own room: the content never runs
+                                // under it.
+                                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                                 egui::ScrollArea::vertical()
                                     .id_salt(("settings-scroll", self.settings_section as u8))
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         ui.add_space(2.0);
+                                        // Breathing room between the content and the bar.
+                                        ui.set_max_width(ui.available_width() - 8.0);
                                         match self.settings_section {
                                             Section::Appearance => self.settings_appearance(ui),
                                             Section::SmartSearch => self.settings_smart_search(ui),
@@ -451,7 +456,7 @@ impl App {
                                             Section::Storage => self.settings_storage(ui),
                                             Section::About => self.settings_about(ui),
                                         }
-                                        ui.add_space(8.0);
+                                        ui.add_space(24.0);
                                     });
                             });
                         });
@@ -464,7 +469,7 @@ impl App {
     }
 
     fn settings_appearance(&mut self, ui: &mut egui::Ui) {
-        let s = self.lib.settings();
+        let s = self.settings.clone();
         heading(ui, "Colors");
         if let Some(t) = segmented(
             ui,
@@ -527,7 +532,7 @@ impl App {
         );
         heading(ui, "Choose one");
         for m in registry::MODELS {
-            let here = download::is_installed(&self.lib.paths().models_dir(), m);
+            let here = self.snapshot.installed_models.contains(&m.id);
             let note = if here { "Already on this computer" } else { "" };
             if choice_card(
                 ui,
@@ -560,7 +565,7 @@ impl App {
             );
         }
         ui.add_space(10.0);
-        let mut gpu = self.lib.settings().use_gpu;
+        let mut gpu = self.settings.use_gpu;
         if ui
             .checkbox(&mut gpu, "Use the graphics card when available")
             .changed()
@@ -603,7 +608,19 @@ impl App {
                         ui.label(
                             style::icon_text(icons::ICON_FOLDER, 22.0).color(pal.text_secondary),
                         );
-                        let text_w = (ui.available_width() - 160.0).max(80.0);
+                        let stop_label =
+                            format!("Stop showing “{}”…", super::albums::short_name(&name, 24));
+                        let button_w = ui
+                            .painter()
+                            .layout_no_wrap(
+                                stop_label.clone(),
+                                egui::TextStyle::Button.resolve(ui.style()),
+                                pal.text,
+                            )
+                            .size()
+                            .x
+                            + 40.0;
+                        let text_w = (ui.available_width() - button_w - 16.0).max(80.0);
                         ui.vertical(|ui| {
                             ui.set_max_width(text_w);
                             ui.spacing_mut().item_spacing.y = 0.0;
@@ -616,15 +633,7 @@ impl App {
                             );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let r = ui.button("Stop showing…");
-                            r.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::Role::Button,
-                                    true,
-                                    format!("Stop showing {name}…"),
-                                )
-                            });
-                            if r.clicked() {
+                            if ui.button(&stop_label).clicked() {
                                 self.stop_folder = Some(super::sidebar::StopFolder {
                                     id,
                                     name: name.clone(),
@@ -638,7 +647,7 @@ impl App {
         ui.add_space(4.0);
         if style::icon_label_button(ui, icons::ICON_CREATE_NEW_FOLDER, "Add a folder…").clicked()
         {
-            self.add_folder_dialog = Some(super::sidebar::AddFolder::default());
+            self.open_add_folder();
         }
 
         heading(ui, "Your library");
@@ -669,27 +678,8 @@ impl App {
                 .inner_margin(Margin::same(10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    egui::ScrollArea::vertical()
-                        .id_salt("settings-failed")
-                        .max_height(140.0)
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            for (p, e) in &self.snapshot.errors {
-                                let name = p
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                ui.add(egui::Label::new(RichText::new(name).small()).truncate())
-                                    .on_hover_text(format!("{}\n{e}", p.display()));
-                            }
-                        });
+                    self.failed_files_list(ui, "settings-failed", 140.0);
                 });
-            if ui
-                .add_enabled(!busy, egui::Button::new("Try again"))
-                .clicked()
-            {
-                self.retry_failed();
-            }
         }
         ui.add_space(8.0);
         ui.add_enabled_ui(!busy && !self.snapshot.folders.is_empty(), |ui| {
@@ -706,7 +696,7 @@ impl App {
         egui::CollapsingHeader::new("Advanced")
             .id_salt("settings-advanced")
             .show(ui, |ui| {
-                let s = self.lib.settings();
+                let s = self.settings.clone();
                 let max = std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(4) as u64;
@@ -745,7 +735,7 @@ impl App {
              room as you like.",
         );
         ui.add_space(6.0);
-        let current = self.lib.settings().thumb_cache_mb;
+        let current = self.settings.thumb_cache_mb;
         if let Some(mb) = committed_slider(
             ui,
             "Space for previews",
@@ -842,7 +832,7 @@ impl App {
         heading(ui, "Free and open source");
         ui.label(
             "Recollect is free software. You can read how it works, and how to build it, in \
-             the README of the project.",
+             the project's documentation.",
         );
         ui.add_space(8.0);
         egui::CollapsingHeader::new("Open-source licenses")
@@ -869,7 +859,7 @@ impl App {
             self.model_confirm = None;
             return;
         };
-        let here = download::is_installed(&self.lib.paths().models_dir(), spec);
+        let here = self.snapshot.installed_models.contains(&spec.id);
         let (mut switch, mut cancel) = (false, false);
         modal_window(ctx, &format!("Switch to {}?", quality_name(spec)), |ui| {
             ui.set_max_width(420.0);
@@ -906,15 +896,11 @@ impl App {
             );
             return;
         }
-        let new = Settings {
-            model: Some(spec.id.to_string()),
-            ..self.lib.settings()
-        };
-        match self.lib.apply_settings(new) {
+        match self.lib.set_model(spec.id) {
             Err(e) => self.notify_error(format!("Couldn't save your settings. {e:#}")),
             Ok(()) => {
                 // Old results and queries belong to the previous choice.
-                self.consent_dismissed = false;
+                self.set_search_prompt_dismissed(false);
                 self.results = Arc::default();
                 self.end_viewer();
                 self.current = None;

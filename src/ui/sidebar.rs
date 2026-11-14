@@ -7,6 +7,7 @@ use super::style::{self, Palette, icons};
 use super::timeline::{View, thousands};
 use super::{App, folder_labels};
 use crate::library::Activity;
+use crate::model::registry::megabytes;
 use egui::{CornerRadius, Margin, Pos2, Rect, Response, RichText, Sense, Vec2};
 use egui_material_icons::MaterialIcon;
 use std::path::PathBuf;
@@ -15,6 +16,9 @@ use std::path::PathBuf;
 #[derive(Debug, Default)]
 pub(super) struct AddFolder {
     typed: String,
+    /// Standard folders that are not in the library yet, worked out once when the dialog opens
+    /// (looking them up touches the disk).
+    suggestions: Vec<(String, PathBuf)>,
 }
 
 /// A folder waiting for the user to confirm that it stops being shown.
@@ -64,8 +68,8 @@ pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
         Activity::Downloading { done, total, .. } => (
             format!(
                 "Downloading smart search… {} of {} MB",
-                thousands(mb(*done)),
-                thousands(mb(*total))
+                thousands(megabytes(*done) as usize),
+                thousands(megabytes(*total) as usize)
             ),
             Some(*done as f32 / (*total).max(1) as f32),
         ),
@@ -91,11 +95,6 @@ pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
             )
         }
     })
-}
-
-/// Bytes as whole megabytes (1 MB = 1,000,000 bytes), rounded to the nearest.
-pub(super) fn mb(bytes: u64) -> usize {
-    (bytes.div_ceil(500_000) / 2) as usize
 }
 
 /// A full-width sidebar row. Returns the row's rectangle and response.
@@ -194,7 +193,34 @@ pub(super) fn section_header(
     out
 }
 
+impl AddFolder {
+    /// How many suggestions the dialog lists.
+    #[cfg(test)]
+    pub(super) fn suggestion_count(&self) -> usize {
+        self.suggestions.len()
+    }
+}
+
 impl App {
+    /// Opens the "Add a folder" dialog with suggestions from this computer's standard folders.
+    pub(super) fn open_add_folder(&mut self) {
+        self.open_add_folder_with(standard_folders());
+    }
+
+    /// Opens the dialog suggesting those of `candidates` that are not in the library yet.
+    pub(super) fn open_add_folder_with(&mut self, candidates: Vec<(String, PathBuf)>) {
+        let added: Vec<PathBuf> = self
+            .snapshot
+            .folders
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        self.add_folder_dialog = Some(AddFolder {
+            typed: String::new(),
+            suggestions: folder_suggestions(candidates, &added),
+        });
+    }
+
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let frame = egui::Frame::new()
@@ -256,7 +282,7 @@ impl App {
             self.start_indexing();
         }
         if buttons[1].clicked() {
-            self.add_folder_dialog = Some(AddFolder::default());
+            self.open_add_folder();
         }
         if !has_folders {
             ui.label(RichText::new("No folders yet.").weak());
@@ -327,26 +353,32 @@ impl App {
             if failed == 1 { "file" } else { "files" }
         ))
         .id_salt("errors")
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    for (p, e) in &self.snapshot.errors {
-                        let name = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        ui.label(RichText::new(name).small())
-                            .on_hover_text(format!("{}\n{e}", p.display()));
-                    }
-                });
-            if ui
-                .add_enabled(!self.lib.is_busy(), egui::Button::new("Try again"))
-                .clicked()
-            {
-                self.retry_failed();
-            }
-        });
+        .show(ui, |ui| self.failed_files_list(ui, "errors-list", 180.0));
+    }
+
+    /// The names of the files that couldn't be opened (the full path and the reason show on
+    /// hover) and a "Try again" button; shared by the sidebar and Settings.
+    pub(super) fn failed_files_list(&mut self, ui: &mut egui::Ui, id: &str, max_height: f32) {
+        egui::ScrollArea::vertical()
+            .id_salt(id)
+            .max_height(max_height)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for (p, e) in &self.snapshot.errors {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    ui.add(egui::Label::new(RichText::new(name).small()).truncate())
+                        .on_hover_text(format!("{}\n{e}", p.display()));
+                }
+            });
+        if ui
+            .add_enabled(!self.lib.is_busy(), egui::Button::new("Try again"))
+            .clicked()
+        {
+            self.retry_failed();
+        }
     }
 
     /// The card at the bottom: what is happening now, or an invitation to turn smart search on.
@@ -356,7 +388,7 @@ impl App {
         let offer = activity.is_none()
             && !self.snapshot.model_installed
             && !self.snapshot.folders.is_empty()
-            && self.consent_dismissed;
+            && self.settings.search_prompt_dismissed;
         egui::Panel::bottom("sidebar_bottom")
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
@@ -374,7 +406,7 @@ impl App {
                         ui.label(style::semibold("Smart search is off").size(14.0));
                         ui.add_space(4.0);
                         if ui.button("Turn on").clicked() {
-                            self.consent_dismissed = false;
+                            self.set_search_prompt_dismissed(false);
                         }
                     });
                 }
@@ -405,7 +437,7 @@ impl App {
         card.show(ui, |ui| {
             ui.set_width(ui.available_width());
             let shown = if paused && pausable {
-                format!("Paused. {text}")
+                format!("Paused — {text}")
             } else {
                 text.to_string()
             };
@@ -429,19 +461,15 @@ impl App {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 if pausable {
-                    let (icon, label) = if paused {
-                        (icons::ICON_PLAY_ARROW, "Resume")
-                    } else {
-                        (icons::ICON_PAUSE, "Pause")
-                    };
-                    if style::icon_button(ui, icon, label).clicked() {
+                    let label = if paused { "Resume" } else { "Pause" };
+                    if ui.button(label).clicked() {
                         self.lib.pause(!paused);
                     }
                 }
-                if style::icon_button(ui, icons::ICON_CLOSE, "Cancel").clicked() {
+                if ui.button("Stop").clicked() {
                     self.lib.cancel();
                     if downloading {
-                        self.consent_dismissed = true;
+                        self.set_search_prompt_dismissed(true);
                     }
                 }
             });
@@ -465,13 +493,7 @@ impl App {
     /// The "Add a folder" dialog and the "Stop showing" confirmation.
     pub(super) fn folder_dialogs(&mut self, ctx: &egui::Context) {
         if let Some(mut dlg) = self.add_folder_dialog.take() {
-            let added: Vec<PathBuf> = self
-                .snapshot
-                .folders
-                .iter()
-                .map(|f| f.path.clone())
-                .collect();
-            let suggestions = folder_suggestions(standard_folders(), &added);
+            let suggestions = std::mem::take(&mut dlg.suggestions);
             let (mut close, mut bad_path, mut chosen) = (false, false, None::<PathBuf>);
             modal_window(ctx, "Add a folder", |ui| {
                 ui.set_width(420.0);
@@ -541,6 +563,7 @@ impl App {
             if let Some(p) = chosen {
                 self.add_folder(p);
             } else if !close {
+                dlg.suggestions = suggestions;
                 self.add_folder_dialog = Some(dlg);
             }
         }

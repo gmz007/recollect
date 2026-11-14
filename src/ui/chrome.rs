@@ -5,13 +5,15 @@ use super::style::{self, Palette, icons};
 use super::timeline::{Group, View, thousands};
 use super::{App, Notices};
 use crate::media::MediaKind;
-use crate::model::registry;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
 use std::time::Instant;
 
 /// Placeholder of the search field.
 pub(super) const SEARCH_HINT: &str = "Search your photos — try “dog on the beach”";
+/// What assistive technology reads for the search field while smart search is off.
+pub(super) const SEARCH_OFF_LABEL: &str =
+    "Search your photos (smart search is off, press to turn it on)";
 /// Shown in place of the search field while smart search is not on.
 pub(super) const SEARCH_OFF_HINT: &str = "Turn on smart search to find photos by describing them";
 
@@ -143,7 +145,7 @@ impl App {
                 pal.text_secondary,
             );
             resp.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::Button, true, SEARCH_OFF_HINT)
+                egui::WidgetInfo::labeled(egui::Role::Button, true, SEARCH_OFF_LABEL)
             });
             if resp
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -163,7 +165,7 @@ impl App {
                 Stroke::NONE
             })
             .corner_radius(radius)
-            .inner_margin(Margin::symmetric(10, 1));
+            .inner_margin(Margin::symmetric(10, 2));
         let mut cleared = false;
         frame.show(ui, |ui| {
             ui.set_width(width - 20.0);
@@ -176,6 +178,10 @@ impl App {
                         .id(id)
                         .frame(egui::Frame::NONE)
                         .hint_text(SEARCH_HINT)
+                        // Typed text, placeholder and cursor share one vertical centre
+                        // with the search icon.
+                        .align(egui::Align2::LEFT_CENTER)
+                        .min_size(Vec2::new(0.0, 30.0))
                         .desired_width(edit_w),
                 );
                 resp.widget_info(|| {
@@ -298,13 +304,19 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.label(style::icon_text(icons::ICON_IMAGE, 22.0).color(pal.text_secondary));
-                ui.add(
-                    egui::Slider::new(&mut self.tl.tile_size, 96.0..=320.0)
-                        .show_value(false)
-                        .trailing_fill(false),
-                )
-                .on_hover_text("Thumbnail size");
+                style::slider_scope(ui, |ui| {
+                    let r = ui
+                        .add(
+                            egui::Slider::new(&mut self.tl.tile_size, 96.0..=320.0)
+                                .show_value(false)
+                                .trailing_fill(true),
+                        )
+                        .on_hover_text("Thumbnail size");
+                    let v = self.tl.tile_size as f64;
+                    r.widget_info(|| egui::WidgetInfo::slider(true, v, "Thumbnail size"));
+                });
                 ui.label(style::icon_text(icons::ICON_IMAGE, 14.0).color(pal.text_secondary));
+                ui.label(RichText::new("Size").color(pal.text_secondary));
                 ui.add_space(8.0);
                 if self.tl.headers() {
                     let label = if self.tl.newest_first {
@@ -341,12 +353,13 @@ impl App {
     }
 
     /// Header of the search results: what was asked, how many were found, and chips that
-    /// narrow and order them.
+    /// narrow and order them. (The photo/video filter lives in the top bar.)
     pub(super) fn results_header(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let title = match &self.current {
             Some(super::Query::Similar { label, .. }) => format!("Photos similar to {label}"),
-            _ => format!("Results for “{}”", self.result_label),
+            Some(super::Query::Text(q)) => format!("Results for “{q}”"),
+            None => format!("Results for “{}”", self.query.trim()),
         };
         let photos = self
             .results
@@ -380,7 +393,6 @@ impl App {
                     self.clear_search();
                 }
                 changed |= super::when::sort_ui(ui, &mut self.sort);
-                changed |= self.type_chip(ui);
                 changed |= self.date.ui(ui, &self.known_years, year);
             });
         });
@@ -390,28 +402,10 @@ impl App {
         ui.add_space(8.0);
     }
 
-    /// The "Type" chip of the results header. It shares its state with the filter in the top
-    /// bar. Returns true when the choice changed (the caller re-runs the search).
-    fn type_chip(&mut self, ui: &mut egui::Ui) -> bool {
-        let before = self.kind;
-        let name = |k: Option<MediaKind>| match k {
-            None => "Everything",
-            Some(MediaKind::Image) => "Photos",
-            Some(MediaKind::Video) => "Videos",
-        };
-        let text = format!("Type: {}", name(before));
-        style::chip(ui, &text, &text, |ui| {
-            for k in [None, Some(MediaKind::Image), Some(MediaKind::Video)] {
-                ui.selectable_value(&mut self.kind, k, name(k));
-            }
-        });
-        before != self.kind
-    }
-
-    /// The card that explains smart search and asks to turn it on, shown above the grid until
-    /// the user decides.
+    /// One line above the grid that offers smart search until the user decides. "Not now" is
+    /// remembered; after that only the small card in the sidebar offers it.
     pub(super) fn search_banner(&mut self, ui: &mut egui::Ui) {
-        if self.consent_dismissed
+        if self.settings.search_prompt_dismissed
             || self.snapshot.model_installed
             || matches!(
                 self.status.activity,
@@ -422,46 +416,41 @@ impl App {
         }
         let pal = Palette::of(ui.ctx());
         let spec = self.lib.model();
-        let quality = if spec.id == registry::SIGLIP_B16.id {
-            " (best quality)"
-        } else {
-            " (faster, a little less accurate)"
-        };
-        style::card(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(style::icon_text(icons::ICON_AUTO_AWESOME, 24.0).color(pal.accent));
-                ui.label(style::semibold("Turn on smart search").size(18.0));
-            });
-            ui.add_space(4.0);
-            ui.label(format!(
-                "Recollect can find photos when you describe them, like “birthday cake”. \
-                 This needs a one-time download of {} MB{quality} and works offline afterwards. \
-                 Your photos never leave this computer.",
-                spec.size_mb()
-            ));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let on = egui::Button::new(RichText::new("Turn on").color(pal.on_accent))
-                    .fill(pal.accent);
-                if ui.add(on).clicked() {
-                    self.turn_on_search();
-                }
-                if ui.button("Not now").clicked() {
-                    self.consent_dismissed = true;
-                }
-            });
-            egui::CollapsingHeader::new("Details")
-                .id_salt("banner-details")
-                .show(ui, |ui| {
-                    ui.label(format!("{}, {} licence", spec.name, spec.license));
-                    ui.label(format!("Downloaded once from huggingface.co/{}", spec.repo));
-                    if ui.button("Choose another…").clicked() {
-                        self.open_settings_at(super::settings::Section::SmartSearch);
-                    }
+        let (mut turn_on, mut not_now, mut learn_more) = (false, false, false);
+        egui::Frame::new()
+            .fill(pal.surface)
+            .stroke(Stroke::new(1.0, pal.border))
+            .corner_radius(CornerRadius::same(style::CARD_RADIUS))
+            .inner_margin(Margin::symmetric(14, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(style::icon_text(icons::ICON_AUTO_AWESOME, 20.0).color(pal.accent));
+                    ui.label(SEARCH_OFF_HINT);
+                    let on = egui::Button::new(RichText::new("Turn on").color(pal.on_accent))
+                        .fill(pal.accent);
+                    turn_on = ui
+                        .add(on)
+                        .on_hover_text(format!(
+                            "A one-time download of {} MB. Search then works offline, and \
+                             your photos never leave this computer.",
+                            spec.size_mb()
+                        ))
+                        .clicked();
+                    not_now = ui.button("Not now").clicked();
+                    learn_more = ui.link("Learn more").clicked();
                 });
-        });
-        ui.add_space(12.0);
+            });
+        if turn_on {
+            self.turn_on_search();
+        }
+        if not_now {
+            self.set_search_prompt_dismissed(true);
+        }
+        if learn_more {
+            self.open_settings_at(super::settings::Section::SmartSearch);
+        }
+        ui.add_space(10.0);
     }
 
     /// Starts the one-time download of smart search.
@@ -538,16 +527,14 @@ impl App {
                             };
                             ui.label(style::icon_text(icon, 22.0).color(color));
                             ui.label(&text);
-                            if error
-                                && style::icon_button(ui, icons::ICON_CLOSE, "Dismiss").clicked()
-                            {
+                            if style::icon_button(ui, icons::ICON_CLOSE, "Dismiss").clicked() {
                                 dismiss = true;
                             }
                         });
                     });
             });
         if dismiss {
-            self.notices.dismiss_errors();
+            self.notices.dismiss_current();
         }
     }
 }
@@ -577,9 +564,13 @@ impl Notices {
         self.items.iter().any(|n| n.error)
     }
 
-    /// Takes the error away (the toast's close button).
-    pub(super) fn dismiss_errors(&mut self) {
-        self.items.retain(|n| !n.error);
+    /// Takes the message that [`Notices::current`] shows away (the toast's close button).
+    pub(super) fn dismiss_current(&mut self) {
+        if self.items.iter().any(|n| n.error) {
+            self.items.retain(|n| !n.error);
+        } else {
+            self.items.pop();
+        }
     }
 }
 

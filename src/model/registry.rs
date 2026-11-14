@@ -132,6 +132,11 @@ pub fn get(id: &str) -> Option<&'static ModelSpec> {
     MODELS.iter().find(|m| m.id == id)
 }
 
+/// Bytes as whole megabytes (1 MB = 1,000,000 bytes), rounded to the nearest.
+pub fn megabytes(bytes: u64) -> u64 {
+    bytes.div_ceil(500_000) / 2
+}
+
 impl ModelSpec {
     pub fn total_size(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
@@ -139,7 +144,7 @@ impl ModelSpec {
 
     /// The download size in whole megabytes (1 MB = 1,000,000 bytes), rounded to the nearest.
     pub fn size_mb(&self) -> u64 {
-        self.total_size().div_ceil(500_000) / 2
+        megabytes(self.total_size())
     }
 
     pub fn url(&self, file: &ModelFile) -> String {

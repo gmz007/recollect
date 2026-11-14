@@ -113,6 +113,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Normal or large text.
     pub text_size: TextSize,
+    /// The user chose "Not now" on the invitation to turn on smart search.
+    pub search_prompt_dismissed: bool,
 }
 
 impl Default for Settings {
@@ -124,6 +126,7 @@ impl Default for Settings {
             thumb_cache_mb: 1024,
             theme: Theme::System,
             text_size: TextSize::Normal,
+            search_prompt_dismissed: false,
         }
     }
 }
@@ -175,6 +178,7 @@ mod tests {
             thumb_cache_mb: 10,
             theme: Theme::Dark,
             text_size: TextSize::Large,
+            search_prompt_dismissed: true,
         };
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap(), s);

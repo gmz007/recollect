@@ -349,13 +349,21 @@ fn fmt_taken(item: &TimelineItem) -> String {
     fmt_taken_at(item.taken_at, Some(item.date_source))
 }
 
-/// "Saturday 4 July 2019, 12:30", with "(file date)" appended when the time is only the file's.
-pub fn fmt_taken_at(taken_at: i64, source: Option<DateSource>) -> String {
-    let t = chrono::DateTime::from_timestamp(taken_at, 0)
+/// "Saturday 4 July 2019, 12:30".
+pub fn fmt_date(taken_at: i64) -> String {
+    chrono::DateTime::from_timestamp(taken_at, 0)
         .map(|d| d.naive_utc().format("%A %-d %B %Y, %H:%M").to_string())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// What to call a date that is only the file's own time rather than when the photo was taken.
+pub const DATE_FROM_FILE: &str = "Date from the file";
+
+/// [`fmt_date`] with "Date from the file" added when the time is only the file's.
+pub fn fmt_taken_at(taken_at: i64, source: Option<DateSource>) -> String {
+    let t = fmt_date(taken_at);
     if source == Some(DateSource::File) {
-        format!("{t} (file date)")
+        format!("{t} · {DATE_FROM_FILE}")
     } else {
         t
     }
@@ -827,6 +835,8 @@ impl App {
         self.result_error = None;
         self.selected = None;
         self.selected_t = None;
+        self.result_sel.clear();
+        self.result_picking = false;
     }
 
     pub(super) fn set_view(&mut self, view: View) {
@@ -1101,8 +1111,9 @@ impl App {
                                 checked,
                                 focused: tl.selected == Some(i) && !checked,
                                 picking,
+                                selectable: true,
                                 selected: in_sel || tl.selected == Some(i),
-                                tip: format!("{name}\n{}", fmt_taken(item)),
+                                tip: &|| format!("{name}\n{}", fmt_taken(item)),
                             };
                             let id = ui.make_persistent_id(("tile", i));
                             let o = tiles::show(ui, thumbs, id, rect, &tile);
@@ -1233,8 +1244,9 @@ impl App {
                                 checked: false,
                                 focused: false,
                                 picking: false,
+                                selectable: false,
                                 selected: false,
-                                tip: format!("{name}\n{}", fmt_taken(item)),
+                                tip: &|| format!("{name}\n{}", fmt_taken(item)),
                             };
                             let id = ui.make_persistent_id(("otd", pos));
                             let o = tiles::show(ui, &mut self.thumbs, id, rect, &tile);

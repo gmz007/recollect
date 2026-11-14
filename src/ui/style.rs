@@ -59,9 +59,11 @@ impl Palette {
     pub fn light() -> Self {
         Self {
             dark: false,
-            background: Color32::from_rgb(0xF7, 0xF7, 0xF9),
-            surface: Color32::WHITE,
-            raised: Color32::from_rgb(0xEF, 0xEF, 0xF3),
+            // The content area is the lightest; the sidebar and top bar sit a step darker so
+            // they read as separate surfaces.
+            background: Color32::WHITE,
+            surface: Color32::from_rgb(0xF3, 0xF3, 0xF7),
+            raised: Color32::from_rgb(0xE7, 0xE7, 0xED),
             text: Color32::from_rgb(0x18, 0x18, 0x1B),
             text_secondary: Color32::from_rgb(0x52, 0x52, 0x5B),
             accent: Color32::from_rgb(0x3B, 0x5B, 0xDB),
@@ -219,6 +221,7 @@ fn apply_text_styles(style: &mut egui::Style) {
     s.menu_margin = Margin::same(8);
     s.window_margin = Margin::same(16);
     s.slider_width = 120.0;
+    s.slider_rail_height = 6.0;
     s.indent = 16.0;
     style.interaction.tooltip_delay = 0.35;
 }
@@ -245,6 +248,8 @@ pub fn apply(ctx: &egui::Context, theme: Theme, text_size: TextSize) -> bool {
         ctx.set_visuals_of(egui::Theme::Dark, Palette::dark().visuals());
         ctx.set_visuals_of(egui::Theme::Light, Palette::light().visuals());
         ctx.all_styles_mut(apply_text_styles);
+        // Ctrl +/- would change the zoom behind the Text size setting's back.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
     }
     ctx.set_theme(match theme {
         Theme::System => egui::ThemePreference::System,
@@ -391,28 +396,71 @@ pub fn chip<R>(
 
 /// A frameless icon button for toolbars: tooltip `tooltip`, named `label` for assistive
 /// technology, drawn in `color` (default: the normal text colour) and highlighted when
-/// `selected`.
-pub fn toolbar_icon(
+/// `selected`. With `text` the short word is shown next to the icon.
+pub fn toolbar_button(
     ui: &mut egui::Ui,
     icon: MaterialIcon,
+    text: Option<&str>,
     label: &str,
     tooltip: &str,
     color: Option<Color32>,
     selected: bool,
 ) -> Response {
-    let mut text = icon_text(icon, 22.0);
-    if let Some(c) = color {
-        text = text.color(c);
+    let color = color.unwrap_or(ui.visuals().widgets.inactive.fg_stroke.color);
+    let b = match text {
+        None => egui::Button::new(icon_text(icon, 22.0).color(color)),
+        Some(text) => {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                icon.codepoint,
+                0.0,
+                egui::TextFormat {
+                    font_id: icon_font_id(icon, 22.0),
+                    color,
+                    valign: egui::Align::Center,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                text,
+                6.0,
+                egui::TextFormat {
+                    font_id: TextStyle::Button.resolve(ui.style()),
+                    color: ui.visuals().widgets.inactive.fg_stroke.color,
+                    valign: egui::Align::Center,
+                    ..Default::default()
+                },
+            );
+            egui::Button::new(job)
+        }
     }
-    let b = egui::Button::new(text)
-        .frame(selected)
-        .selected(selected)
-        .min_size(Vec2::splat(34.0));
+    .frame(selected)
+    .selected(selected)
+    .min_size(Vec2::new(34.0, 34.0));
     let r = ui.add(b).on_hover_text(tooltip);
     r.widget_info(|| {
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Runs `add_contents` with colours that make a slider's rail and handle easy to see on both
+/// themes (the default rail is the same shade as the surface behind it).
+pub fn slider_scope<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let pal = Palette::of(ui.ctx());
+    ui.scope(|ui| {
+        let rail = pal.text_secondary.gamma_multiply(0.55);
+        let visuals = ui.visuals_mut();
+        visuals.widgets.inactive.bg_fill = rail;
+        visuals.widgets.hovered.bg_fill = rail;
+        visuals.widgets.active.bg_fill = rail;
+        visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, pal.text);
+        visuals.widgets.hovered.fg_stroke = Stroke::new(2.5, pal.accent);
+        visuals.widgets.active.fg_stroke = Stroke::new(2.5, pal.accent);
+        visuals.selection.bg_fill = pal.accent;
+        add_contents(ui)
+    })
+    .inner
 }
 
 /// A rounded card frame on the surface colour.
@@ -434,7 +482,10 @@ mod tests {
         assert_eq!(d.background, Color32::from_rgb(0x12, 0x12, 0x14));
         assert_eq!(d.accent, Color32::from_rgb(0x7C, 0x95, 0xFF));
         let l = Palette::light();
-        assert_eq!(l.surface, Color32::WHITE);
+        assert_ne!(
+            l.surface, l.background,
+            "the sidebar stands out from the content"
+        );
         assert_eq!(l.accent, Color32::from_rgb(0x3B, 0x5B, 0xDB));
     }
 }

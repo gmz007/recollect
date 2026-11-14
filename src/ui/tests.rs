@@ -37,37 +37,65 @@ fn harness(lib: Arc<Library>) -> Harness<'static> {
 }
 
 #[test]
-fn smart_search_is_explained_and_asked_for_before_downloading() {
-    let d = tempfile::tempdir().unwrap();
-    let app = album_app(d.path(), false);
-    let h = album_harness(&app);
-    h.get_by_label("Turn on smart search");
-    h.get_by_label_contains("Recollect can find photos when you describe them");
-    h.get_by_label_contains("one-time download of");
-    h.get_by_label_contains("Your photos never leave this computer");
-    h.get_by_label("Turn on");
-    h.get_by_label("Not now");
-    // The technical details stay folded away until asked for.
-    h.get_by_label("Details");
-    assert!(h.query_by_label_contains("huggingface").is_none());
-    // The search field says what is missing instead of accepting text.
-    h.get_by_label("Turn on smart search to find photos by describing them");
-}
-
-#[test]
-fn declining_the_download_leaves_a_small_invitation() {
+fn smart_search_is_offered_in_one_line_before_downloading() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), false);
     let mut h = album_harness(&app);
+    // One line: the offer, "Turn on", "Not now" and "Learn more".
+    h.get_by_label("Turn on smart search to find photos by describing them");
+    let on = h.get_by_label("Turn on").rect();
+    let not_now = h.get_by_label("Not now").rect();
+    let more = h.get_by_label("Learn more").rect();
+    assert!(on.max.x <= not_now.min.x && not_now.max.x <= more.min.x);
+    assert!((on.center().y - more.center().y).abs() < 4.0, "on one line");
+    // The long explanation is gone (the size and privacy note is a tooltip).
+    assert!(h.query_by_label_contains("one-time download of").is_none());
+    assert!(h.query_by_label("Details").is_none());
+    // "Learn more" opens Settings on Smart search.
+    h.get_by_label("Learn more").click();
+    h.run_steps(3);
+    assert!(app.borrow().settings_open);
+    assert_eq!(
+        app.borrow().settings_section,
+        super::settings::Section::SmartSearch
+    );
+    h.get_by_label("Download and turn on (608 MB)");
+}
+
+#[test]
+fn declining_the_download_is_remembered_and_leaves_a_small_invitation() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    let lib = Arc::clone(&app.borrow().lib);
+    assert!(!lib.settings().search_prompt_dismissed);
     h.get_by_label("Not now").click();
-    h.run();
+    h.run_steps(3);
     h.get_by_label("Smart search is off");
-    assert!(h.query_by_label("Turn on smart search").is_none());
-    // "Turn on" brings the explanation back.
+    assert!(h.query_by_label("Not now").is_none(), "the banner is gone");
+    // Saved on disk, so it stays gone after a restart.
+    let saved = crate::config::Settings::load(&lib.paths().settings_path()).unwrap();
+    assert!(saved.search_prompt_dismissed);
+    drop(h);
+    let mut restarted = App::new(&egui::Context::default(), Arc::clone(&lib));
+    restarted.frame_stats = None;
+    restarted.snapshot.folders = vec![crate::store::db::Folder {
+        id: 1,
+        path: "/nowhere".into(),
+    }];
+    restarted.inject_timeline(spread_items());
+    let restarted = Rc::new(RefCell::new(restarted));
+    let h2 = album_harness(&restarted);
+    assert!(h2.query_by_label("Not now").is_none());
+    h2.get_by_label("Smart search is off");
+    drop(h2);
+    // "Turn on" in the sidebar brings the offer back.
+    let mut h = album_harness(&restarted);
     h.get_by_label("Turn on").click();
-    h.run();
-    h.get_by_label("Turn on smart search");
+    h.run_steps(3);
+    h.get_by_label("Not now");
     assert!(h.query_by_label("Smart search is off").is_none());
+    assert!(!lib.settings().search_prompt_dismissed);
 }
 
 #[test]
@@ -75,8 +103,7 @@ fn clicking_the_disabled_search_field_opens_settings() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), false);
     let mut h = album_harness(&app);
-    h.get_by_label("Turn on smart search to find photos by describing them")
-        .click();
+    h.get_by_label(super::chrome::SEARCH_OFF_LABEL).click();
     h.run();
     assert!(app.borrow().settings_open);
     assert_eq!(
@@ -262,7 +289,7 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
         "sidebar and settings"
     );
     h.get_by_label("3 photos · 3 couldn't be opened");
-    h.get_by_label("Stop showing nowhere…");
+    h.get_by_label("Stop showing “nowhere”…");
     h.get_by_label("Add a folder…");
     assert!(
         h.query_by_label("Try again").is_none(),
@@ -283,7 +310,7 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
             .is_empty()
     );
     // Stopping a folder asks the same question as in the sidebar.
-    h.get_by_label("Stop showing nowhere…").click();
+    h.get_by_label("Stop showing “nowhere”…").click();
     h.run_steps(3);
     h.get_by_label("Stop showing “nowhere”?");
     h.get_by_label("Your files stay where they are.");
@@ -358,16 +385,15 @@ fn escape_closes_the_sheet_and_the_topmost_question_first() {
 
 #[test]
 fn the_theme_and_text_size_settings_apply() {
-    use crate::config::{Settings, TextSize, Theme};
+    use crate::config::{TextSize, Theme};
     let d = tempfile::tempdir().unwrap();
     let lib = library(d.path());
     let mut h = harness(Arc::clone(&lib));
     assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
     let set = |theme, text_size| {
-        lib.apply_settings(Settings {
-            theme,
-            text_size,
-            ..lib.settings()
+        lib.update_settings(|s| {
+            s.theme = theme;
+            s.text_size = text_size;
         })
         .unwrap();
     };
@@ -376,7 +402,7 @@ fn the_theme_and_text_size_settings_apply() {
     assert!(!h.ctx.global_style().visuals.dark_mode);
     assert_eq!(
         h.ctx.global_style().visuals.panel_fill,
-        egui::Color32::from_rgb(0xF7, 0xF7, 0xF9)
+        egui::Color32::WHITE
     );
     assert!((h.ctx.zoom_factor() - 1.15).abs() < 1e-6);
     set(Theme::Dark, TextSize::Normal);
@@ -724,7 +750,7 @@ fn banner_shows_while_the_timeline_stays_visible() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), false);
     let h = album_harness(&app);
-    h.get_by_label("Turn on smart search");
+    h.get_by_label("Turn on smart search to find photos by describing them");
     h.get_by_label("Turn on");
     h.get_by_label("Not now");
     h.get_by_label("December 2019 · 1");
@@ -743,7 +769,7 @@ fn clicking_a_tile_opens_the_viewer_with_the_details() {
     h.get_by_label_contains("Sunday 15 December 2019");
     h.get_by_label("Test Camera");
     h.get_by_label("4000×3000");
-    h.get_by_label("Find similar");
+    h.get_by_label("Find similar photos");
     h.get_by_label("Open with default app");
 }
 
@@ -869,18 +895,18 @@ fn clicking_opens_the_viewer_and_the_info_panel_toggles() {
     h.get_by_label("4000×3000");
     h.get_by_label("Open with default app");
     h.get_by_label("Show in folder");
-    h.get_by_label("Find similar");
+    h.get_by_label("Find similar photos");
     h.get_by_label("Favorite");
     // `I` hides the panel (the name moves to the top bar) and shows it again; the buttons stay.
     h.key_press(egui::Key::I);
     h.run_steps(3);
     h.get_by_label("img1.jpg");
-    assert!(h.query_by_label("Find similar").is_none());
+    assert!(h.query_by_label("Find similar photos").is_none());
     h.get_by_label("Open with default app");
     h.get_by_label("Favorite");
     h.key_press(egui::Key::I);
     h.run_steps(3);
-    h.get_by_label("Find similar");
+    h.get_by_label("Find similar photos");
     // Zoom toggles with Z and with the button.
     h.get_by_label("Zoom to 100%");
     h.key_press(egui::Key::Z);
@@ -1055,13 +1081,16 @@ fn favorites_toggle_in_the_viewer() {
 }
 
 #[test]
-fn search_shows_the_when_type_and_sort_chips() {
+fn search_shows_the_when_and_sort_chips_and_the_top_bar_filters_the_type() {
     let d = tempfile::tempdir().unwrap();
     let app = Rc::new(RefCell::new(grid_app_with(d.path(), false)));
     let mut h = album_harness(&app);
     h.get_by_label("When: Any time");
-    h.get_by_label("Type: Everything");
     h.get_by_label("Sort: Best match");
+    // The type filter exists once: the top bar's All / Photos / Videos.
+    assert!(h.query_by_label_contains("Type:").is_none());
+    h.get_by_label("Everything");
+    h.get_by_label("Photos only");
     assert_eq!(app.borrow().date.when, super::when::When::Any);
     h.get_by_label("When: Any time").click();
     h.run_steps(3);
@@ -1069,13 +1098,10 @@ fn search_shows_the_when_type_and_sort_chips() {
     h.run_steps(3);
     assert_eq!(app.borrow().date.when, super::when::When::LastYear);
     h.get_by_label("When: Last year");
-    // The type chip shares its state with the filter in the top bar.
-    h.get_by_label("Type: Everything").click();
-    h.run_steps(3);
-    h.get_by_label("Videos").click();
+    h.get_by_label("Videos only").click();
     h.run_steps(3);
     assert_eq!(app.borrow().kind, Some(MediaKind::Video));
-    h.get_by_label("Type: Videos");
+    assert!(h.query_by_label_contains("Type:").is_none());
     h.get_by_label("Sort: Best match").click();
     h.run_steps(3);
     h.get_by_label("Oldest").click();
@@ -1305,7 +1331,7 @@ fn find_similar_from_the_viewer_closes_it_like_any_other_close() {
     open_tile(&mut h, "Item img1.jpg");
     h.run_steps(5);
     assert!(app.borrow().previews.cached() > 0);
-    h.get_by_label("Find similar").click();
+    h.get_by_label("Find similar photos").click();
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
     assert_eq!(app.borrow().previews.cached(), 0);
@@ -2045,7 +2071,7 @@ fn the_activity_card_describes_what_is_happening() {
     );
     h.get_by_label("Looking for new photos…");
     h.get_by_label("Pause");
-    h.get_by_label("Cancel");
+    h.get_by_label("Stop");
     show(
         &mut h,
         Activity::ReadingDates {
@@ -2088,10 +2114,13 @@ fn notices_appear_as_toasts_and_errors_can_be_closed() {
     app.borrow_mut().notify("Added 2 items to “Trip”");
     h.run_steps(2);
     h.get_by_label("Added 2 items to “Trip”");
-    assert!(
-        h.query_by_label("Dismiss").is_none(),
-        "info toasts fade by themselves"
-    );
+    // Information fades by itself, and can also be closed.
+    h.get_by_label("Dismiss").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Added 2 items to “Trip”").is_none());
+    app.borrow_mut().notify("Added 3 items to “Trip”");
+    h.run_steps(2);
+    h.get_by_label("Added 3 items to “Trip”");
     app.borrow_mut()
         .notify_error("That didn't work. Please try again.");
     h.run_steps(2);
@@ -2299,6 +2328,15 @@ fn the_main_screens_use_no_technical_words() {
         h.run_steps(2);
         check("no results", &h);
     }
+    // The viewer, with its labelled toolbar and the details panel.
+    {
+        let d5 = tempfile::tempdir().unwrap();
+        let app = album_app(d5.path(), true);
+        let mut h = quick_harness(&app);
+        open_tile(&mut h, "Item img1.jpg");
+        h.run_steps(3);
+        check("viewer", &h);
+    }
     // An album view.
     {
         let d4 = tempfile::tempdir().unwrap();
@@ -2333,14 +2371,14 @@ fn the_viewer_toolbar_has_labelled_icon_buttons() {
         h.get_by_label(label);
     }
     // Info shows and hides the details panel.
-    h.get_by_label("Find similar");
+    h.get_by_label("Find similar photos");
     h.get_by_label("Info").click();
     h.run_steps(3);
-    assert!(h.query_by_label("Find similar").is_none());
+    assert!(h.query_by_label("Find similar photos").is_none());
     assert!(!app.borrow().viewer.as_ref().unwrap().info);
     h.get_by_label("Info").click();
     h.run_steps(3);
-    h.get_by_label("Find similar");
+    h.get_by_label("Find similar photos");
     // Favorite is filled once marked, and the button says what it would undo.
     h.get_by_label("Favorite").click();
     h.run_steps(3);
@@ -2367,4 +2405,255 @@ fn results_header_titles_searches_and_similar_photos() {
     h.get_by_label("3 photos");
     h.get_by_label("Clear search");
     assert!(h.query_by_label_contains("score").is_none());
+}
+
+/// Like `quick_harness` for a window `width` points wide.
+fn quick_harness_wide(app: &Rc<RefCell<App>>, width: f32) -> Harness<'static> {
+    let app = Rc::clone(app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(width, 800.0))
+        .with_step_dt(0.05)
+        .build_ui(move |ui| app.borrow_mut().show(ui));
+    h.run();
+    h
+}
+
+#[test]
+fn the_viewer_position_is_plain_text_beside_labelled_buttons_in_a_wide_window() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness_wide(&app, 1200.0);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    let pos = h.get_by_label("1 of 240");
+    assert_eq!(pos.accesskit_node().role(), egui::accesskit::Role::Label);
+    let pos_rect = pos.rect();
+    let buttons = [
+        "Back",
+        "Favorite",
+        "Add to album…",
+        "Info",
+        "Open with default app",
+        "Show in folder",
+        "Zoom to 100%",
+    ];
+    for label in buttons {
+        let r = h.get_by_label(label).rect();
+        assert!(
+            !r.intersects(pos_rect),
+            "{label} {r:?} overlaps the position {pos_rect:?}"
+        );
+    }
+    // Wide window: icon and word ("Info" is wider than a bare icon button).
+    assert!(h.get_by_label("Info").rect().width() > 70.0);
+    assert!(h.get_by_label("Show in folder").rect().width() > 120.0);
+    // Clicking where the position is does nothing.
+    let info_before = app.borrow().viewer.as_ref().unwrap().info;
+    h.event(egui::Event::PointerMoved(pos_rect.center()));
+    h.event(egui::Event::PointerButton {
+        pos: pos_rect.center(),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    h.event(egui::Event::PointerButton {
+        pos: pos_rect.center(),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run_steps(3);
+    let a = app.borrow();
+    let v = a.viewer.as_ref().expect("still open");
+    assert_eq!(v.info, info_before);
+}
+
+#[test]
+fn the_viewer_toolbar_shows_only_icons_in_a_narrow_window() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness_wide(&app, 800.0);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    for label in [
+        "Info",
+        "Open with default app",
+        "Show in folder",
+        "Favorite",
+    ] {
+        assert!(
+            h.get_by_label(label).rect().width() < 55.0,
+            "{label} is an icon only"
+        );
+    }
+    let pos = h.get_by_label("1 of 240").rect();
+    assert!(!pos.intersects(h.get_by_label("Info").rect()));
+}
+
+#[test]
+fn the_info_panel_names_the_folder_and_the_date_source() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    // The folder's name, not its whole path.
+    h.get_by_label("nowhere");
+    assert!(h.query_by_label("/nowhere").is_none());
+    h.get_by_label("Find similar photos");
+}
+
+#[test]
+fn the_skipped_folders_notice_shows_when_a_run_ends() {
+    use crate::library::RunSummary;
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    let lib = Arc::clone(&app.borrow().lib);
+    lib.update_status(|s| {
+        s.last_run = Some(RunSummary {
+            skipped_folders: vec!["/gone".into()],
+            ..Default::default()
+        })
+    });
+    // The app saw the library busy on the previous frame; now it is idle.
+    app.borrow_mut().was_busy = true;
+    h.run_steps(2);
+    h.get_by_label("Some folders couldn't be reached, so they were left as they were.");
+    // Without a run that just ended it stays quiet.
+    app.borrow_mut().notices.dismiss_current();
+    h.run_steps(3);
+    assert!(app.borrow().notices.current().is_none());
+}
+
+#[test]
+fn an_identical_error_toasts_again() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    let lib = Arc::clone(&app.borrow().lib);
+    lib.update_status(|s| s.set_error("disk full"));
+    h.run_steps(2);
+    h.get_by_label("Something went wrong. disk full");
+    h.get_by_label("Dismiss").click();
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Something went wrong").is_none());
+    // Nothing new: no new toast.
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Something went wrong").is_none());
+    // The same text again is a new failure.
+    lib.update_status(|s| s.set_error("disk full"));
+    h.run_steps(2);
+    h.get_by_label("Something went wrong. disk full");
+}
+
+#[test]
+fn starting_a_search_leaves_the_timelines_selection_mode() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    h.get_by_label("Select img2.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("1 selected");
+    assert!(app.borrow().picking);
+    app.borrow_mut()
+        .submit(super::Query::Text("a dragon".into()));
+    h.run_steps(3);
+    let a = app.borrow();
+    assert!(!a.picking);
+    assert!(a.tl.sel.is_empty() && a.tl.selected.is_none());
+}
+
+#[test]
+fn each_grid_has_its_own_selection_mode() {
+    let d = tempfile::tempdir().unwrap();
+    let mut app = grid_app_with(d.path(), false);
+    // The timeline was in selection mode before the search started.
+    app.picking = true;
+    let app = Rc::new(RefCell::new(app));
+    let mut h = album_harness(&app);
+    // A plain click in the results opens the photo.
+    h.get_by_label("Result a.jpg").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_some(), "a plain click opens");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    // In the results' own selection mode a plain click selects.
+    h.get_by_label("Select b.jpg").click();
+    h.run_steps(3);
+    assert!(app.borrow().result_picking);
+    h.get_by_label("Result c.jpg").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none(), "now clicks select");
+    assert_eq!(app.borrow().result_sel.len(), 2);
+}
+
+#[test]
+fn the_results_title_follows_the_current_query() {
+    let d = tempfile::tempdir().unwrap();
+    let mut app = grid_app(d.path());
+    app.current = Some(super::Query::Text("a cat".into()));
+    app.result_label = "a dog".into();
+    let app = Rc::new(RefCell::new(app));
+    let mut h = album_harness(&app);
+    h.get_by_label("Results for “a cat”");
+    assert!(h.query_by_label("Results for “a dog”").is_none());
+    app.borrow_mut().current = Some(super::Query::Similar {
+        item_id: 1,
+        label: "beach.jpg".into(),
+    });
+    h.run_steps(2);
+    h.get_by_label("Photos similar to beach.jpg");
+}
+
+#[test]
+fn folder_suggestions_are_worked_out_once_when_the_dialog_opens() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    let candidates = vec![
+        (
+            "Pictures".to_string(),
+            std::path::PathBuf::from("/home/a/Pictures"),
+        ),
+        (
+            "Videos".to_string(),
+            std::path::PathBuf::from("/home/a/Videos"),
+        ),
+    ];
+    app.borrow_mut().open_add_folder_with(candidates);
+    h.run_steps(3);
+    h.get_by_label("Add Pictures");
+    h.get_by_label("Add Videos");
+    // The library changes while the dialog is open: the list is not recomputed.
+    app.borrow_mut()
+        .snapshot
+        .folders
+        .push(crate::store::db::Folder {
+            id: 2,
+            path: "/home/a/Pictures".into(),
+        });
+    h.run_steps(3);
+    h.get_by_label("Add Pictures");
+    assert_eq!(
+        app.borrow()
+            .add_folder_dialog
+            .as_ref()
+            .unwrap()
+            .suggestion_count(),
+        2
+    );
+}
+
+#[test]
+fn on_this_day_tiles_open_and_have_no_selection_circle() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let h = album_harness(&app);
+    h.get_by_label("On this day img10.jpg");
+    // img10 is only on screen in the strip (the grid starts at the newest photos).
+    assert!(h.query_by_label("Select img10.jpg").is_none());
+    assert!(h.query_by_label("Select On this day img10.jpg").is_none());
 }

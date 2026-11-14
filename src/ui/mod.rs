@@ -17,6 +17,7 @@ mod when;
 mod workers;
 
 use crate::Library;
+use crate::config::Settings;
 use crate::library::{Activity, Status};
 use crate::media::MediaKind;
 use crate::search::{SearchHit, SearchOptions, SearchSort};
@@ -147,6 +148,8 @@ struct Snapshot {
     folders: Vec<Folder>,
     errors: Vec<(PathBuf, String)>,
     model_installed: bool,
+    /// Ids of the smart-search choices whose files are on this computer.
+    installed_models: Vec<&'static str>,
     taken: Option<Instant>,
 }
 
@@ -158,6 +161,11 @@ impl Snapshot {
             folders: lib.folders().unwrap_or_default(),
             errors: lib.errors(50).unwrap_or_default(),
             model_installed: lib.model_installed(),
+            installed_models: crate::model::registry::MODELS
+                .iter()
+                .filter(|m| crate::model::download::is_installed(&lib.paths().models_dir(), m))
+                .map(|m| m.id)
+                .collect(),
             taken: Some(Instant::now()),
         }
     }
@@ -222,11 +230,13 @@ pub struct App {
     /// Selection mode: the user picked items with a circle or a modifier key, so plain clicks
     /// toggle items instead of opening them and the selection bar is shown.
     picking: bool,
+    /// Selection mode of the results grid (the timeline has its own, `picking`).
+    result_picking: bool,
     add_folder_dialog: Option<sidebar::AddFolder>,
     stop_folder: Option<sidebar::StopFolder>,
     help_open: bool,
-    /// The last library error that was shown as a toast.
-    error_shown: Option<String>,
+    /// `Status::error_seq` of the last error that was shown as a toast.
+    error_seq_seen: u64,
     notices: Notices,
     snapshot: Snapshot,
     snapshot_rx: Option<crossbeam_channel::Receiver<Snapshot>>,
@@ -236,7 +246,9 @@ pub struct App {
     was_busy: bool,
     jobs_seen: u64,
     last_prune: Instant,
-    consent_dismissed: bool,
+    /// A copy of the library's settings, refreshed when they change.
+    settings: Settings,
+    settings_seen: u64,
     settings_open: bool,
     settings_section: settings::Section,
     /// A smart-search choice waiting for the user to confirm the switch.
@@ -297,10 +309,11 @@ impl App {
             grid_shown: false,
             frame_stats: FrameStats::from_env(),
             picking: false,
+            result_picking: false,
             add_folder_dialog: None,
             stop_folder: None,
             help_open: false,
-            error_shown: None,
+            error_seq_seen: 0,
             notices: Notices::default(),
             snapshot: Snapshot::default(),
             snapshot_rx: None,
@@ -310,7 +323,8 @@ impl App {
             was_busy: false,
             jobs_seen: 0,
             last_prune: Instant::now(),
-            consent_dismissed: false,
+            settings: Settings::default(),
+            settings_seen: 0,
             settings_open: false,
             settings_section: settings::Section::default(),
             model_confirm: None,
@@ -318,8 +332,9 @@ impl App {
             #[cfg(test)]
             today_override: None,
         };
-        let s = app.lib.settings();
-        style::apply(ctx, s.theme, s.text_size);
+        app.settings = app.lib.settings();
+        app.settings_seen = app.lib.settings_version();
+        style::apply(ctx, app.settings.theme, app.settings.text_size);
         app.snapshot = Snapshot::fetch(&app.lib);
         app.albums = app.lib.albums().unwrap_or_default();
         app.albums_version_seen = app.lib.albums_version();
@@ -396,6 +411,12 @@ impl App {
             taken_range: self.date.range(chrono::Datelike::year(&self.today())),
             sort: self.sort,
         };
+        if self.current.is_none() {
+            // Starting a search leaves the timeline's selection behind.
+            self.tl.sel.clear();
+            self.tl.selected = None;
+            self.picking = false;
+        }
         self.awaiting = Some(self.search.submit(q.clone(), opts));
         self.current = Some(q);
         self.last_search_at = Some(Instant::now());
@@ -468,18 +489,19 @@ impl App {
             }
         }
         let jobs = self.lib.jobs_finished();
-        if (self.was_busy && !busy) || jobs != self.jobs_seen {
+        let run_ended = self.was_busy && !busy;
+        self.was_busy = busy;
+        if run_ended || jobs != self.jobs_seen {
             self.jobs_seen = jobs;
             self.refresh_snapshot(true);
             self.refresh_albums();
             self.rerun();
         }
-        self.was_busy = busy;
         if self.last_prune.elapsed() > Duration::from_secs(600) {
             self.last_prune = Instant::now();
             prune_thumbnails(&self.lib);
         }
-        self.report_status();
+        self.report_status(run_ended);
         let now = Instant::now();
         self.notices.expire(now);
         if let Some(left) = self.notices.next_expiry(now) {
@@ -493,19 +515,16 @@ impl App {
         self.sync_selection();
     }
 
-    /// Turns what the library reports into toasts: a failure once, and folders that could not
-    /// be reached when a run ends.
-    fn report_status(&mut self) {
-        match self.status.last_error.clone() {
-            Some(e) if self.error_shown.as_ref() != Some(&e) => {
+    /// Turns what the library reports into toasts: each failure once (also when the same
+    /// message comes again), and folders that could not be reached when a run has just ended.
+    fn report_status(&mut self, run_ended: bool) {
+        if self.status.error_seq != self.error_seq_seen {
+            self.error_seq_seen = self.status.error_seq;
+            if let Some(e) = self.status.last_error.clone() {
                 self.notify_error(format!("Something went wrong. {e}"));
-                self.error_shown = Some(e);
             }
-            None => self.error_shown = None,
-            _ => {}
         }
-        if self.was_busy
-            && !self.lib.is_busy()
+        if run_ended
             && self
                 .status
                 .last_run
@@ -523,10 +542,15 @@ impl App {
         self.tl.sel.sync(primary.map(|it| it.file_id));
         let primary = self.selected.and_then(|i| self.results.get(i));
         self.result_sel.sync(primary.map(|h| h.file_id));
-        if self.tl.sel.is_multi() || self.result_sel.is_multi() {
+        if self.tl.sel.is_multi() {
             self.picking = true;
-        } else if self.tl.sel.is_empty() && self.result_sel.is_empty() {
+        } else if self.tl.sel.is_empty() {
             self.picking = false;
+        }
+        if self.result_sel.is_multi() {
+            self.result_picking = true;
+        } else if self.result_sel.is_empty() {
+            self.result_picking = false;
         }
     }
 
@@ -585,7 +609,7 @@ impl App {
             let b = egui::Button::new(RichText::new("Add your first folder").color(pal.on_accent))
                 .fill(pal.accent);
             if ui.add(b).clicked() {
-                self.add_folder_dialog = Some(sidebar::AddFolder::default());
+                self.open_add_folder();
             }
         });
     }
@@ -645,7 +669,7 @@ impl App {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
                     let in_sel = self.result_sel.contains(hit.file_id);
-                    let checked = in_sel && (self.picking || self.result_sel.is_multi());
+                    let checked = in_sel && (self.result_picking || self.result_sel.is_multi());
                     let t = Tile {
                         key: &key,
                         name: &name,
@@ -655,9 +679,10 @@ impl App {
                         favorite: marked(&self.fav_marks, hit.file_id, hit.favorite),
                         checked,
                         focused: self.selected == Some(i) && !checked,
-                        picking: self.picking,
+                        picking: self.result_picking,
+                        selectable: true,
                         selected: in_sel || self.selected == Some(i),
-                        tip: name.clone(),
+                        tip: &|| name.clone(),
                     };
                     let id = ui.make_persistent_id(("result", i));
                     let o = tiles::show(ui, &mut self.thumbs, id, rect, &t);
@@ -691,7 +716,7 @@ impl App {
             self.apply_tile_menu(i, m);
         }
         if let Some((i, ev, mods)) = event {
-            match tiles::click_plan(ev, mods, self.picking) {
+            match tiles::click_plan(ev, mods, self.result_picking) {
                 tiles::ClickPlan::Favorite => {
                     let h = &results[i];
                     let fav = !marked(&self.fav_marks, h.file_id, h.favorite);
@@ -709,7 +734,7 @@ impl App {
                         i,
                         mods,
                     );
-                    self.picking = !self.result_sel.is_empty();
+                    self.result_picking = !self.result_sel.is_empty();
                     self.selected_t = self.selected.and_then(|p| results[p].t_start);
                 }
                 tiles::ClickPlan::Open => {
@@ -1049,6 +1074,18 @@ impl App {
         }
     }
 
+    /// Picks up settings changes (a counter read, copying only on a change) and applies the
+    /// style. Applying is a no-op unless the appearance changed or this is the first frame of
+    /// the egui context. Returns true when the style changed.
+    fn refresh_settings(&mut self, ctx: &egui::Context) -> bool {
+        let version = self.lib.settings_version();
+        if version != self.settings_seen {
+            self.settings_seen = version;
+            self.settings = self.lib.settings();
+        }
+        style::apply(ctx, self.settings.theme, self.settings.text_size)
+    }
+
     /// Draws the whole app into `ui` (separate from `eframe::App` for headless UI tests).
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -1057,8 +1094,7 @@ impl App {
             // egui only repaints on events; keep frames coming so there is something to time.
             ctx.request_repaint();
         }
-        let settings = self.lib.settings();
-        if style::apply(&ctx, settings.theme, settings.text_size) {
+        if self.refresh_settings(&ctx) {
             // This frame's root ui was created with the old style.
             ui.set_style(ctx.global_style());
         }
