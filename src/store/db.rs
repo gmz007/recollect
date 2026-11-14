@@ -124,6 +124,58 @@ pub struct Folder {
     pub path: PathBuf,
 }
 
+/// The longest album name, in characters.
+pub const MAX_ALBUM_NAME_CHARS: usize = 100;
+
+const ALBUM_GONE: &str = "That album no longer exists";
+
+/// The one place album names are validated (the UI pre-checks with it too): trimmed, not empty,
+/// at most [`MAX_ALBUM_NAME_CHARS`] characters, and not used by another album of `others`
+/// (`(id, name)` pairs; `except` is the album being renamed) ignoring case. Returns the
+/// trimmed name.
+pub fn check_album_name<'a>(
+    name: &str,
+    others: impl IntoIterator<Item = (i64, &'a str)>,
+    except: Option<i64>,
+) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("An album needs a name");
+    }
+    if name.chars().count() > MAX_ALBUM_NAME_CHARS {
+        bail!("Album names can have at most {MAX_ALBUM_NAME_CHARS} characters");
+    }
+    let wanted = name.to_lowercase();
+    for (id, other) in others {
+        if Some(id) != except && other.to_lowercase() == wanted {
+            bail!("An album named “{other}” already exists");
+        }
+    }
+    Ok(name.to_string())
+}
+
+/// Puts files in an album inside a transaction; returns how many were new to it.
+fn add_items(tx: &Connection, album: i64, file_ids: &[i64]) -> Result<usize> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM albums WHERE id = ?1)",
+        [album],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        bail!("{ALBUM_GONE}");
+    }
+    let mut ins = tx.prepare(
+        "INSERT OR IGNORE INTO album_items(album_id, file_id, added_at)
+         SELECT ?1, id, ?3 FROM files WHERE id = ?2",
+    )?;
+    let at = now();
+    let mut added = 0;
+    for id in file_ids {
+        added += ins.execute(params![album, id, at])?;
+    }
+    Ok(added)
+}
+
 /// The photo or video that stands for an album (its most recently taken item).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlbumCover {
@@ -785,63 +837,75 @@ impl Db {
         Ok(())
     }
 
-    /// Checks an album name: non-empty after trimming, and not used by another album
-    /// (ignoring case). Returns the trimmed name.
-    fn checked_album_name(&self, name: &str, except: Option<i64>) -> Result<String> {
-        let name = name.trim();
-        if name.is_empty() {
-            bail!("An album needs a name");
-        }
-        let wanted = name.to_lowercase();
-        let mut st = self.conn.prepare("SELECT id, name FROM albums")?;
+    fn existing_album_names(conn: &Connection) -> Result<Vec<(i64, String)>> {
+        let mut st = conn.prepare("SELECT id, name FROM albums")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-        for row in rows {
-            let (id, other) = row?;
-            if Some(id) != except && other.to_lowercase() == wanted {
-                bail!("An album named “{other}” already exists");
-            }
-        }
-        Ok(name.to_string())
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Creates an album and returns its id. Names are trimmed, must not be empty and must be
-    /// unique ignoring case.
+    /// Creates an album and returns its id. Names are trimmed, must not be empty, at most
+    /// [`MAX_ALBUM_NAME_CHARS`] long and unique ignoring case.
     pub fn create_album(&mut self, name: &str) -> Result<i64> {
-        let name = self.checked_album_name(name, None)?;
-        self.conn.execute(
+        Ok(self.create_album_with(name, &[])?.0)
+    }
+
+    /// Creates an album and puts `files` in it in one transaction: on any error nothing is
+    /// left behind. Returns the id and how many files were added.
+    pub fn create_album_with(&mut self, name: &str, files: &[i64]) -> Result<(i64, usize)> {
+        let tx = self.conn.transaction()?;
+        let name = check_album_name(
+            name,
+            Self::existing_album_names(&tx)?
+                .iter()
+                .map(|(i, n)| (*i, n.as_str())),
+            None,
+        )?;
+        tx.execute(
             "INSERT INTO albums(name, created_at) VALUES (?1, ?2)",
             params![name, now()],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        let added = add_items(&tx, id, files)?;
+        tx.commit()?;
+        Ok((id, added))
     }
 
     /// Renames an album (same rules as [`Self::create_album`]; keeping its own name in another
     /// case is allowed).
     pub fn rename_album(&mut self, id: i64, name: &str) -> Result<()> {
-        let name = self.checked_album_name(name, Some(id))?;
+        let name = check_album_name(
+            name,
+            Self::existing_album_names(&self.conn)?
+                .iter()
+                .map(|(i, n)| (*i, n.as_str())),
+            Some(id),
+        )?;
         let n = self.conn.execute(
             "UPDATE albums SET name = ?2 WHERE id = ?1",
             params![id, name],
         )?;
         if n == 0 {
-            bail!("That album no longer exists");
+            bail!("{ALBUM_GONE}");
         }
         Ok(())
     }
 
-    /// Deletes an album and its entries. The files themselves are never touched.
-    pub fn delete_album(&mut self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM albums WHERE id = ?1", [id])?;
-        Ok(())
+    /// Deletes an album and its entries. The files themselves are never touched. Returns
+    /// whether the album existed.
+    pub fn delete_album(&mut self, id: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM albums WHERE id = ?1", [id])?
+            > 0)
     }
 
-    /// All albums by name (ignoring case), with item counts and covers.
+    /// All albums by name (ignoring case), with item counts and covers: two queries however
+    /// many albums there are.
     pub fn albums(&self) -> Result<Vec<AlbumInfo>> {
         let mut st = self.conn.prepare(
-            "SELECT a.id, a.name, a.created_at,
-                    (SELECT COUNT(*) FROM album_items WHERE album_id = a.id)
-             FROM albums a",
+            "SELECT a.id, a.name, a.created_at, COUNT(i.file_id)
+             FROM albums a LEFT JOIN album_items i ON i.album_id = a.id
+             GROUP BY a.id",
         )?;
         let mut out: Vec<AlbumInfo> = st
             .query_map([], |r| {
@@ -854,43 +918,42 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        // Taken time is approximated by the stored value or the file time (no time zone
-        // conversion), which is plenty to pick a cover.
-        let mut cover = self.conn.prepare(
-            "SELECT f.id, f.path, f.kind, f.mtime FROM album_items i
-             JOIN files f ON f.id = i.file_id WHERE i.album_id = ?1
-             ORDER BY COALESCE(f.taken_at, f.mtime) DESC, f.path LIMIT 1",
+        // The newest item of each album stands for it. Taken time is approximated by the
+        // stored value or the file time (no time zone conversion), which is plenty here.
+        let mut st = self.conn.prepare(
+            "SELECT album_id, id, path, kind, mtime FROM (
+                 SELECT i.album_id, f.id, f.path, f.kind, f.mtime,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY i.album_id
+                            ORDER BY COALESCE(f.taken_at, f.mtime) DESC, f.path) AS rn
+                 FROM album_items i JOIN files f ON f.id = i.file_id)
+             WHERE rn = 1",
         )?;
-        for a in out.iter_mut().filter(|a| a.count > 0) {
-            a.cover = cover
-                .query_row([a.id], |r| {
-                    Ok(AlbumCover {
-                        file_id: r.get(0)?,
-                        path: PathBuf::from(r.get::<_, String>(1)?),
-                        kind: MediaKind::from_i64(r.get(2)?),
-                        mtime: r.get(3)?,
-                    })
-                })
-                .optional()?;
+        let mut covers: HashMap<i64, AlbumCover> = st
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    AlbumCover {
+                        file_id: r.get(1)?,
+                        path: PathBuf::from(r.get::<_, String>(2)?),
+                        kind: MediaKind::from_i64(r.get(3)?),
+                        mtime: r.get(4)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for a in &mut out {
+            a.cover = covers.remove(&a.id);
         }
         out.sort_by_cached_key(|a| (a.name.to_lowercase(), a.id));
         Ok(out)
     }
 
     /// Adds files to an album; files already in it are ignored. Returns how many were added.
+    /// An album that no longer exists is a friendly error.
     pub fn add_to_album(&mut self, album: i64, file_ids: &[i64]) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        let mut added = 0;
-        {
-            let mut ins = tx.prepare(
-                "INSERT OR IGNORE INTO album_items(album_id, file_id, added_at)
-                 SELECT ?1, id, ?3 FROM files WHERE id = ?2",
-            )?;
-            let at = now();
-            for id in file_ids {
-                added += ins.execute(params![album, id, at])?;
-            }
-        }
+        let added = add_items(&tx, album, file_ids)?;
         tx.commit()?;
         Ok(added)
     }
@@ -1894,6 +1957,82 @@ mod tests {
         assert_eq!(db.remove_from_album(album, &[c, 777]).unwrap(), 1);
         let info = &db.albums().unwrap()[0];
         assert_eq!((info.count, info.cover.as_ref().unwrap().file_id), (1, a));
+    }
+
+    #[test]
+    fn album_names_have_one_shared_rule_including_a_length_limit() {
+        let (mut db, _, _) = timeline_db();
+        let longest = "é".repeat(MAX_ALBUM_NAME_CHARS);
+        db.create_album(&longest).unwrap();
+        let too_long = format!("{longest}x");
+        let e = db.create_album(&too_long).unwrap_err().to_string();
+        assert!(e.contains("at most 100"), "{e}");
+        assert!(
+            db.rename_album(db.albums().unwrap()[0].id, &too_long)
+                .is_err()
+        );
+        // The same function serves the UI's pre-check.
+        let known = [(1, "Trip")];
+        assert_eq!(check_album_name("  new ", known, None).unwrap(), "new");
+        assert!(check_album_name("TRIP", known, None).is_err());
+        assert!(check_album_name("TRIP", known, Some(1)).is_ok());
+        assert!(check_album_name(" ", known, None).is_err());
+        assert!(check_album_name(&too_long, [], None).is_err());
+    }
+
+    #[test]
+    fn creating_with_items_is_all_or_nothing() {
+        let (mut db, _, _) = timeline_db();
+        let (a, c) = (id_of(&db, "/one/a.jpg"), id_of(&db, "/two/c.jpg"));
+        let (id, n) = db.create_album_with("Good", &[a, c, 424242]).unwrap();
+        assert_eq!((n, db.albums().unwrap()[0].count), (2, 2));
+        // A failure while adding leaves no album behind.
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON album_items
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        assert!(db.create_album_with("Bad", &[a]).is_err());
+        db.conn.execute_batch("DROP TRIGGER boom").unwrap();
+        let names: Vec<_> = db.albums().unwrap().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["Good"]);
+        // A bad name adds nothing either.
+        assert!(db.create_album_with("good", &[a]).is_err());
+        assert_eq!(db.albums().unwrap()[0].count, 2);
+        // Adding to an album that is gone is a plain message, not a constraint error.
+        assert!(db.delete_album(id).unwrap());
+        assert!(!db.delete_album(id).unwrap(), "already gone");
+        let e = db.add_to_album(id, &[a]).unwrap_err().to_string();
+        assert_eq!(e, "That album no longer exists");
+    }
+
+    #[test]
+    fn the_album_list_comes_from_grouped_queries() {
+        let (mut db, _, _) = timeline_db();
+        let (a, b, c) = (
+            id_of(&db, "/one/a.jpg"),
+            id_of(&db, "/one/b.mp4"),
+            id_of(&db, "/two/c.jpg"),
+        );
+        for (f, t) in [(a, 100), (b, 300), (c, 200)] {
+            db.conn
+                .execute(
+                    "UPDATE files SET taken_at = ?2 WHERE id = ?1",
+                    params![f, t],
+                )
+                .unwrap();
+        }
+        let x = db.create_album("x").unwrap();
+        let y = db.create_album("y").unwrap();
+        let empty = db.create_album("z").unwrap();
+        db.add_to_album(x, &[a, b, c]).unwrap();
+        db.add_to_album(y, &[a, c]).unwrap();
+        let list = db.albums().unwrap();
+        let by = |id| list.iter().find(|i| i.id == id).unwrap();
+        assert_eq!((by(x).count, by(x).cover.as_ref().unwrap().file_id), (3, b));
+        assert_eq!((by(y).count, by(y).cover.as_ref().unwrap().file_id), (2, c));
+        assert_eq!((by(empty).count, by(empty).cover.clone()), (0, None));
     }
 
     #[test]

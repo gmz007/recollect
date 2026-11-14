@@ -17,7 +17,11 @@ All notable changes to this project are documented here. The format is based on
   above the grid offers Add to album…, Favorite, Unfavorite, Remove from album (in albums) and
   Clear selection. The selection survives reloads.
 - Favorite marks and album changes share one ordered background writer, so "create an album,
-  then add items" can never be reordered.
+  then add items" can never be reordered. Queued writes are flushed when the app closes.
+- Right-click menu on tiles: "Add to album…" and (in albums) "Remove from album" act on the whole
+  selection when the tile is part of it.
+- Album names are limited to 100 characters; long names are shortened in the sidebar and menus.
+- Error messages stay visible for 8 seconds and are not replaced by later messages.
 
 ## [0.3.0] - 2026-11-14
 

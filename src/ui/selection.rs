@@ -76,8 +76,12 @@ impl Selection {
         self.anchor = None;
     }
 
-    pub fn remove(&mut self, id: i64) {
-        self.ids.remove(&id);
+    /// Deselects every file of `ids` in one pass.
+    pub fn remove_all(&mut self, ids: &HashSet<i64>) {
+        self.ids.retain(|id| !ids.contains(id));
+        if self.anchor.is_some_and(|a| ids.contains(&a)) {
+            self.anchor = None;
+        }
     }
 
     /// Selects just `id`.
@@ -136,8 +140,9 @@ impl Selection {
         let id = id_at(i);
         if mods.toggle {
             if self.ids.remove(&id) {
-                // The primary was deselected: the lowest remaining item takes over.
-                if primary == Some(i) {
+                // The primary was deselected (the same file, which a list may show at several
+                // positions): the lowest remaining item takes over.
+                if primary.is_some_and(|p| p < len && id_at(p) == id) {
                     self.anchor = None;
                     return (0..len).find(|&k| self.ids.contains(&id_at(k)));
                 }
@@ -163,9 +168,14 @@ impl Selection {
         id_at: &dyn Fn(usize) -> i64,
         to: usize,
     ) {
+        // The anchor is a file: when it is listed twice, the primary's position wins.
         let from = self
             .anchor
-            .and_then(|a| (0..len).find(|&k| id_at(k) == a))
+            .and_then(|a| {
+                primary
+                    .filter(|&p| p < len && id_at(p) == a)
+                    .or_else(|| (0..len).find(|&k| id_at(k) == a))
+            })
             .or(primary)
             .unwrap_or(to);
         if self.anchor.is_none() {
@@ -400,6 +410,41 @@ mod tests {
         s.only(100);
         assert_eq!(s.rebase([1, 2].into_iter(), None), None);
         assert_eq!(s.len(), 0);
+    }
+
+    /// A search can list one file twice: ids at indices 0 and 3 are the same file.
+    const DUP: &dyn Fn(usize) -> i64 = &|i| [7, 8, 9, 7, 10][i];
+
+    #[test]
+    fn a_file_listed_twice_is_selected_and_toggled_as_one() {
+        let mut s = Selection::default();
+        let mut p = s.click(None, 5, DUP, 0, ClickMods::default());
+        p = s.click(p, 5, DUP, 1, TOGGLE);
+        assert_eq!((p, s.len()), (Some(1), 2));
+        // Ctrl+click on the other hit of selected file 7 deselects that file only.
+        p = s.click(p, 5, DUP, 3, TOGGLE);
+        assert_eq!((p, s.len()), (Some(1), 1));
+        assert!(!s.contains(7) && s.contains(8));
+        // Toggling the primary's file through its twin hands the primary over.
+        p = s.click(p, 5, DUP, 4, TOGGLE);
+        p = s.click(p, 5, DUP, 1, TOGGLE);
+        assert_eq!(p, Some(4));
+        // Select all counts files, not hits.
+        let all = s.select_all(None, 5, DUP);
+        assert_eq!((all, s.len()), (Some(0), 4));
+        // A range runs over the visible order and also counts files.
+        s.only(9);
+        let p = s.click(Some(2), 5, DUP, 4, RANGE);
+        assert_eq!((p, ids(&s)), (Some(4), vec![7, 9, 10]));
+    }
+
+    #[test]
+    fn removing_many_ids_clears_a_stale_anchor() {
+        let mut s = Selection::default();
+        s.select_all(Some(1), 4, ID);
+        s.remove_all(&[100, 101].into_iter().collect());
+        assert_eq!(ids(&s), vec![102, 103]);
+        assert_eq!(s.anchor, None);
     }
 
     #[test]

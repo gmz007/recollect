@@ -23,7 +23,7 @@ use egui::{Align, Color32, Layout, RichText, Sense, Vec2};
 use frame_stats::FrameStats;
 use preview::Previews;
 use selection::{ClickMods, Selection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,12 +70,77 @@ fn marked(marks: &HashMap<i64, FavMark>, file_id: i64, listed: bool) -> bool {
     marks.get(&file_id).map_or(listed, |m| m.value)
 }
 
+/// Short messages for the status bar. An error stays visible until the next error or
+/// [`Notices::ERROR_FOR`]; later plain messages do not push it out (they show once it is gone).
+#[derive(Default)]
+struct Notices {
+    items: Vec<Notice>,
+}
+
+struct Notice {
+    text: String,
+    at: Instant,
+    error: bool,
+}
+
+impl Notices {
+    const INFO_FOR: Duration = Duration::from_secs(6);
+    const ERROR_FOR: Duration = Duration::from_secs(8);
+    /// More than this many pending messages are never useful.
+    const MAX: usize = 6;
+
+    fn ttl(n: &Notice) -> Duration {
+        if n.error {
+            Self::ERROR_FOR
+        } else {
+            Self::INFO_FOR
+        }
+    }
+
+    fn push(&mut self, text: String, error: bool, now: Instant) {
+        self.expire(now);
+        if error {
+            // A newer error replaces the older ones.
+            self.items.retain(|n| !n.error);
+        }
+        self.items.push(Notice {
+            text,
+            at: now,
+            error,
+        });
+        while self.items.len() > Self::MAX {
+            self.items.remove(0);
+        }
+    }
+
+    fn expire(&mut self, now: Instant) {
+        self.items
+            .retain(|n| now.saturating_duration_since(n.at) < Self::ttl(n));
+    }
+
+    /// What to show: the error if there is one, else the latest message.
+    fn current(&self) -> Option<&str> {
+        self.items
+            .iter()
+            .find(|n| n.error)
+            .or(self.items.last())
+            .map(|n| n.text.as_str())
+    }
+
+    /// Time until the next message disappears (to schedule a repaint).
+    fn next_expiry(&self, now: Instant) -> Option<Duration> {
+        self.items
+            .iter()
+            .map(|n| Self::ttl(n).saturating_sub(now.saturating_duration_since(n.at)))
+            .min()
+    }
+}
+
 /// Cached library facts, refreshed a few times per second rather than every frame.
 #[derive(Default)]
 struct Snapshot {
     stats: Stats,
     folders: Vec<Folder>,
-    albums: Vec<AlbumInfo>,
     errors: Vec<(PathBuf, String)>,
     model_installed: bool,
     taken: Option<Instant>,
@@ -87,7 +152,6 @@ impl Snapshot {
         Self {
             stats: lib.stats().unwrap_or_default(),
             folders: lib.folders().unwrap_or_default(),
-            albums: lib.albums().unwrap_or_default(),
             errors: lib.errors(50).unwrap_or_default(),
             model_installed: lib.model_installed(),
             taken: Some(Instant::now()),
@@ -122,10 +186,15 @@ pub struct App {
     fav_marks: HashMap<i64, FavMark>,
     fav_version_seen: u64,
     albums_version_seen: u64,
+    /// The albums with counts and covers; read in the background when the library's album
+    /// version moves or a job finishes (not part of the periodic snapshot).
+    albums: Vec<AlbumInfo>,
+    albums_rx: Option<crossbeam_channel::Receiver<anyhow::Result<Vec<AlbumInfo>>>>,
+    albums_again: bool,
     /// A name being typed for a new album, a rename and a pending deletion.
     new_album: Option<albums::NewAlbum>,
     rename_album: Option<albums::RenameAlbum>,
-    delete_album: Option<i64>,
+    delete_album: Option<albums::DeleteAlbum>,
     current: Option<Query>,
     awaiting: Option<u64>,
     /// Shared with the viewer while it is open.
@@ -148,7 +217,7 @@ pub struct App {
     grid_shown: bool,
     frame_stats: Option<FrameStats>,
     folder_input: String,
-    notice: Option<(String, Instant)>,
+    notices: Notices,
     snapshot: Snapshot,
     snapshot_rx: Option<crossbeam_channel::Receiver<Snapshot>>,
     snapshot_again: bool,
@@ -194,6 +263,9 @@ impl App {
             fav_marks: HashMap::new(),
             fav_version_seen: 0,
             albums_version_seen: 0,
+            albums: Vec::new(),
+            albums_rx: None,
+            albums_again: false,
             new_album: None,
             rename_album: None,
             delete_album: None,
@@ -213,7 +285,7 @@ impl App {
             grid_shown: false,
             frame_stats: FrameStats::from_env(),
             folder_input: String::new(),
-            notice: None,
+            notices: Notices::default(),
             snapshot: Snapshot::default(),
             snapshot_rx: None,
             snapshot_again: false,
@@ -229,6 +301,8 @@ impl App {
             today_override: None,
         };
         app.snapshot = Snapshot::fetch(&app.lib);
+        app.albums = app.lib.albums().unwrap_or_default();
+        app.albums_version_seen = app.lib.albums_version();
         // Unit tests fake an installed model with placeholder files; never feed those to
         // ONNX Runtime.
         if app.snapshot.model_installed && !cfg!(test) {
@@ -244,7 +318,13 @@ impl App {
     }
 
     fn notify(&mut self, msg: impl Into<String>) {
-        self.notice = Some((msg.into(), Instant::now()));
+        self.notices.push(msg.into(), false, Instant::now());
+    }
+
+    /// Like [`Self::notify`] for failures: stays visible longer and is not pushed out by the
+    /// messages that follow.
+    fn notify_error(&mut self, msg: impl Into<String>) {
+        self.notices.push(msg.into(), true, Instant::now());
     }
 
     /// Requests fresh library facts from a background thread (never blocks the UI).
@@ -285,7 +365,7 @@ impl App {
 
     fn start_indexing(&mut self) {
         if let Err(e) = self.lib.start_indexing() {
-            self.notify(format!("{e:#}"));
+            self.notify_error(format!("{e:#}"));
         }
     }
 
@@ -372,6 +452,7 @@ impl App {
         if (self.was_busy && !busy) || jobs != self.jobs_seen {
             self.jobs_seen = jobs;
             self.refresh_snapshot(true);
+            self.refresh_albums();
             self.rerun();
         }
         self.was_busy = busy;
@@ -379,15 +460,10 @@ impl App {
             self.last_prune = Instant::now();
             prune_thumbnails(&self.lib);
         }
-        if self
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.1.elapsed() > Duration::from_secs(6))
-        {
-            self.notice = None;
-        }
-        if let Some((_, at)) = &self.notice {
-            ctx.request_repaint_after(Duration::from_secs(6).saturating_sub(at.elapsed()));
+        let now = Instant::now();
+        self.notices.expire(now);
+        if let Some(left) = self.notices.next_expiry(now) {
+            ctx.request_repaint_after(left);
         }
         self.poll_favorites();
         self.poll_albums();
@@ -591,7 +667,7 @@ impl App {
                     {
                         match self.lib.retry_errors() {
                             Ok(_) => self.start_indexing(),
-                            Err(e) => self.notify(format!("{e:#}")),
+                            Err(e) => self.notify_error(format!("{e:#}")),
                         }
                     }
                 });
@@ -698,8 +774,8 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(e) = &self.status.last_error {
                     ui.colored_label(Color32::from_rgb(230, 120, 90), e);
-                } else if let Some((n, _)) = &self.notice {
-                    ui.label(n.clone());
+                } else if let Some(n) = self.notices.current() {
+                    ui.label(n);
                 }
             });
         });
@@ -740,7 +816,7 @@ impl App {
                     if ui.add(egui::Button::new(RichText::new("Download model").strong())).clicked()
                         && let Err(e) = self.lib.start_download()
                     {
-                        self.notify(format!("{e:#}"));
+                        self.notify_error(format!("{e:#}"));
                     }
                     if ui.button("Choose another model…").clicked() {
                         self.settings_draft = self.lib.settings();
@@ -870,10 +946,10 @@ impl App {
         let hit = &self.results[i];
         let key = Self::thumb_key(hit, None);
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::CLICK);
+        let selected = self.result_sel.contains(hit.file_id) || self.selected == Some(i);
         if ui.is_rect_visible(rect) {
             let badge =
                 (hit.kind == MediaKind::Video).then(|| fmt_time(hit.t_start.unwrap_or(0.0)));
-            let selected = self.result_sel.contains(hit.file_id) || self.selected == Some(i);
             timeline::paint_tile(
                 ui,
                 &mut self.thumbs,
@@ -893,8 +969,17 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let label = format!("Result {name}");
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        resp.on_hover_text(format!("{name}\nmatch {:.3}", hit.score))
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
+        let tip = format!("{name}\nmatch {:.3}", hit.score);
+        if resp.secondary_clicked() {
+            self.select_for_menu(i);
+        }
+        let mut choice = None;
+        resp.context_menu(|ui| choice = albums::tile_menu(ui, &self.albums, false));
+        if let Some(m) = choice {
+            self.apply_tile_menu(i, m);
+        }
+        resp.on_hover_text(tip)
     }
 
     fn open_hit(&mut self, i: usize) {
@@ -904,7 +989,7 @@ impl App {
             _ => platform::open(&hit.path),
         };
         if let Err(e) = res {
-            self.notify(format!("{e:#}"));
+            self.notify_error(format!("{e:#}"));
         }
     }
 
@@ -960,7 +1045,7 @@ impl App {
             if ui.button("Show in folder").clicked()
                 && let Err(e) = platform::reveal(&hit.path)
             {
-                self.notify(format!("{e:#}"));
+                self.notify_error(format!("{e:#}"));
             }
             if ui.button("Find similar").clicked() {
                 let item_id = if hit.kind == MediaKind::Video {
@@ -983,7 +1068,7 @@ impl App {
             if ui.button(label).clicked() {
                 self.set_favorite(hit.file_id, !fav);
             }
-            if let Some(c) = albums::album_menu(ui, &self.snapshot.albums) {
+            if let Some(c) = albums::album_menu(ui, &self.albums) {
                 self.add_to_album_choice(vec![hit.file_id], c);
             }
         });
@@ -1081,7 +1166,7 @@ impl App {
                     "Wait for the current job to finish (or cancel it) before switching models.",
                 );
             } else if let Err(e) = self.lib.apply_settings(self.settings_draft.clone()) {
-                self.notify(format!("{e:#}"));
+                self.notify_error(format!("{e:#}"));
             } else {
                 open = false;
                 if switching {
@@ -1255,14 +1340,10 @@ fn scroll_offset_for_row(
 impl App {
     /// Arrow keys move the selection, Shift+arrows extend it, Ctrl/Cmd+A selects everything and
     /// Enter opens the primary item. Only active when the results grid was drawn last frame, the
-    /// Settings window is closed and no text field has keyboard focus, so typing in the search
+    /// Settings window and the album dialogs are closed and no text field has keyboard focus, so typing in the search
     /// box is never hijacked. Keys with other modifiers are ignored.
     fn handle_navigation_keys(&mut self, ctx: &egui::Context, grid_was_shown: bool) {
-        if !grid_was_shown
-            || self.settings_open
-            || self.results.is_empty()
-            || ctx.text_edit_focused()
-        {
+        if !grid_was_shown || self.results.is_empty() || self.keys_blocked(ctx) {
             return;
         }
         let input = selection::read_nav_keys(ctx);
@@ -1339,10 +1420,11 @@ impl App {
             if let Some(v) = &mut self.viewer {
                 v.set_favorite(file_id, fav);
             }
-            if self.tl.view == View::Favorites && !fav {
-                self.tl.remove_file(file_id);
-            }
             self.lib.queue_favorite(file_id, fav);
+        }
+        if self.tl.view == View::Favorites && !fav {
+            self.tl
+                .remove_files(&file_ids.iter().copied().collect::<HashSet<i64>>());
         }
     }
 
@@ -1371,7 +1453,11 @@ impl App {
     }
 
     /// Per frame: confirmations and failures of favorite writes, and what the writes changed.
+    /// Failures are handled as one batch: one notice and one pass over the lists.
     fn poll_favorites(&mut self) {
+        let mut failed = 0;
+        let mut first_error = String::new();
+        let mut reverted = false;
         for w in self.lib.take_favorite_results() {
             let pending = self
                 .fav_marks
@@ -1384,7 +1470,10 @@ impl App {
                     }
                 }
                 Some(e) => {
-                    self.notify(format!("Could not save the favorite mark: {e}"));
+                    failed += 1;
+                    if first_error.is_empty() {
+                        first_error = e;
+                    }
                     // A newer mark for the same file is still on its way: it decides.
                     if pending {
                         // The library still has the earlier state.
@@ -1399,14 +1488,22 @@ impl App {
                         if let Some(v) = &mut self.viewer {
                             v.set_favorite(w.file_id, value);
                         }
-                        // An item taken out of the Favorites list has to come back.
-                        if self.tl.view == View::Favorites {
-                            self.tl.requested = None;
-                        }
-                        self.patch_lists();
+                        reverted = true;
                     }
                 }
             }
+        }
+        if failed == 1 {
+            self.notify_error(format!("Could not save the favorite mark: {first_error}"));
+        } else if failed > 1 {
+            self.notify_error(format!("Couldn't save favorites for {failed} items"));
+        }
+        if reverted {
+            // An item taken out of the Favorites list has to come back.
+            if self.tl.view == View::Favorites {
+                self.tl.requested = None;
+            }
+            self.patch_lists();
         }
         let version = self.lib.favorites_version();
         if version != self.fav_version_seen {
@@ -1529,7 +1626,7 @@ impl App {
             self.settings_window(&ctx);
         }
         self.album_dialogs(&ctx);
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !self.keys_blocked(&ctx) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.clear_selection();
         }
     }
@@ -1539,6 +1636,9 @@ impl Drop for App {
     fn drop(&mut self) {
         // Closing the window stops background work cleanly (the database stays consistent
         // either way, but this avoids killing a write mid-transaction).
+        // Writes still queued (favorites, album changes) would be lost with the library, so
+        // let them finish first; bounded in case the database is stuck.
+        self.lib.wait_writes_for(Duration::from_secs(3));
         self.lib.cancel();
         // A download can be stuck in a network read; don't keep the process alive for it.
         self.lib.wait_for(Duration::from_secs(3));
@@ -1595,7 +1695,32 @@ mod tests;
 
 #[cfg(test)]
 mod nav_tests {
-    use super::{Nav, scroll_offset_for_row, step};
+    use super::{Nav, Notices, scroll_offset_for_row, step};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn an_error_is_not_swallowed_by_later_messages() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut n = Notices::default();
+        n.push("could not save".into(), true, t0);
+        n.push("Added 2 items".into(), false, at(1));
+        assert_eq!(n.current(), Some("could not save"));
+        // A newer error replaces the older one.
+        n.push("disk full".into(), true, at(2));
+        assert_eq!(n.current(), Some("disk full"));
+        // Plain messages expire sooner than errors; the error outlives them.
+        n.expire(at(7));
+        assert_eq!(n.current(), Some("disk full"));
+        assert_eq!(n.next_expiry(at(7)), Some(Duration::from_secs(3)));
+        // After the error's time the message is gone.
+        n.expire(at(11));
+        assert_eq!(n.current(), None);
+        // With no error, the latest message shows.
+        n.push("one".into(), false, at(20));
+        n.push("two".into(), false, at(21));
+        assert_eq!(n.current(), Some("two"));
+    }
 
     #[test]
     fn scroll_offset_keeps_rows_visible() {

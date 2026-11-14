@@ -128,7 +128,8 @@ enum WriteMsg {
 /// A change to the albums, applied by the writer in the order it was queued.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AlbumOp {
-    /// Creates an album and puts `add` in it.
+    /// Creates an album and puts `add` in it, all in one transaction: if anything fails,
+    /// nothing is created.
     Create {
         name: String,
         add: Vec<i64>,
@@ -213,11 +214,18 @@ pub struct Library {
     /// Makes the next favorites writes fail (tests).
     #[cfg(test)]
     pub(crate) fail_favorites: AtomicBool,
+    /// Makes the next album writes fail (tests).
+    #[cfg(test)]
+    pub(crate) fail_albums: AtomicBool,
 }
 
-/// Collapsed favorite marks waiting to be written.
-#[derive(Default)]
-struct FavoriteRun(HashMap<i64, bool>);
+/// What an applied album change did.
+struct Applied {
+    album: Option<i64>,
+    changed: usize,
+    /// Whether anything in the database is different now.
+    modified: bool,
+}
 
 /// The library writer: applies queued writes in order on one thread and reports each outcome.
 /// Consecutive favorite marks collapse to the latest value per file; an album change ends the
@@ -236,12 +244,12 @@ fn library_writer(
         let Some(lib) = lib.upgrade() else {
             return;
         };
-        let mut run = FavoriteRun::default();
+        let mut run: HashMap<i64, bool> = HashMap::new();
         let mut flushes = Vec::new();
         for m in batch {
             match m {
                 WriteMsg::Favorite(id, fav) => {
-                    run.0.insert(id, fav);
+                    run.insert(id, fav);
                 }
                 WriteMsg::Album(ticket, op) => {
                     write_favorites(&lib, &mut run, &favorites);
@@ -259,8 +267,8 @@ fn library_writer(
     }
 }
 
-fn write_favorites(lib: &Library, run: &mut FavoriteRun, results: &Sender<FavoriteWrite>) {
-    let latest = std::mem::take(&mut run.0);
+fn write_favorites(lib: &Library, run: &mut HashMap<i64, bool>, results: &Sender<FavoriteWrite>) {
+    let latest = std::mem::take(run);
     for fav in [true, false] {
         let ids: Vec<i64> = latest
             .iter()
@@ -295,11 +303,20 @@ fn write_favorites(lib: &Library, run: &mut FavoriteRun, results: &Sender<Favori
 }
 
 fn write_album(lib: &Library, ticket: u64, op: AlbumOp) -> AlbumWrite {
+    #[cfg(test)]
+    let outcome = if lib.fail_albums.load(Ordering::Acquire) {
+        Err(anyhow!("simulated failure"))
+    } else {
+        lib.apply_album_op(&op)
+    };
+    #[cfg(not(test))]
     let outcome = lib.apply_album_op(&op);
     let (album, changed, error) = match outcome {
-        Ok((album, changed)) => {
-            lib.albums_version.fetch_add(1, Ordering::AcqRel);
-            (album, changed, None)
+        Ok(done) => {
+            if done.modified {
+                lib.albums_version.fetch_add(1, Ordering::AcqRel);
+            }
+            (done.album, done.changed, None)
         }
         Err(e) => {
             tracing::warn!("could not save the album change: {e:#}");
@@ -404,6 +421,8 @@ impl Library {
             albums_version: AtomicU64::new(0),
             #[cfg(test)]
             fail_favorites: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_albums: AtomicBool::new(false),
         });
         *lib.self_ref.write() = Arc::downgrade(&lib);
         let weak = Arc::downgrade(&lib);
@@ -545,9 +564,19 @@ impl Library {
     /// Blocks until every write queued so far (favorites and album changes) has been written
     /// (or has failed).
     pub fn wait_writes(&self) {
+        self.wait_writes_for(None);
+    }
+
+    /// Like [`Self::wait_writes`] but gives up after `limit` (e.g. at exit, when the database
+    /// may be busy). Returns true when everything queued has been written.
+    pub fn wait_writes_for(&self, limit: impl Into<Option<std::time::Duration>>) -> bool {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        if self.write_tx.send(WriteMsg::Flush(tx)).is_ok() {
-            let _ = rx.recv();
+        if self.write_tx.send(WriteMsg::Flush(tx)).is_err() {
+            return false;
+        }
+        match limit.into() {
+            Some(l) => rx.recv_timeout(l).is_ok(),
+            None => rx.recv().is_ok(),
         }
     }
 
@@ -572,30 +601,46 @@ impl Library {
         self.albums_version.load(Ordering::Acquire)
     }
 
-    /// Applies one album change; returns the album concerned and the number of items changed.
-    fn apply_album_op(&self, op: &AlbumOp) -> Result<(Option<i64>, usize)> {
+    /// Applies one album change.
+    fn apply_album_op(&self, op: &AlbumOp) -> Result<Applied> {
         let mut db = self.db.lock();
         Ok(match op {
             AlbumOp::Create { name, add } => {
-                let id = db.create_album(name)?;
-                let n = if add.is_empty() {
-                    0
-                } else {
-                    db.add_to_album(id, add)?
-                };
-                (Some(id), n)
+                let (id, n) = db.create_album_with(name, add)?;
+                Applied {
+                    album: Some(id),
+                    changed: n,
+                    modified: true,
+                }
             }
             AlbumOp::Rename { id, name } => {
                 db.rename_album(*id, name)?;
-                (Some(*id), 0)
+                Applied {
+                    album: Some(*id),
+                    changed: 0,
+                    modified: true,
+                }
             }
-            AlbumOp::Delete { id } => {
-                db.delete_album(*id)?;
-                (Some(*id), 0)
+            AlbumOp::Delete { id } => Applied {
+                album: Some(*id),
+                changed: 0,
+                modified: db.delete_album(*id)?,
+            },
+            AlbumOp::Add { album, files } => {
+                let n = db.add_to_album(*album, files)?;
+                Applied {
+                    album: Some(*album),
+                    changed: n,
+                    modified: n > 0,
+                }
             }
-            AlbumOp::Add { album, files } => (Some(*album), db.add_to_album(*album, files)?),
             AlbumOp::Remove { album, files } => {
-                (Some(*album), db.remove_from_album(*album, files)?)
+                let n = db.remove_from_album(*album, files)?;
+                Applied {
+                    album: Some(*album),
+                    changed: n,
+                    modified: n > 0,
+                }
             }
         })
     }
@@ -605,26 +650,26 @@ impl Library {
         self.db.lock().albums()
     }
 
-    /// Creates an album, waiting for the write; `add` goes into it. The GUI uses
-    /// [`Self::queue_album`] instead.
-    pub fn create_album(&self, name: &str, add: &[i64]) -> Result<i64> {
-        let op = AlbumOp::Create {
+    /// Creates an album straight away, bypassing the write queue (tests set up state with it).
+    #[cfg(test)]
+    pub(crate) fn create_album(&self, name: &str, add: &[i64]) -> Result<i64> {
+        let done = self.apply_album_op(&AlbumOp::Create {
             name: name.to_string(),
             add: add.to_vec(),
-        };
-        let (id, _) = self.apply_album_op(&op)?;
+        })?;
         self.albums_version.fetch_add(1, Ordering::AcqRel);
-        Ok(id.expect("create returns an id"))
+        Ok(done.album.expect("create returns an id"))
     }
 
-    /// Adds files to an album, waiting for the write; returns how many were new to it.
-    pub fn add_to_album(&self, album: i64, files: &[i64]) -> Result<usize> {
-        let (_, n) = self.apply_album_op(&AlbumOp::Add {
+    /// Adds files to an album straight away, bypassing the write queue (tests only).
+    #[cfg(test)]
+    pub(crate) fn add_to_album(&self, album: i64, files: &[i64]) -> Result<usize> {
+        let done = self.apply_album_op(&AlbumOp::Add {
             album,
             files: files.to_vec(),
         })?;
         self.albums_version.fetch_add(1, Ordering::AcqRel);
-        Ok(n)
+        Ok(done.changed)
     }
 
     /// Outcomes of the favorites writes finished since the last call, oldest first.
@@ -1930,6 +1975,107 @@ mod tests {
             lib.timeline(&TimelineFilter::default()).unwrap().len(),
             ids.len()
         );
+    }
+
+    #[test]
+    fn the_album_version_moves_only_when_something_changed() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        seed_dated(&lib, &[]);
+        let ids: Vec<i64> = lib
+            .timeline(&TimelineFilter::default())
+            .unwrap()
+            .iter()
+            .map(|t| t.file_id)
+            .collect();
+        lib.queue_album(AlbumOp::Create {
+            name: "A".into(),
+            add: ids[..1].to_vec(),
+        });
+        lib.wait_writes();
+        let album = lib.take_album_results()[0].album.unwrap();
+        let v = lib.albums_version();
+        // Already in it, a missing file, removing what is not there, deleting what is gone.
+        lib.queue_album(AlbumOp::Add {
+            album,
+            files: ids[..1].to_vec(),
+        });
+        lib.queue_album(AlbumOp::Remove {
+            album,
+            files: ids[1..2].to_vec(),
+        });
+        lib.queue_album(AlbumOp::Delete { id: album + 100 });
+        lib.wait_writes();
+        let r = lib.take_album_results();
+        assert!(r.iter().all(|w| w.error.is_none()));
+        assert_eq!(lib.albums_version(), v);
+        // A real change moves it; so do rename and delete.
+        lib.queue_album(AlbumOp::Add {
+            album,
+            files: ids[1..2].to_vec(),
+        });
+        lib.wait_writes();
+        assert_eq!(lib.albums_version(), v + 1);
+        lib.queue_album(AlbumOp::Rename {
+            id: album,
+            name: "B".into(),
+        });
+        lib.queue_album(AlbumOp::Delete { id: album });
+        lib.wait_writes();
+        assert_eq!(lib.albums_version(), v + 3);
+        // The album is gone: adding to it is a plain message.
+        lib.queue_album(AlbumOp::Add {
+            album,
+            files: ids[..1].to_vec(),
+        });
+        lib.wait_writes();
+        let r = lib.take_album_results();
+        let e = r.last().unwrap().error.as_deref().unwrap();
+        assert_eq!(e, "That album no longer exists");
+        assert_eq!(lib.albums_version(), v + 3);
+    }
+
+    #[test]
+    fn a_failed_album_write_is_reported_and_changes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        seed_dated(&lib, &[]);
+        let id = lib.timeline(&TimelineFilter::default()).unwrap()[0].file_id;
+        let album = lib.create_album("Keep", &[id]).unwrap();
+        let v = lib.albums_version();
+        lib.fail_albums.store(true, Ordering::Release);
+        lib.queue_album(AlbumOp::Remove {
+            album,
+            files: vec![id],
+        });
+        lib.queue_album(AlbumOp::Delete { id: album });
+        lib.queue_album(AlbumOp::Create {
+            name: "New".into(),
+            add: vec![id],
+        });
+        lib.wait_writes();
+        let r = lib.take_album_results();
+        assert_eq!(r.len(), 3);
+        assert!(r.iter().all(|w| w.error.is_some() && w.changed == 0));
+        assert_eq!(lib.albums_version(), v);
+        let info = lib.albums().unwrap();
+        assert_eq!((info.len(), info[0].count), (1, 1));
+    }
+
+    #[test]
+    fn writes_queued_right_before_exit_are_committed() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        seed_dated(&lib, &[]);
+        let id = lib.timeline(&TimelineFilter::default()).unwrap()[0].file_id;
+        lib.queue_album(AlbumOp::Create {
+            name: "Last".into(),
+            add: vec![id],
+        });
+        lib.queue_favorite(id, true);
+        assert!(lib.wait_writes_for(std::time::Duration::from_secs(3)));
+        assert_eq!(lib.albums().unwrap()[0].count, 1);
+        assert_eq!(favorite_ids(&lib), [id]);
     }
 
     #[test]

@@ -101,7 +101,11 @@ write queue** served by a single writer thread, so a burst such as "create an al
 items" is applied in the order it was made. Consecutive favorite marks collapse to the latest
 value per file; an album change ends such a run. Each write reports back (the new album's id,
 how many items changed, or an error such as a duplicate name) and bumps a version counter that
-lists and views watch to reload. Album names are trimmed, non-empty and unique ignoring case;
+lists and views watch to reload (only when something actually changed). "Create with items" is
+one transaction, so a failure leaves nothing behind, and album changes are shown only once the
+writer has confirmed them. The sidebar's album list (counts and covers, two grouped queries) is
+read in the background when that version moves or a job finishes. Album names are trimmed,
+non-empty, at most 100 characters and unique ignoring case, checked by one shared function;
 `album_items` rows cascade away with their file or album, so deleting an album or removing a
 library folder never touches files and never deletes an album.
 

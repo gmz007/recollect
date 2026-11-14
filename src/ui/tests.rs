@@ -5,7 +5,7 @@ use crate::Library;
 use crate::config::Paths;
 use crate::model::{download, registry};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use std::sync::Arc;
 
 fn library(dir: &std::path::Path) -> Arc<Library> {
@@ -853,9 +853,9 @@ fn a_failed_favorite_write_takes_the_mark_back() {
     assert!(shown(), "marked right away");
     settle(&mut h, || {
         app.borrow()
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.0.contains("Could not save"))
+            .notices
+            .current()
+            .is_some_and(|n| n.contains("Could not save"))
     });
     assert!(!shown(), "the flag is back to what the library has");
     settle(&mut h, || app.borrow().fav_marks.is_empty());
@@ -1137,7 +1137,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("New album…").click();
     type_name(&mut h, "Trip");
     h.get_by_label("Create").click();
-    settle(&mut h, || app.borrow().snapshot.albums.len() == 1);
+    settle(&mut h, || app.borrow().albums.len() == 1);
     h.get_by_label("Trip (0)");
 
     // Add a multi-selection through the selection bar.
@@ -1150,7 +1150,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.run_steps(3);
     h.get_by_label("Trip").click();
     settle(&mut h, || {
-        lib.albums().unwrap()[0].count == 3 && app.borrow().snapshot.albums[0].count == 3
+        lib.albums().unwrap()[0].count == 3 && app.borrow().albums[0].count == 3
     });
     h.get_by_label_contains("Added 3 items to “Trip”");
     // Adding them again changes nothing.
@@ -1159,9 +1159,9 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("Trip").click();
     settle(&mut h, || {
         app.borrow()
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.0.contains("Already in"))
+            .notices
+            .current()
+            .is_some_and(|n| n.contains("Already in"))
     });
     assert_eq!(lib.albums().unwrap()[0].count, 3);
 
@@ -1169,7 +1169,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("Trip (3)").click();
     settle(&mut h, || {
         let a = app.borrow();
-        a.tl.view == View::Album(a.snapshot.albums[0].id) && a.tl.items.len() == 3 && a.tl.loaded
+        a.tl.view == View::Album(a.albums[0].id) && a.tl.items.len() == 3 && a.tl.loaded
     });
     h.run_steps(3);
     h.get_by_label("Item p4.jpg");
@@ -1184,7 +1184,11 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.run_steps(3);
     h.get_by_label("Remove from album").click();
     h.run_steps(3);
-    settle(&mut h, || lib.albums().unwrap()[0].count == 2);
+    // The grid drops the item once the library has confirmed the removal.
+    settle(&mut h, || {
+        lib.albums().unwrap()[0].count == 2 && app.borrow().tl.items.len() == 2
+    });
+    h.run_steps(2);
     assert!(h.query_by_label("Item p2.jpg").is_none());
     // ...and two with the selection bar.
     h.get_by_label("Item p4.jpg").click();
@@ -1213,8 +1217,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.run_steps(2);
     h.get_by_label("Rename").click();
     settle(&mut h, || {
-        lib.albums().unwrap()[0].name == "Holiday"
-            && app.borrow().snapshot.albums[0].name == "Holiday"
+        lib.albums().unwrap()[0].name == "Holiday" && app.borrow().albums[0].name == "Holiday"
     });
     h.get_by_label("Holiday");
     h.get_by_label_contains("Holiday (");
@@ -1244,8 +1247,8 @@ fn a_new_album_from_the_add_menu_gets_the_selection_and_names_must_be_unique() {
     let mut h = album_harness(&app);
     settle(&mut h, || app.borrow().tl.items.len() == 4);
     lib.create_album("Existing", &[]).unwrap();
-    app.borrow_mut().refresh_snapshot(true);
-    settle(&mut h, || app.borrow().snapshot.albums.len() == 1);
+    app.borrow_mut().refresh_albums();
+    settle(&mut h, || app.borrow().albums.len() == 1);
     h.get_by_label("Item p3.jpg").click();
     h.run_steps(3);
     // Single item: detail panel menu; "New album…" creates an album holding the item.
@@ -1294,10 +1297,9 @@ fn the_viewer_offers_add_to_album() {
     let mut h = quick_harness(&app);
     settle(&mut h, || {
         let a = app.borrow();
-        a.tl.items.len() == 3 && a.snapshot.albums.len() == 1
+        a.tl.items.len() == 3 && a.albums.len() == 1
     });
-    app.borrow_mut().refresh_snapshot(true);
-    settle(&mut h, || !app.borrow().snapshot.albums.is_empty());
+    settle(&mut h, || !app.borrow().albums.is_empty());
     double_click(&mut h, "Item p1.jpg");
     h.run_steps(3);
     let target = file_id_of(&lib, "p1.jpg");
@@ -1316,4 +1318,301 @@ fn the_viewer_offers_add_to_album() {
         items.iter().map(|i| i.file_id).collect::<Vec<_>>(),
         [target]
     );
+}
+
+// ---- Album dialogs, keys, failures, per-file selection ----------------------------------------
+
+fn all_file_ids(lib: &Library) -> Vec<i64> {
+    lib.timeline(&Default::default())
+        .unwrap()
+        .iter()
+        .map(|t| t.file_id)
+        .collect()
+}
+
+/// `files_app` with one album "A" holding all files, opened as the current view.
+fn album_view(
+    d: &std::path::Path,
+    n: usize,
+    h: impl FnOnce(&Rc<RefCell<App>>) -> Harness<'static>,
+) -> (Arc<Library>, Rc<RefCell<App>>, Harness<'static>) {
+    let (lib, app) = files_app(d, n);
+    let ids = all_file_ids(&lib);
+    lib.create_album("A", &ids).unwrap();
+    let mut h = h(&app);
+    settle(&mut h, || {
+        app.borrow().albums.len() == 1 && app.borrow().tl.items.len() == n
+    });
+    h.get_by_label(&format!("A ({n})")).click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        matches!(a.tl.view, View::Album(_)) && a.tl.items.len() == n && a.tl.loaded
+    });
+    h.run_steps(3);
+    (lib, app, h)
+}
+
+#[test]
+fn typing_in_the_viewers_new_album_field_changes_only_the_text() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = files_app(d.path(), 3);
+    let mut h = quick_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    double_click(&mut h, "Item p1.jpg");
+    h.run_steps(3);
+    let shown = |app: &Rc<RefCell<App>>| app.borrow().viewer.as_ref().unwrap().current().file_id;
+    let before = shown(&app);
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_all_by_label("New album…").last().unwrap().click();
+    h.run_steps(3);
+    type_name(&mut h, "fiz");
+    for key in [
+        egui::Key::F,
+        egui::Key::I,
+        egui::Key::Z,
+        egui::Key::ArrowRight,
+        egui::Key::ArrowLeft,
+        egui::Key::Home,
+        egui::Key::End,
+    ] {
+        h.key_press(key);
+        h.run_steps(2);
+    }
+    let a = app.borrow();
+    assert!(a.viewer.is_some(), "still open");
+    assert_eq!(a.viewer.as_ref().unwrap().current().file_id, before);
+    assert!(a.fav_marks.is_empty(), "no favorite change");
+    assert_eq!(a.new_album.as_ref().unwrap().name, "fiz");
+}
+
+#[test]
+fn keys_do_not_reach_the_grid_behind_a_dialog_and_enter_never_deletes() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app, mut h) = album_view(d.path(), 3, album_harness);
+    h.get_by_label("Item p1.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("Delete album…").click();
+    h.run_steps(3);
+    h.get_by_label("The photos and videos in it are not deleted.");
+    // Enter, F and arrows behind the dialog do nothing.
+    for key in [egui::Key::Enter, egui::Key::F, egui::Key::ArrowRight] {
+        h.key_press(key);
+        h.run_steps(3);
+    }
+    {
+        let a = app.borrow();
+        assert!(a.viewer.is_none());
+        assert!(a.fav_marks.is_empty());
+        assert!(a.delete_album.is_some(), "still asking");
+    }
+    assert_eq!(lib.albums().unwrap().len(), 1, "nothing deleted");
+    // Escape cancels and leaves the selection alone.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().delete_album.is_none());
+    assert_eq!(tl_selection(&app).len(), 1);
+}
+
+#[test]
+fn a_failing_remove_or_delete_changes_nothing_and_shows_an_error() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app, mut h) = album_view(d.path(), 3, album_harness);
+    lib.fail_albums
+        .store(true, std::sync::atomic::Ordering::Release);
+    h.get_by_label("Item p1.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("Remove from album").click();
+    settle(&mut h, || {
+        app.borrow()
+            .notices
+            .current()
+            .is_some_and(|n| n.contains("simulated failure"))
+    });
+    assert_eq!(app.borrow().tl.items.len(), 3, "the item is still listed");
+    h.get_by_label("Item p1.jpg");
+    assert_eq!(lib.albums().unwrap()[0].count, 3);
+    // Deleting: the dialog stays, the view stays.
+    h.get_by_label("Delete album…").click();
+    h.run_steps(3);
+    h.get_by_label("Delete").click();
+    // The writer has answered; the next frames show the error and re-enable the buttons.
+    lib.wait_writes();
+    h.run_steps(3);
+    assert!(
+        app.borrow()
+            .delete_album
+            .as_ref()
+            .is_some_and(|d| !d.pending())
+    );
+    assert!(matches!(app.borrow().tl.view, View::Album(_)));
+    assert_eq!(app.borrow().albums.len(), 1);
+    assert_eq!(lib.albums().unwrap().len(), 1);
+    // Once the library works again the same dialog deletes it, and only then the view moves.
+    lib.fail_albums
+        .store(false, std::sync::atomic::Ordering::Release);
+    h.get_by_label("Delete").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.view == View::Timeline && a.delete_album.is_none() && a.albums.is_empty()
+    });
+    assert!(lib.albums().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_create_reopens_the_dialog_with_the_name_and_the_items() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 3);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    lib.fail_albums
+        .store(true, std::sync::atomic::Ordering::Release);
+    h.get_by_label("Item p2.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_all_by_label("New album…").last().unwrap().click();
+    h.run_steps(3);
+    // While the window is open the sidebar cannot start another one.
+    assert!(h.get_by_label("New album…").accesskit_node().is_disabled());
+    type_name(&mut h, "Fresh");
+    h.get_by_label("Create").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.new_album
+            .as_ref()
+            .is_some_and(|n| n.name == "Fresh" && n.add.len() == 1)
+    });
+    h.get_by_label("1 item will be added to it.");
+    assert!(lib.albums().unwrap().is_empty());
+}
+
+#[test]
+fn long_album_names_are_refused_and_shortened() {
+    assert_eq!(super::albums::short_name("Trip", 28), "Trip");
+    let long = "Summer holidays with the whole family in the mountains";
+    let short = super::albums::short_name(long, 28);
+    assert_eq!(short.chars().count(), 28);
+    assert!(short.ends_with('…'));
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 2);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 2);
+    h.get_by_label("New album…").click();
+    type_name(&mut h, &"x".repeat(101));
+    h.get_by_label("Create").click();
+    h.run_steps(3);
+    h.get_by_label_contains("at most 100");
+    assert!(lib.albums().unwrap().is_empty());
+    // A long but valid name shows shortened in the sidebar.
+    app.borrow_mut().new_album = None;
+    h.run_steps(2);
+    lib.create_album(long, &[]).unwrap();
+    settle(&mut h, || app.borrow().albums.len() == 1);
+    h.get_by_label(&format!("{short} (0)"));
+}
+
+#[test]
+fn search_selection_counts_files_and_toggles_per_file() {
+    use crate::media::MediaKind;
+    let d = tempfile::tempdir().unwrap();
+    let mut app = grid_app(d.path());
+    // r1 and r3 are two hits of file 1.
+    app.results = Arc::new(
+        [1, 2, 1, 3]
+            .iter()
+            .enumerate()
+            .map(|(k, &f)| {
+                let mut h = hit(&format!("/nowhere/r{}.jpg", k + 1), MediaKind::Image, None);
+                h.file_id = f;
+                h
+            })
+            .collect(),
+    );
+    let app = Rc::new(RefCell::new(app));
+    let mut h = album_harness(&app);
+    h.get_by_label("Result r1.jpg").click();
+    h.run_steps(3);
+    // A range over the visible hits r1..r3 covers two files.
+    click_with(&mut h, "Result r3.jpg", egui::Modifiers::SHIFT);
+    assert_eq!(tl_selection(&app), [1, 2]);
+    h.get_by_label("2 selected");
+    h.get_by_label("2 items selected");
+    click_with(&mut h, "Result r4.jpg", egui::Modifiers::COMMAND);
+    assert_eq!(tl_selection(&app), [1, 2, 3]);
+    h.get_by_label("3 selected");
+    // Ctrl+click on the other hit of selected file 1 deselects that file, not everything.
+    click_with(&mut h, "Result r3.jpg", egui::Modifiers::COMMAND);
+    assert_eq!(tl_selection(&app), [2, 3]);
+    h.get_by_label("2 selected");
+    assert!(app.borrow().result_sel.contains(3));
+}
+
+#[test]
+fn a_bulk_favorite_failure_is_one_notice() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = favorites_app(d.path());
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    lib.fail_favorites
+        .store(true, std::sync::atomic::Ordering::Release);
+    h.get_by_label("Item a.jpg").click();
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(3);
+    h.get_by_label("Favorite").click();
+    settle(&mut h, || {
+        app.borrow()
+            .notices
+            .current()
+            .is_some_and(|n| n.contains("Couldn't save favorites for 3 items"))
+    });
+    settle(&mut h, || app.borrow().fav_marks.is_empty());
+    assert!(app.borrow().tl.items.iter().all(|it| !it.favorite));
+}
+
+#[test]
+fn right_clicking_inside_a_selection_acts_on_all_of_it() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 4);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 4);
+    let album = lib.create_album("A", &[]).unwrap();
+    settle(&mut h, || app.borrow().albums.len() == 1);
+    h.get_by_label("Item p3.jpg").click();
+    h.run_steps(3);
+    click_with(&mut h, "Item p1.jpg", egui::Modifiers::COMMAND);
+    click_with(&mut h, "Item p0.jpg", egui::Modifiers::COMMAND);
+    h.get_by_label("Item p1.jpg").click_secondary();
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app).len(), 3, "the selection is kept");
+    h.get_all_by_label("Add to album…").last().unwrap().click();
+    h.run_steps(3);
+    h.get_all_by_label("A").last().unwrap().click();
+    settle(&mut h, || lib.albums().unwrap()[0].count == 3);
+    assert_eq!(lib.albums().unwrap()[0].id, album);
+    // A right-click outside the selection selects that item alone.
+    h.get_by_label("Item p2.jpg").click_secondary();
+    h.run_steps(3);
+    let id = file_id_of(&lib, "p2.jpg");
+    assert_eq!(tl_selection(&app), [id]);
+}
+
+#[test]
+fn tiles_tell_assistive_tech_whether_they_are_selected() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = small_tiles_harness(&app);
+    h.get_by_label("Item img1.jpg").click();
+    h.run_steps(3);
+    click_with(&mut h, "Item img3.jpg", egui::Modifiers::COMMAND);
+    let on = |h: &Harness<'_>, l: &str| {
+        h.get_by_label(l)
+            .accesskit_node()
+            .toggled()
+            .map(|t| format!("{t:?}"))
+    };
+    assert_eq!(on(&h, "Item img1.jpg").as_deref(), Some("True"));
+    assert_eq!(on(&h, "Item img3.jpg").as_deref(), Some("True"));
+    assert_eq!(on(&h, "Item img2.jpg").as_deref(), Some("False"));
 }

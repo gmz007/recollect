@@ -638,29 +638,62 @@ impl TimelineState {
         self.loaded = true;
     }
 
-    /// Takes a file out of the list (it no longer belongs to the view, e.g. it was unfavorited
-    /// in Favorites). The selection stays on the same file, or moves to the one after a
-    /// removed selection; the scroll position stays on the photo at the top. The list is
-    /// copied only if the viewer holds a snapshot of it.
+    /// Takes a file out of the list (see [`Self::remove_files`]).
+    #[cfg(test)]
     pub(super) fn remove_file(&mut self, file_id: i64) {
-        let Some(pos) = self.items.iter().position(|it| it.file_id == file_id) else {
+        self.remove_files(&HashSet::from([file_id]));
+    }
+
+    /// Takes files out of the list (they no longer belong to the view, e.g. they were
+    /// unfavorited in Favorites or taken out of the album): one pass over the list, one rebuild
+    /// of the date index and one fix-up of the selection and scroll position however many go.
+    /// The selection stays on the same file, or moves to the one after a removed primary; the
+    /// scroll position stays on the photo at the top. The list is copied only if the viewer
+    /// holds a snapshot of it.
+    pub(super) fn remove_files(&mut self, ids: &HashSet<i64>) {
+        if ids.is_empty() || !self.items.iter().any(|it| ids.contains(&it.file_id)) {
             return;
+        }
+        // How many removed items precede index `at` (where an index lands after the removal).
+        let before = |items: &[TimelineItem], at: usize| {
+            items[..at.min(items.len())]
+                .iter()
+                .filter(|it| ids.contains(&it.file_id))
+                .count()
         };
-        Arc::make_mut(&mut self.items).remove(pos);
-        self.sel.remove(file_id);
+        let primary = self.selected.filter(|&s| s < self.items.len());
+        let primary_removed = primary.is_some_and(|s| ids.contains(&self.items[s].file_id));
+        let sel_shift = primary.map(|s| before(&self.items, s));
+        let top = self.top_item.filter(|&t| t > 0);
+        let top_shift = top.map(|t| before(&self.items, t));
+        Arc::make_mut(&mut self.items).retain(|it| !ids.contains(&it.file_id));
+        self.sel.remove_all(ids);
         self.generation += 1;
         self.dates = date_index(&self.items);
         let len = self.items.len();
-        self.selected = match self.selected {
-            Some(s) if s == pos => (len > 0).then(|| pos.min(len - 1)),
-            Some(s) if s > pos => Some(s - 1),
-            other => other,
+        self.selected = match (primary, sel_shift) {
+            (Some(s), Some(shift)) => {
+                let moved = s - shift;
+                if !primary_removed {
+                    Some(moved)
+                } else if self.sel.len() > 0 {
+                    // Others stay selected: the first of them takes over.
+                    self.items
+                        .iter()
+                        .position(|it| self.sel.contains(it.file_id))
+                } else {
+                    (len > 0).then(|| moved.min(len - 1))
+                }
+            }
+            _ => None,
         };
         if self.selected.is_some() {
             self.keyboard_moved = true;
         }
-        if let Some(top) = self.top_item.filter(|&t| t > 0) {
-            self.pending = Some((if top > pos { top - 1 } else { top }, false));
+        if let Some((t, shift)) = top.zip(top_shift)
+            && len > 0
+        {
+            self.pending = Some(((t - shift).min(len - 1), false));
         }
         self.top_item = None;
     }
@@ -1184,7 +1217,11 @@ impl App {
         let marks = &self.fav_marks;
         let thumbs = &mut self.thumbs;
         let layout = tl.layout.as_ref().expect("layout was just built");
+        let albums = &self.albums;
+        let in_album = matches!(tl.view, View::Album(_));
         let mut clicked: Option<(usize, bool, ClickMods)> = None;
+        let mut right_clicked = None;
+        let mut menu = None;
         let mut top_item = None;
         let out = area.show_viewport(ui, |ui, viewport| {
             let (origin, _) =
@@ -1216,6 +1253,8 @@ impl App {
                                 Vec2::splat(layout.tile),
                             );
                             let item = &tl.items[i];
+                            let is_selected =
+                                tl.selected == Some(i) || tl.sel.contains(item.file_id);
                             let resp = ui.interact(
                                 rect,
                                 ui.make_persistent_id(("tile", i)),
@@ -1232,8 +1271,7 @@ impl App {
                                     TileMarks {
                                         badge,
                                         favorite: marked(marks, item.file_id, item.favorite),
-                                        selected: tl.selected == Some(i)
-                                            || tl.sel.contains(item.file_id),
+                                        selected: is_selected,
                                         hovered: resp.hovered(),
                                     },
                                 );
@@ -1241,12 +1279,25 @@ impl App {
                             let name = file_name(item);
                             let label = format!("Item {name}");
                             resp.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
+                                egui::WidgetInfo::selected(
+                                    egui::Role::Button,
+                                    true,
+                                    is_selected,
+                                    &label,
+                                )
                             });
                             if resp.double_clicked() || resp.clicked() {
                                 let mods = ClickMods::of_click(ui.ctx());
                                 clicked = Some((i, resp.double_clicked() && mods.is_plain(), mods));
                             }
+                            if resp.secondary_clicked() {
+                                right_clicked = Some(i);
+                            }
+                            resp.context_menu(|ui| {
+                                if let Some(m) = albums::tile_menu(ui, albums, in_album) {
+                                    menu = Some((i, m));
+                                }
+                            });
                             resp.on_hover_text(format!("{name}\n{}", fmt_taken(item)));
                         }
                     }
@@ -1287,6 +1338,12 @@ impl App {
             if open {
                 self.open_timeline_item(i);
             }
+        }
+        if let Some(i) = right_clicked {
+            self.select_for_menu(i);
+        }
+        if let Some((i, m)) = menu {
+            self.apply_tile_menu(i, m);
         }
         // Applying a scroll offset needs one more frame to take effect.
         if self.tl.scroll_to.is_some() {
@@ -1373,11 +1430,7 @@ impl App {
     /// Keys for the grid (same rules as for search results): arrows, Shift+arrows,
     /// Ctrl/Cmd+A, Enter and F.
     pub(super) fn handle_timeline_keys(&mut self, ctx: &egui::Context, grid_was_shown: bool) {
-        if !grid_was_shown
-            || self.settings_open
-            || self.tl.items.is_empty()
-            || ctx.text_edit_focused()
-        {
+        if !grid_was_shown || self.tl.items.is_empty() || self.keys_blocked(ctx) {
             return;
         }
         if take_plain_key(ctx, egui::Key::F) {
@@ -1464,12 +1517,12 @@ impl App {
             if ui.button("Open").clicked()
                 && let Err(e) = platform::open(&item.path)
             {
-                self.notify(format!("{e:#}"));
+                self.notify_error(format!("{e:#}"));
             }
             if ui.button("Show in folder").clicked()
                 && let Err(e) = platform::reveal(&item.path)
             {
-                self.notify(format!("{e:#}"));
+                self.notify_error(format!("{e:#}"));
             }
             if let Some(item_id) = item.item_id.filter(|_| self.snapshot.model_installed)
                 && ui.button("Find similar").clicked()
@@ -1486,17 +1539,17 @@ impl App {
             if ui.button(label).clicked() {
                 self.set_favorite(item.file_id, !fav);
             }
-            if let Some(c) = albums::album_menu(ui, &self.snapshot.albums) {
+            if let Some(c) = albums::album_menu(ui, &self.albums) {
                 self.add_to_album_choice(vec![item.file_id], c);
             }
             if let View::Album(album) = self.tl.view
                 && ui.button("Remove from album").clicked()
             {
+                // The grid drops it once the library confirms.
                 self.lib.queue_album(AlbumOp::Remove {
                     album,
                     files: vec![item.file_id],
                 });
-                self.tl.remove_file(item.file_id);
             }
         });
     }
@@ -1938,6 +1991,77 @@ mod tests {
         assert_eq!(st.selected, None);
         assert!(st.items.is_empty());
         st.remove_file(42); // unknown: nothing happens
+    }
+
+    #[test]
+    fn removing_many_files_fixes_selection_and_scroll_once() {
+        let mut st = state_for_test();
+        let items: Vec<_> = (0..50_000)
+            .map(|i| {
+                let mut it = item(1_000_000 + i);
+                it.file_id = i;
+                it
+            })
+            .collect();
+        st.set_items(items);
+        // Every even file goes; the selection is file 11.
+        let gone: HashSet<i64> = (0..50_000).filter(|i| i % 2 == 0).collect();
+        st.selected = Some(11);
+        st.sel.only(11);
+        st.top_item = Some(1_001);
+        let generation = st.generation;
+        st.remove_files(&gone);
+        assert_eq!(st.items.len(), 25_000);
+        assert_eq!(
+            st.generation,
+            generation + 1,
+            "one rebuild, not one per file"
+        );
+        assert!(st.items.iter().all(|it| it.file_id % 2 == 1));
+        // File 11 is now at index 5; the file at the top (1001, odd) is at 500.
+        assert_eq!(st.selected, Some(5));
+        assert!(st.sel.contains(11));
+        assert_eq!(st.pending, Some((500, false)));
+        // Removing the primary with others selected hands it to the first remaining one.
+        let mut st = state_for_test();
+        st.set_items(
+            (0..10)
+                .map(|i| {
+                    let mut it = item(1_000_000 + i);
+                    it.file_id = i;
+                    it
+                })
+                .collect(),
+        );
+        st.selected = Some(2);
+        st.sel.only(2);
+        let ids = |v: &[i64]| v.iter().copied().collect::<HashSet<i64>>();
+        st.sel.click(
+            Some(2),
+            10,
+            &|k| k as i64,
+            6,
+            selection::ClickMods {
+                toggle: true,
+                range: false,
+            },
+        );
+        st.sel.click(
+            Some(6),
+            10,
+            &|k| k as i64,
+            8,
+            selection::ClickMods {
+                toggle: true,
+                range: false,
+            },
+        );
+        st.selected = Some(8);
+        st.remove_files(&ids(&[8, 2, 0]));
+        // Items 1,3,4,5,6,7,9 remain; 6 is the first selected one left, at index 4.
+        assert_eq!(st.selected, Some(4));
+        assert_eq!(st.items[4].file_id, 6);
+        assert_eq!(st.sel.len(), 1);
     }
 
     /// A timeline state without a real library behind it.

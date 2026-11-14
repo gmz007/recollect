@@ -217,6 +217,15 @@ pub(super) struct Viewer {
     moments: HashMap<usize, f64>,
 }
 
+/// What the app tells the viewer each frame.
+pub struct ViewerEnv<'a> {
+    pub can_find_similar: bool,
+    pub albums: &'a [AlbumInfo],
+    pub notice: Option<&'a str>,
+    /// False while a text field or a dialog has the keyboard.
+    pub keys: bool,
+}
+
 impl Viewer {
     pub fn new(source: Source, index: usize, info: bool) -> Self {
         let index = index.min(source.len().saturating_sub(1));
@@ -344,13 +353,20 @@ impl Viewer {
         ui: &mut egui::Ui,
         previews: &mut Previews,
         thumbs: &mut ThumbCache,
-        can_find_similar: bool,
-        albums: &[AlbumInfo],
-        notice: Option<&str>,
+        env: ViewerEnv<'_>,
     ) -> Vec<Action> {
+        let ViewerEnv {
+            can_find_similar,
+            albums,
+            notice,
+            keys,
+        } = env;
         let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
-        self.handle_keys(&ctx, &mut actions);
+        // While a text field has focus or a dialog is open, keys belong to them.
+        if keys {
+            self.handle_keys(&ctx, &mut actions);
+        }
         egui::Panel::top("viewer_top").show(ui, |ui| {
             ui.add_space(6.0);
             self.top_bar(ui, albums, &mut actions);
@@ -753,14 +769,17 @@ impl App {
         // Details (file size, camera) are re-read once the library has changed under them.
         self.previews
             .sync_details((self.tl.generation, self.lib.jobs_finished()));
-        let notice = self.notice.as_ref().map(|n| n.0.as_str());
+        let keys = !self.keys_blocked(ui.ctx());
         let actions = viewer.show(
             ui,
             &mut self.previews,
             &mut self.thumbs,
-            can_similar,
-            &self.snapshot.albums,
-            notice,
+            ViewerEnv {
+                can_find_similar: can_similar,
+                albums: &self.albums,
+                notice: self.notices.current(),
+                keys,
+            },
         );
         self.viewer = Some(viewer);
         for a in actions {
@@ -770,17 +789,17 @@ impl App {
                 Action::AddToAlbum(id, c) => self.add_to_album_choice(vec![id], c),
                 Action::Open(p) => {
                     if let Err(e) = platform::open(&p) {
-                        self.notify(format!("{e:#}"));
+                        self.notify_error(format!("{e:#}"));
                     }
                 }
                 Action::Reveal(p) => {
                     if let Err(e) = platform::reveal(&p) {
-                        self.notify(format!("{e:#}"));
+                        self.notify_error(format!("{e:#}"));
                     }
                 }
                 Action::PlayAt(p, t) => {
                     if let Err(e) = platform::open_video_at(&p, t) {
-                        self.notify(format!("{e:#}"));
+                        self.notify_error(format!("{e:#}"));
                     }
                 }
                 Action::FindSimilar { item_id, label } => {
