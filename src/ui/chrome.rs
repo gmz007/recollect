@@ -3,7 +3,7 @@
 
 use super::style::{self, Palette, icons};
 use super::timeline::{Group, View, thousands};
-use super::{App, Notices};
+use super::{App, NoticeAction, Notices};
 use crate::media::MediaKind;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
@@ -144,6 +144,7 @@ impl App {
                 g,
                 pal.text_secondary,
             );
+            self.search_help.field = None;
             resp.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::Button, true, SEARCH_OFF_LABEL)
             });
@@ -167,7 +168,9 @@ impl App {
             .corner_radius(radius)
             .inner_margin(Margin::symmetric(10, 2));
         let mut cleared = false;
-        frame.show(ui, |ui| {
+        let mut has_focus = false;
+        let mut done_typing = false;
+        let shown = frame.show(ui, |ui| {
             ui.set_width(width - 20.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -190,9 +193,14 @@ impl App {
                 if resp.changed() {
                     self.query_changed_at = Some(Instant::now());
                 }
+                // (Asked of the memory, like the frame's border: `Response::has_focus` is also
+                // false when the window itself is not the active one.)
+                has_focus = ui.memory(|m| m.has_focus(id));
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.query_changed_at = Some(Instant::now() - super::DEBOUNCE);
                 }
+                // Enter or a click elsewhere: the person is done typing.
+                done_typing = resp.lost_focus();
                 if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
                     resp.request_focus();
                 }
@@ -203,6 +211,12 @@ impl App {
                 }
             });
         });
+        self.search_help.field = Some(shown.response.rect);
+        self.search_help.focused = has_focus;
+        if done_typing {
+            let q = self.query.clone();
+            self.remember_search(&q);
+        }
         if cleared {
             self.clear_search();
         }
@@ -298,7 +312,11 @@ impl App {
                 if !subtitle.is_empty() {
                     ui.label(RichText::new(subtitle).color(pal.text_secondary));
                 } else if let Some(e) = &self.tl.error {
-                    ui.colored_label(pal.error, format!("Couldn't load your photos. {e}"));
+                    tracing::warn!("could not load the photos: {e}");
+                    ui.colored_label(
+                        pal.error,
+                        "Couldn't load your photos. Please try again in a moment.",
+                    );
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -456,57 +474,26 @@ impl App {
     /// Starts the one-time download of smart search.
     pub(super) fn turn_on_search(&mut self) {
         if let Err(e) = self.lib.start_download() {
-            self.notify_error(format!("Couldn't start the download. {e:#}"));
+            self.notify_problem(
+                "Couldn't start the download. Please try again in a moment.",
+                format!("{e:#}"),
+                Some(NoticeAction::Download),
+            );
         }
-    }
-
-    /// A short explanation and the keyboard shortcuts.
-    pub(super) fn help_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.help_open;
-        egui::Window::new("Help")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                ui.set_max_width(460.0);
-                ui.label(style::semibold("Finding photos").size(16.0));
-                ui.add_space(4.0);
-                ui.label(
-                    "Type a few words about what you remember, like “dog on the beach” or \
-                     “birthday cake”, and Recollect shows the photos and videos that look most \
-                     like it. Everything happens on this computer, so it keeps working \
-                     offline and nothing is uploaded.",
-                );
-                ui.add_space(12.0);
-                ui.label(style::semibold("Keyboard shortcuts").size(16.0));
-                ui.add_space(4.0);
-                egui::Grid::new("shortcuts")
-                    .num_columns(2)
-                    .spacing([16.0, 4.0])
-                    .show(ui, |ui| {
-                        for (keys, what) in SHORTCUTS {
-                            ui.label(style::semibold(*keys));
-                            ui.label(*what);
-                            ui.end_row();
-                        }
-                    });
-            });
-        self.help_open = open;
     }
 
     /// The current notice as a card at the bottom of the window.
     pub(super) fn toasts(&mut self, ctx: &egui::Context) {
-        let Some((text, error)) = self
+        let Some((text, error, details, action)) = self
             .notices
-            .current()
-            .map(|t| (t.to_string(), self.notices.current_is_error()))
+            .current_notice()
+            .map(|n| (n.text.clone(), n.error, n.details.clone(), n.action))
         else {
             return;
         };
         let pal = Palette::of(ctx);
         let mut dismiss = false;
+        let mut retry = None;
         egui::Area::new(egui::Id::unique("toast"))
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
             .order(egui::Order::Foreground)
@@ -526,44 +513,37 @@ impl App {
                                 (icons::ICON_CHECK_CIRCLE, pal.accent)
                             };
                             ui.label(style::icon_text(icon, 22.0).color(color));
-                            ui.label(&text);
+                            ui.vertical(|ui| {
+                                ui.label(&text);
+                                if let Some(a) = action
+                                    && ui.button("Try again").clicked()
+                                {
+                                    retry = Some(a);
+                                }
+                                if let Some(d) = &details {
+                                    egui::CollapsingHeader::new("Details")
+                                        .id_salt("toast-details")
+                                        .show(ui, |ui| {
+                                            ui.label(RichText::new(d).small());
+                                        });
+                                }
+                            });
                             if style::icon_button(ui, icons::ICON_CLOSE, "Dismiss").clicked() {
                                 dismiss = true;
                             }
                         });
                     });
             });
-        if dismiss {
+        if dismiss || retry.is_some() {
             self.notices.dismiss_current();
+        }
+        if let Some(a) = retry {
+            self.retry(a);
         }
     }
 }
 
-/// Keys and what they do, for the help window.
-const SHORTCUTS: &[(&str, &str)] = &[
-    ("Arrow keys", "Move between photos"),
-    ("Enter", "Open the photo you are on"),
-    ("Esc", "Go back, or clear the selection"),
-    ("Ctrl+click (Cmd on Mac)", "Select several photos"),
-    ("Shift+click", "Select everything in between"),
-    ("Ctrl+A (Cmd on Mac)", "Select everything"),
-    ("F", "Mark as favorite, or remove the mark"),
-    ("Ctrl+F (Cmd on Mac)", "Go to the search box"),
-    (
-        "Left and right arrows",
-        "Previous and next photo while viewing",
-    ),
-    ("I", "Show or hide photo details while viewing"),
-    ("Z", "Zoom in and out while viewing"),
-    ("Home and End", "First and last photo while viewing"),
-];
-
 impl Notices {
-    /// True when the notice [`Notices::current`] shows is an error.
-    pub(super) fn current_is_error(&self) -> bool {
-        self.items.iter().any(|n| n.error)
-    }
-
     /// Takes the message that [`Notices::current`] shows away (the toast's close button).
     pub(super) fn dismiss_current(&mut self) {
         if self.items.iter().any(|n| n.error) {

@@ -953,17 +953,32 @@ impl App {
                 Action::AddToAlbum(id, c) => self.add_to_album_choice(vec![id], c),
                 Action::Open(p) => {
                     if let Err(e) = platform::open(&p) {
-                        self.notify_error(format!("{e:#}"));
+                        self.notify_problem(
+                            "Couldn't open that file. It may have been moved or deleted; check \
+                             that it is still in its folder.",
+                            format!("{e:#}"),
+                            None,
+                        );
                     }
                 }
                 Action::Reveal(p) => {
                     if let Err(e) = platform::reveal(&p) {
-                        self.notify_error(format!("{e:#}"));
+                        self.notify_problem(
+                            "Couldn't show that file in its folder. It may have been moved or \
+                             deleted.",
+                            format!("{e:#}"),
+                            None,
+                        );
                     }
                 }
                 Action::PlayAt(p, t) => {
                     if let Err(e) = platform::open_video_at(&p, t) {
-                        self.notify_error(format!("{e:#}"));
+                        self.notify_problem(
+                            "Couldn't play that video. Install a video player such as VLC, or \
+                             open the file from its folder.",
+                            format!("{e:#}"),
+                            None,
+                        );
                     }
                 }
                 Action::FindSimilar { item_id, label } => {

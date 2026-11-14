@@ -27,6 +27,8 @@ fn fake_install(lib: &Library) {
 }
 
 fn harness(lib: Arc<Library>) -> Harness<'static> {
+    // Most tests are about the app itself, not the first-run welcome.
+    lib.update_settings(|s| s.welcome_done = true).unwrap();
     let mut app = App::new(&egui::Context::default(), lib);
     app.frame_stats = None;
     let mut h = Harness::builder()
@@ -120,9 +122,10 @@ fn empty_library_invites_adding_a_folder() {
     let lib = library(d.path());
     fake_install(&lib);
     let mut h = harness(lib);
-    h.get_by_label("Add a folder to get started");
+    h.get_by_label("Add a folder with your photos and videos to get started.");
     h.get_by_label("No folders yet.");
-    h.get_by_label("Add your first folder").click();
+    // The button in the middle and the + in the sidebar do the same thing.
+    h.get_all_by_label("Add a folder").last().unwrap().click();
     h.run();
     h.get_by_label("or type a folder path");
     h.get_by_label("Choose a folder…");
@@ -698,9 +701,9 @@ fn timeline_shows_month_headers_and_regroups() {
     h.get_by_label("Sunday 15 December 2019 · 1");
     // The sort menu says what it is set to and flips the order.
     h.get_by_label("Sort: Newest first").click();
-    h.run();
+    h.run_steps(8);
     h.get_by_label("Oldest first").click();
-    h.run();
+    h.run_steps(8);
     h.get_by_label("Sort: Oldest first");
     assert!(!app.borrow().tl.newest_first);
 }
@@ -1026,7 +1029,8 @@ fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
     assert!(h.query_by_label("Item b.jpg").is_none());
     settle(&mut h, || app.borrow().tl.awaiting.is_none());
     h.run_steps(2);
-    h.get_by_label("No favorites yet");
+    h.get_by_label("Click the star on any photo to add it here.");
+    h.get_by_label("Go to Photos");
     assert_eq!(app.borrow().tl.selected, None);
     settle(&mut h, || lib.timeline(&fav).unwrap().is_empty());
     // ...and it stays gone after the view is reloaded.
@@ -1573,7 +1577,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
         a.tl.items.is_empty() && a.tl.awaiting.is_none() && a.tl.loaded
     });
     h.run_steps(3);
-    h.get_by_label("This album is empty");
+    h.get_by_label("This album is empty. Select photos and choose Add to album.");
     assert_eq!(lib.timeline(&Default::default()).unwrap().len(), 5);
 
     // Put one back, then rename.
@@ -1803,8 +1807,9 @@ fn a_failing_remove_or_delete_changes_nothing_and_shows_an_error() {
     settle(&mut h, || {
         app.borrow()
             .notices
-            .current()
-            .is_some_and(|n| n.contains("simulated failure"))
+            .current_notice()
+            .and_then(|n| n.details.as_deref())
+            .is_some_and(|d| d.contains("simulated failure"))
     });
     assert_eq!(app.borrow().tl.items.len(), 3, "the item is still listed");
     h.get_by_label("Item p1.jpg");
@@ -1999,7 +2004,7 @@ fn adding_a_folder_from_the_dialog_by_path() {
     let lib = library(d.path());
     fake_install(&lib);
     let mut h = harness(Arc::clone(&lib));
-    h.get_by_label("Add a folder").click();
+    h.get_all_by_label("Add a folder").next().unwrap().click();
     h.run_steps(3);
     h.get_by_label("Choose a folder…");
     h.get_by_label("or type a folder path");
@@ -2134,16 +2139,48 @@ fn notices_appear_as_toasts_and_errors_can_be_closed() {
 }
 
 #[test]
-fn help_lists_shortcuts_and_explains_search() {
+fn help_has_a_section_for_each_question() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = album_harness(&app);
     h.get_by_label("Help").click();
     h.run_steps(3);
-    h.get_by_label("Keyboard shortcuts");
-    h.get_by_label("Finding photos");
-    h.get_by_label("Arrow keys");
-    h.get_by_label_contains("dog on the beach");
+    // Getting started comes first.
+    h.get_by_label("Add your photo folders");
+    h.get_by_label("Search or browse");
+    for (topic, heading, text) in [
+        (
+            "Searching",
+            "Describe what you remember",
+            "kids on the beach",
+        ),
+        ("Searching", "Narrow the results", "When"),
+        ("Searching", "Moments in videos", "at 1:23"),
+        ("Organizing", "Favorites", "star"),
+        ("Organizing", "Albums", "Add to album"),
+        ("Organizing", "Selecting several photos", "circle"),
+        ("Keyboard shortcuts", "Arrow keys", "Move between photos"),
+        (
+            "Privacy",
+            "Everything stays on this computer",
+            "never sent anywhere",
+        ),
+    ] {
+        h.get_by_label(&format!("{topic} help")).click();
+        h.run_steps(3);
+        // (Favorites and Albums are also names in the sidebar behind the sheet.)
+        assert!(h.query_all_by_label(heading).next().is_some(), "{heading}");
+        assert!(
+            h.query_all_by_label_contains(text).next().is_some(),
+            "{text}"
+        );
+    }
+    h.get_by_label("Close help").click();
+    h.run_steps(3);
+    assert!(!app.borrow().help_open);
+    // Esc closes it too.
+    h.get_by_label("Help").click();
+    h.run_steps(3);
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(!app.borrow().help_open);
@@ -2229,6 +2266,29 @@ fn the_main_screens_use_no_technical_words() {
         let h = harness(lib);
         check("empty library", &h);
     }
+    // The welcome, every screen.
+    {
+        let d = tempfile::tempdir().unwrap();
+        let app = fresh_app(d.path());
+        let mut h = album_harness(&app);
+        check("welcome: first screen", &h);
+        h.get_by_label("Get started").click();
+        h.run_steps(3);
+        check("welcome: folders", &h);
+        h.get_by_label("Skip").click();
+        h.run_steps(3);
+        check("welcome: smart search", &h);
+        h.get_by_label("Skip for now").click();
+        h.run_steps(3);
+        check("welcome: all set", &h);
+    }
+    // Every empty state.
+    for (name, which) in EMPTY_VIEWS {
+        let d = tempfile::tempdir().unwrap();
+        let (_app, mut h) = empty_view(d.path(), which);
+        h.run_steps(2);
+        check(name, &h);
+    }
     // Timeline with items, smart search off (banner, invitation), then on.
     {
         let app = album_app(d.path(), false);
@@ -2310,8 +2370,35 @@ fn the_main_screens_use_no_technical_words() {
         // Help.
         h.get_by_label("Help").click();
         h.run_steps(3);
-        h.get_by_label("Keyboard shortcuts");
-        check("help", &h);
+        for topic in [
+            "Getting started",
+            "Searching",
+            "Organizing",
+            "Keyboard shortcuts",
+            "Privacy",
+        ] {
+            h.get_by_label(&format!("{topic} help")).click();
+            h.run_steps(3);
+            check(&format!("help: {topic}"), &h);
+        }
+        h.get_by_label("Close help").click();
+        h.run_steps(3);
+        // The search help, with a recent search in it, and the tips.
+        app.borrow_mut().remember_search("snow");
+        app.borrow_mut().snapshot.model_installed = true;
+        h.get_by_label("Search your photos").click();
+        h.run_steps(3);
+        h.get_by_label("kids on the beach");
+        check("search help", &h);
+        app.borrow_mut().search_help.focused = false;
+        app.borrow_mut().search_help.field = None;
+        for tip in [super::guide::Tip::Search, super::guide::Tip::Select] {
+            h.run_steps(3);
+            h.get_by_label(tip.text());
+            check("tip", &h);
+            h.get_by_label("Got it").click();
+            h.run_steps(3);
+        }
     }
     // Search results and an empty result.
     {
@@ -2526,6 +2613,9 @@ fn the_skipped_folders_notice_shows_when_a_run_ends() {
     assert!(app.borrow().notices.current().is_none());
 }
 
+const SOMETHING_WRONG: &str =
+    "Something went wrong. Please try again, and restart Recollect if it keeps happening.";
+
 #[test]
 fn an_identical_error_toasts_again() {
     let d = tempfile::tempdir().unwrap();
@@ -2534,7 +2624,7 @@ fn an_identical_error_toasts_again() {
     let lib = Arc::clone(&app.borrow().lib);
     lib.update_status(|s| s.set_error("disk full"));
     h.run_steps(2);
-    h.get_by_label("Something went wrong. disk full");
+    h.get_by_label(SOMETHING_WRONG);
     h.get_by_label("Dismiss").click();
     h.run_steps(2);
     assert!(h.query_by_label_contains("Something went wrong").is_none());
@@ -2544,7 +2634,7 @@ fn an_identical_error_toasts_again() {
     // The same text again is a new failure.
     lib.update_status(|s| s.set_error("disk full"));
     h.run_steps(2);
-    h.get_by_label("Something went wrong. disk full");
+    h.get_by_label(SOMETHING_WRONG);
 }
 
 #[test]
@@ -2656,4 +2746,522 @@ fn on_this_day_tiles_open_and_have_no_selection_circle() {
     // img10 is only on screen in the strip (the grid starts at the newest photos).
     assert!(h.query_by_label("Select img10.jpg").is_none());
     assert!(h.query_by_label("Select On this day img10.jpg").is_none());
+}
+
+// --- Guidance: welcome, empty states, search help, tips, help, friendly errors -------------
+
+/// A first launch: no folders, welcome not done, no standard folders on offer (so the test does
+/// not depend on this computer's home directory).
+fn fresh_app(d: &std::path::Path) -> Rc<RefCell<App>> {
+    let lib = library(d);
+    let mut app = App::new(&egui::Context::default(), Arc::clone(&lib));
+    app.frame_stats = None;
+    assert!(
+        app.welcome.is_some(),
+        "a new library starts with the welcome"
+    );
+    app.welcome = Some(super::welcome::Welcome::with_suggestions(
+        Vec::new(),
+        lib.model().id,
+    ));
+    Rc::new(RefCell::new(app))
+}
+
+#[test]
+fn the_welcome_leads_to_photos_in_four_clicks() {
+    let d = tempfile::tempdir().unwrap();
+    let photos = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let lib = Arc::clone(&app.borrow().lib);
+    let mut h = album_harness(&app);
+    // First screen: the promise, the benefits, one button. No top bar or sidebar yet.
+    h.get_by_label("Find any photo by describing it");
+    h.get_by_label("Everything stays on this computer");
+    assert!(h.query_by_label("Settings").is_none());
+    assert!(app.borrow().welcome_active());
+    h.get_by_label("Step 1 of 4");
+    let mut clicks = 0;
+    h.get_by_label("Get started").click();
+    clicks += 1;
+    h.run_steps(3);
+    // Second: Continue waits for a folder; typing a path adds one (not a "primary" click).
+    h.get_by_label("Where are your photos?");
+    h.get_by_label("Step 2 of 4");
+    assert!(h.get_by_label("Continue").accesskit_node().is_disabled());
+    h.get_by_label_contains("skip this and add folders later");
+    h.get_by_label("Back").click();
+    h.run_steps(3);
+    h.get_by_label("Find any photo by describing it");
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    h.get_by_label("Folder path").click();
+    h.run_steps(2);
+    h.get_by_label("Folder path")
+        .type_text(&photos.path().display().to_string());
+    h.run_steps(2);
+    h.get_by_label("Add this folder").click();
+    h.run_steps(3);
+    assert!(!h.get_by_label("Continue").accesskit_node().is_disabled());
+    assert_eq!(
+        app.borrow().welcome.as_ref().unwrap().chosen_folders(),
+        [photos.path().to_path_buf()]
+    );
+    h.get_by_label("Continue").click();
+    clicks += 1;
+    h.run_steps(3);
+    // Third: the two choices with their sizes, privacy, and a way out.
+    h.get_by_label("Turn on smart search");
+    h.get_by_label("Best quality");
+    h.get_by_label("Faster");
+    h.get_by_label_contains("never leave this computer");
+    h.get_by_label("Download and turn on");
+    h.get_by_label("Skip for now").click();
+    clicks += 1;
+    h.run_steps(3);
+    // Fourth: what happens next.
+    h.get_by_label("You're all set");
+    h.get_by_label_contains("You can start browsing right away");
+    assert!(
+        app.borrow().welcome.is_some(),
+        "nothing is added before Start"
+    );
+    assert!(lib.folders().unwrap().is_empty());
+    h.get_by_label("Start").click();
+    clicks += 1;
+    assert!(clicks <= 4);
+    settle(&mut h, || lib.folders().unwrap().len() == 1);
+    h.run_steps(3);
+    // Photos is shown, with the usual window around it.
+    assert!(!app.borrow().welcome_active());
+    assert_eq!(app.borrow().tl.view, View::Timeline);
+    assert!(h.query_all_by_label("Photos").next().is_some());
+    h.get_by_label("Settings");
+    assert!(lib.settings().welcome_done);
+    assert!(!lib.model_installed(), "skipping downloads nothing");
+}
+
+#[test]
+fn the_welcome_can_be_skipped_and_existing_users_never_see_it() {
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let lib = Arc::clone(&app.borrow().lib);
+    let mut h = album_harness(&app);
+    h.get_by_label("Skip setup").click();
+    h.run_steps(3);
+    assert!(!app.borrow().welcome_active());
+    // The empty library invites adding a folder instead.
+    h.get_by_label("Add a folder with your photos and videos to get started.");
+    let saved = crate::config::Settings::load(&lib.paths().settings_path()).unwrap();
+    assert!(saved.welcome_done, "saved on disk");
+    drop(h);
+    drop(app);
+    let again = App::new(&egui::Context::default(), Arc::clone(&lib));
+    assert!(again.welcome.is_none(), "not shown again after a restart");
+
+    // Someone who already has folders is never welcomed, and is marked as done.
+    let d2 = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let lib2 = library(d2.path());
+    lib2.add_folder(folder.path()).unwrap();
+    assert!(!lib2.settings().welcome_done);
+    let existing = App::new(&egui::Context::default(), Arc::clone(&lib2));
+    assert!(existing.welcome.is_none());
+    assert!(lib2.settings().welcome_done);
+}
+
+#[derive(Clone, Copy)]
+enum EmptyView {
+    NoFolders,
+    Photos,
+    Recent,
+    Favorites,
+    Folder,
+    Album,
+    NoResults,
+    NoResultsDated,
+    SearchOff,
+}
+
+const EMPTY_VIEWS: [(&str, EmptyView); 9] = [
+    ("empty: no folders", EmptyView::NoFolders),
+    ("empty: photos", EmptyView::Photos),
+    ("empty: recently added", EmptyView::Recent),
+    ("empty: favorites", EmptyView::Favorites),
+    ("empty: folder", EmptyView::Folder),
+    ("empty: album", EmptyView::Album),
+    ("empty: no results", EmptyView::NoResults),
+    ("empty: no results, dated", EmptyView::NoResultsDated),
+    ("empty: search off", EmptyView::SearchOff),
+];
+
+/// An app showing the empty version of `which`, and its harness.
+fn empty_view(d: &std::path::Path, which: EmptyView) -> (Rc<RefCell<App>>, Harness<'static>) {
+    use super::when::{DateFilter, When};
+    let lib = library(d);
+    lib.update_settings(|s| s.welcome_done = true).unwrap();
+    let mut app = App::new(&egui::Context::default(), Arc::clone(&lib));
+    app.frame_stats = None;
+    if !matches!(which, EmptyView::NoFolders) {
+        app.snapshot.folders = vec![crate::store::db::Folder {
+            id: 1,
+            path: "/nowhere".into(),
+        }];
+    }
+    match which {
+        EmptyView::NoResults | EmptyView::NoResultsDated | EmptyView::SearchOff => {
+            app.current = Some(super::Query::Text("snow".into()));
+            app.result_label = "snow".into();
+            if matches!(which, EmptyView::NoResultsDated) {
+                app.date = DateFilter {
+                    when: When::ThisYear,
+                    from: 0,
+                    to: 0,
+                };
+            }
+            if matches!(which, EmptyView::SearchOff) {
+                app.result_error =
+                    Some(super::guide::search_problem("the model is not downloaded"));
+            }
+        }
+        _ => {}
+    }
+    let app = Rc::new(RefCell::new(app));
+    let mut h = album_harness(&app);
+    let view = match which {
+        EmptyView::Recent => Some(View::RecentlyAdded),
+        EmptyView::Favorites => Some(View::Favorites),
+        EmptyView::Folder => Some(View::Folder(1)),
+        EmptyView::Album => {
+            lib.create_album("Empty", &[]).unwrap();
+            settle(&mut h, || app.borrow().albums.len() == 1);
+            Some(View::Album(lib.albums().unwrap()[0].id))
+        }
+        _ => None,
+    };
+    if let Some(v) = view {
+        app.borrow_mut().set_view(v);
+    }
+    if matches!(
+        which,
+        EmptyView::Photos
+            | EmptyView::Recent
+            | EmptyView::Favorites
+            | EmptyView::Folder
+            | EmptyView::Album
+    ) {
+        settle(&mut h, || {
+            let a = app.borrow();
+            a.tl.loaded && a.tl.awaiting.is_none() && a.tl.items.is_empty()
+        });
+    }
+    h.run_steps(3);
+    (app, h)
+}
+
+#[test]
+fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
+    let cases = [
+        (
+            EmptyView::NoFolders,
+            "Add a folder with your photos and videos to get started.",
+            "Add a folder",
+        ),
+        (
+            EmptyView::Photos,
+            "No photos or videos yet. Add a folder, or give Recollect a moment to look through \
+             the ones you have.",
+            "Add a folder",
+        ),
+        (
+            EmptyView::Recent,
+            "Photos and videos you add to your folders show up here.",
+            "Check for new photos",
+        ),
+        (
+            EmptyView::Favorites,
+            "Click the star on any photo to add it here.",
+            "Go to Photos",
+        ),
+        (
+            EmptyView::Folder,
+            "There are no photos or videos in this folder.",
+            "Check for new photos",
+        ),
+        (
+            EmptyView::Album,
+            "This album is empty. Select photos and choose Add to album.",
+            "Go to Photos",
+        ),
+        (
+            EmptyView::NoResults,
+            "No photos match “snow”. Try different words.",
+            "Start over",
+        ),
+        (
+            EmptyView::NoResultsDated,
+            "No photos match “snow”. Try different words, or check the When filter.",
+            "Clear the date filter",
+        ),
+        (
+            EmptyView::SearchOff,
+            "Smart search is off. Turn it on to find photos by describing them.",
+            "Turn on smart search",
+        ),
+    ];
+    for (which, sentence, button) in cases {
+        let d = tempfile::tempdir().unwrap();
+        let (_app, h) = empty_view(d.path(), which);
+        h.get_by_label(sentence);
+        h.get_all_by_label(button).last().unwrap();
+    }
+}
+
+#[test]
+fn the_buttons_of_the_empty_states_work() {
+    // Favorites and album: "Go to Photos".
+    let d = tempfile::tempdir().unwrap();
+    let (app, mut h) = empty_view(d.path(), EmptyView::Favorites);
+    h.get_by_label("Go to Photos").click();
+    h.run_steps(3);
+    assert_eq!(app.borrow().tl.view, View::Timeline);
+    // No results: clearing the date filter keeps the words; clearing the search drops them.
+    let d = tempfile::tempdir().unwrap();
+    let (app, mut h) = empty_view(d.path(), EmptyView::NoResultsDated);
+    h.get_by_label("Clear the date filter").click();
+    h.run_steps(3);
+    assert_eq!(app.borrow().date, super::when::DateFilter::default());
+    assert!(app.borrow().current.is_some());
+    let d = tempfile::tempdir().unwrap();
+    let (app, mut h) = empty_view(d.path(), EmptyView::NoResults);
+    h.get_by_label("Start over").click();
+    h.run_steps(3);
+    assert!(app.borrow().current.is_none() && app.borrow().query.is_empty());
+    // Search off: opens Settings on smart search.
+    let d = tempfile::tempdir().unwrap();
+    let (app, mut h) = empty_view(d.path(), EmptyView::SearchOff);
+    h.get_by_label("Turn on smart search").click();
+    h.run_steps(3);
+    assert!(app.borrow().settings_open);
+    assert_eq!(
+        app.borrow().settings_section,
+        super::settings::Section::SmartSearch
+    );
+}
+
+/// An app whose smart search looks installed to the interface (so the search field is on)
+/// while a search still fails cleanly because no files exist.
+fn searchable_app(d: &std::path::Path) -> Rc<RefCell<App>> {
+    let mut app = grid_app_with(d, false);
+    app.snapshot.model_installed = true;
+    app.results = Arc::default();
+    app.current = None;
+    app.result_label.clear();
+    Rc::new(RefCell::new(app))
+}
+
+#[test]
+fn the_empty_search_field_offers_examples_and_remembers_searches() {
+    let d = tempfile::tempdir().unwrap();
+    let app = searchable_app(d.path());
+    let lib = Arc::clone(&app.borrow().lib);
+    let mut h = album_harness(&app);
+    assert!(
+        h.query_by_label("kids on the beach").is_none(),
+        "closed until focused"
+    );
+    h.get_by_label("Search your photos").click();
+    h.run_steps(3);
+    for example in super::guide::EXAMPLE_SEARCHES {
+        h.get_by_label(example);
+    }
+    h.get_by_label("Try searching for");
+    assert!(h.query_by_label("Recent searches").is_none(), "nothing yet");
+    // A chip runs that search.
+    h.get_by_label("snow").click();
+    h.run_steps(3);
+    assert_eq!(app.borrow().query, "snow");
+    settle(&mut h, || app.borrow().result_error.is_some());
+    assert_eq!(
+        app.borrow().current,
+        Some(super::Query::Text("snow".into()))
+    );
+    assert_eq!(lib.settings().recent_searches, ["snow"]);
+    // Typing and pressing Enter remembers the words too; newest first, no repeats.
+    app.borrow_mut().clear_search();
+    h.run_steps(2);
+    h.get_by_label("Search your photos").click();
+    h.run_steps(2);
+    h.get_by_label("Search your photos")
+        .type_text("sunset boat");
+    h.run_steps(2);
+    assert_eq!(app.borrow().query, "sunset boat");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(lib.settings().recent_searches, ["sunset boat", "snow"]);
+    app.borrow_mut().remember_search("SNOW");
+    assert_eq!(lib.settings().recent_searches, ["SNOW", "sunset boat"]);
+    // The most recent eight are kept.
+    for i in 0..10 {
+        app.borrow_mut().remember_search(&format!("word {i}"));
+    }
+    assert_eq!(
+        lib.settings().recent_searches.len(),
+        super::guide::MAX_RECENT
+    );
+    // They show under the field, and can be cleared.
+    app.borrow_mut().clear_search();
+    h.run_steps(2);
+    h.get_by_label("Search your photos").click();
+    h.run_steps(3);
+    h.get_by_label("Recent searches");
+    h.get_by_label("Recent search: word 9");
+    h.get_by_label("Clear recent searches").click();
+    h.run_steps(3);
+    assert!(lib.settings().recent_searches.is_empty());
+    assert!(h.query_by_label("Clear recent searches").is_none());
+}
+
+#[test]
+fn search_help_stays_closed_when_smart_search_is_off_or_text_was_typed() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    h.get_by_label(super::chrome::SEARCH_OFF_LABEL).click();
+    h.run_steps(3);
+    assert!(h.query_by_label("kids on the beach").is_none());
+    let d = tempfile::tempdir().unwrap();
+    let app = searchable_app(d.path());
+    let mut h = album_harness(&app);
+    h.get_by_label("Search your photos").click();
+    h.run_steps(2);
+    h.get_by_label("Search your photos").type_text("dog");
+    h.run_steps(3);
+    assert!(h.query_by_label("kids on the beach").is_none());
+}
+
+#[test]
+fn tips_show_one_at_a_time_once_each() {
+    use super::guide::Tip;
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let lib = Arc::clone(&app.borrow().lib);
+    let mut h = album_harness(&app);
+    // Photos and smart search are there: the search tip comes first, alone.
+    h.get_by_label(Tip::Search.text());
+    assert!(h.query_by_label(Tip::Select.text()).is_none());
+    assert_eq!(h.query_all_by_label("Got it").count(), 1);
+    h.get_by_label("Got it").click();
+    h.run_steps(3);
+    h.get_by_label(Tip::Select.text());
+    assert!(h.query_by_label(Tip::Search.text()).is_none());
+    h.get_by_label("Got it").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Got it").is_none());
+    assert_eq!(lib.settings().tips_dismissed, ["search", "select"]);
+    // After a restart they stay dismissed.
+    drop(h);
+    let mut restarted = App::new(&egui::Context::default(), Arc::clone(&lib));
+    restarted.frame_stats = None;
+    restarted.snapshot.folders = vec![crate::store::db::Folder {
+        id: 1,
+        path: "/nowhere".into(),
+    }];
+    restarted.snapshot.model_installed = true;
+    restarted.inject_timeline(spread_items());
+    let restarted = Rc::new(RefCell::new(restarted));
+    let mut h = album_harness(&restarted);
+    assert!(h.query_by_label("Got it").is_none());
+    // Settings can bring them back.
+    open_section(&mut h, "Appearance");
+    h.get_by_label("Show tips again").click();
+    h.run_steps(3);
+    assert!(lib.settings().tips_dismissed.is_empty());
+    h.get_by_label("Close settings").click();
+    h.run_steps(3);
+    h.get_by_label(Tip::Search.text());
+}
+
+#[test]
+fn without_smart_search_the_first_tip_is_about_selecting() {
+    use super::guide::Tip;
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let h = album_harness(&app);
+    h.get_by_label(Tip::Select.text());
+    assert!(h.query_by_label(Tip::Search.text()).is_none());
+}
+
+#[test]
+fn the_first_album_view_explains_how_to_fill_it() {
+    use super::guide::Tip;
+    let d = tempfile::tempdir().unwrap();
+    let (lib, _app, mut h) = album_view(d.path(), 3, album_harness);
+    h.get_by_label(Tip::Album.text());
+    assert!(
+        h.query_by_label(Tip::Select.text()).is_none(),
+        "one at a time"
+    );
+    h.get_by_label("Got it").click();
+    h.run_steps(3);
+    assert!(lib.settings().tips_dismissed.contains(&"album".to_string()));
+    assert!(h.query_by_label(Tip::Album.text()).is_none());
+}
+
+#[test]
+fn a_failed_download_says_what_to_do_and_keeps_the_details_folded() {
+    use crate::library::ErrorKind;
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    let lib = Arc::clone(&app.borrow().lib);
+    lib.update_status(|s| {
+        s.set_error_of(
+            ErrorKind::Download,
+            "Model download failed: dns error: failed to lookup address",
+        )
+    });
+    h.run_steps(3);
+    h.get_by_label("Couldn't download smart search. Check your internet connection and try again.");
+    h.get_all_by_label("Try again").next().unwrap();
+    assert!(h.query_by_label_contains("dns error").is_none(), "folded");
+    h.get_by_label("Details").click();
+    h.run_steps(3);
+    h.get_by_label_contains("dns error");
+    // Other failures are explained in the same way.
+    for (kind, text) in [
+        (ErrorKind::AddFolder, "Couldn't add that folder."),
+        (
+            ErrorKind::Scan,
+            "Couldn't finish looking through your photos.",
+        ),
+        (ErrorKind::SwitchModel, "Couldn't change smart search."),
+    ] {
+        let (msg, _) = super::guide::describe_failure(kind);
+        assert!(msg.starts_with(text), "{msg}");
+        assert!(msg.ends_with('.') && msg.contains("try") || msg.contains("Try"));
+    }
+}
+
+#[test]
+fn other_messages_say_what_happened_and_what_to_do() {
+    let (text, details) = super::guide::album_problem("An album named “Trip” already exists");
+    assert_eq!(
+        text,
+        "An album named “Trip” already exists. Choose a different name."
+    );
+    assert_eq!(details, None);
+    let (text, details) = super::guide::album_problem("An album needs a name");
+    assert_eq!(text, "An album needs a name. Type a name and try again.");
+    assert_eq!(details, None);
+    let (text, details) = super::guide::album_problem("database is locked");
+    assert_eq!(
+        text,
+        "Couldn't save that album change. Nothing was changed. Please try again."
+    );
+    assert_eq!(details.as_deref(), Some("database is locked"));
+    assert!(
+        super::guide::search_problem("the model is not downloaded yet")
+            .starts_with("Search isn't ready yet.")
+    );
+    assert!(super::guide::search_problem("boom").starts_with("Couldn't search just now."));
 }

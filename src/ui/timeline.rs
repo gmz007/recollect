@@ -6,7 +6,7 @@
 //! smooth.
 
 use super::selection::{self, ClickMods, Selection};
-use super::style::{self, icons};
+use super::style;
 use super::tiles::{self, ClickPlan, Tile, TileEvent};
 use super::{App, Nav, albums, fmt_time, marked, take_plain_key};
 use crate::Library;
@@ -1013,6 +1013,7 @@ impl App {
         if !self.selection_bar_ui(ui) {
             self.view_header(ui);
         }
+        self.tip_card(ui);
         if self.tl.view == View::Timeline {
             // "Today" changes at midnight, whether or not anything else happens by then.
             let now = chrono::Local::now().naive_local();
@@ -1022,28 +1023,7 @@ impl App {
         }
         if self.tl.items.is_empty() {
             if self.tl.awaiting.is_none() {
-                if matches!(self.tl.view, View::Album(_)) {
-                    self.empty_state(
-                        ui,
-                        icons::ICON_PHOTO_ALBUM,
-                        "This album is empty",
-                        "Pick photos or videos, then choose “Add to album…”.",
-                    );
-                } else if self.tl.view == View::Favorites {
-                    self.empty_state(
-                        ui,
-                        icons::ICON_STAR,
-                        "No favorites yet",
-                        "Click the star on a photo to keep it here.",
-                    );
-                } else {
-                    self.empty_state(
-                        ui,
-                        icons::ICON_PHOTO_LIBRARY,
-                        "Nothing to show yet",
-                        "Photos and videos appear here as soon as Recollect has looked through your folders.",
-                    );
-                }
+                self.timeline_empty_state(ui);
             }
             return;
         }

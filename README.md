@@ -126,12 +126,26 @@ own directory, so **keep them together** with the executable when you copy the a
 
 ## First run
 
-1. Start Recollect and add a folder with photos or videos (**Add a folder**).
-2. Recollect offers to **Turn on smart search**: a one-time download that you confirm (details are
-   behind **Details**; the model comes from huggingface.co). Nothing is downloaded without your
-   consent. Until smart search is on you can already browse your library; only searching needs it.
-3. Your photos are prepared for search in the background; you can search right away while it
-   works.
+The first time Recollect starts with no folders it shows a short welcome, one question per
+screen, with progress dots and a **Back** button (and **Skip setup** if you would rather not):
+
+1. **Welcome**: what Recollect does ("Find any photo by describing it") and that everything stays
+   on your computer. Button: **Get started**.
+2. **Where are your photos?** The standard folders that exist (Pictures and Videos are ticked;
+   Desktop and Downloads are offered), **Add another folder…** (a folder picker, or type a path).
+   **Continue** is available once a folder is chosen; **Skip** lets you add folders later.
+3. **Turn on smart search**: the **Best quality** and **Faster** choices with their download
+   sizes (the one that suits your computer is marked), and a privacy note. **Download and turn
+   on** starts the one-time download; **Skip for now** leaves it off. Nothing is downloaded
+   without this choice, and without smart search you can still browse your library by date.
+4. **You're all set**: **Start** adds the folders, starts the download if you chose it, and shows
+   Photos. Your photos are prepared for search in the background and you can browse right away.
+
+People who already have folders never see the welcome. Afterwards, short one-time tips appear at
+useful moments (turn them back on in Settings, Appearance, **Show tips again**), the search field
+shows example and recent searches when you click it (stored on your computer only; **Clear recent
+searches** removes them), and the **?** button opens a Help sheet (getting started, searching,
+organizing, keyboard shortcuts, privacy).
 
 ### Models
 

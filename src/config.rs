@@ -115,6 +115,12 @@ pub struct Settings {
     pub text_size: TextSize,
     /// The user chose "Not now" on the invitation to turn on smart search.
     pub search_prompt_dismissed: bool,
+    /// The first-run welcome flow was completed or skipped.
+    pub welcome_done: bool,
+    /// Searches the user ran, newest first (kept on this computer only).
+    pub recent_searches: Vec<String>,
+    /// Ids of the one-time tips the user has already seen or closed.
+    pub tips_dismissed: Vec<String>,
 }
 
 impl Default for Settings {
@@ -127,6 +133,9 @@ impl Default for Settings {
             theme: Theme::System,
             text_size: TextSize::Normal,
             search_prompt_dismissed: false,
+            welcome_done: false,
+            recent_searches: Vec::new(),
+            tips_dismissed: Vec::new(),
         }
     }
 }
@@ -179,6 +188,9 @@ mod tests {
             theme: Theme::Dark,
             text_size: TextSize::Large,
             search_prompt_dismissed: true,
+            welcome_done: true,
+            recent_searches: vec!["snow".into(), "dog".into()],
+            tips_dismissed: vec!["search".into()],
         };
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap(), s);

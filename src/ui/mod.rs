@@ -4,6 +4,8 @@
 mod albums;
 mod chrome;
 mod frame_stats;
+mod guide;
+mod help;
 mod platform;
 mod preview;
 mod selection;
@@ -13,6 +15,7 @@ mod style;
 mod tiles;
 mod timeline;
 mod viewer;
+mod welcome;
 mod when;
 mod workers;
 
@@ -86,6 +89,17 @@ struct Notice {
     text: String,
     at: Instant,
     error: bool,
+    /// Technical text, shown only when the user unfolds "Details".
+    details: Option<String>,
+    /// A button that tries the failed thing again.
+    action: Option<NoticeAction>,
+}
+
+/// What the "Try again" button of an error does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeAction {
+    Download,
+    Scan,
 }
 
 impl Notices {
@@ -103,6 +117,17 @@ impl Notices {
     }
 
     fn push(&mut self, text: String, error: bool, now: Instant) {
+        self.push_with(text, error, now, None, None);
+    }
+
+    fn push_with(
+        &mut self,
+        text: String,
+        error: bool,
+        now: Instant,
+        details: Option<String>,
+        action: Option<NoticeAction>,
+    ) {
         self.expire(now);
         if error {
             // A newer error replaces the older ones.
@@ -112,6 +137,8 @@ impl Notices {
             text,
             at: now,
             error,
+            details,
+            action,
         });
         while self.items.len() > Self::MAX {
             self.items.remove(0);
@@ -124,12 +151,18 @@ impl Notices {
     }
 
     /// What to show: the error if there is one, else the latest message.
+    #[cfg(test)]
     fn current(&self) -> Option<&str> {
         self.items
             .iter()
             .find(|n| n.error)
             .or(self.items.last())
             .map(|n| n.text.as_str())
+    }
+
+    /// The notice [`Notices::current`] shows.
+    fn current_notice(&self) -> Option<&Notice> {
+        self.items.iter().find(|n| n.error).or(self.items.last())
     }
 
     /// Time until the next message disappears (to schedule a repaint).
@@ -235,6 +268,11 @@ pub struct App {
     add_folder_dialog: Option<sidebar::AddFolder>,
     stop_folder: Option<sidebar::StopFolder>,
     help_open: bool,
+    help_topic: help::HelpTopic,
+    /// The first-run welcome flow, while it is still to be shown.
+    welcome: Option<welcome::Welcome>,
+    /// Search help (examples and recent searches) under the search field.
+    search_help: guide::SearchHelp,
     /// `Status::error_seq` of the last error that was shown as a toast.
     error_seq_seen: u64,
     notices: Notices,
@@ -313,6 +351,9 @@ impl App {
             add_folder_dialog: None,
             stop_folder: None,
             help_open: false,
+            help_topic: help::HelpTopic::default(),
+            welcome: None,
+            search_help: guide::SearchHelp::default(),
             error_seq_seen: 0,
             notices: Notices::default(),
             snapshot: Snapshot::default(),
@@ -336,6 +377,14 @@ impl App {
         app.settings_seen = app.lib.settings_version();
         style::apply(ctx, app.settings.theme, app.settings.text_size);
         app.snapshot = Snapshot::fetch(&app.lib);
+        if !app.settings.welcome_done {
+            if app.snapshot.folders.is_empty() {
+                app.welcome = Some(welcome::Welcome::new(app.lib.model().id));
+            } else {
+                // Someone who already uses the app never sees the welcome.
+                app.change_settings(|s| s.welcome_done = true);
+            }
+        }
         app.albums = app.lib.albums().unwrap_or_default();
         app.albums_version_seen = app.lib.albums_version();
         // Unit tests fake an installed model with placeholder files; never feed those to
@@ -360,6 +409,32 @@ impl App {
     /// messages that follow.
     fn notify_error(&mut self, msg: impl Into<String>) {
         self.notices.push(msg.into(), true, Instant::now());
+    }
+
+    /// An error in two parts: what happened and what to do (`msg`), and the technical text
+    /// that goes under "Details". `action` adds a "Try again" button.
+    fn notify_problem(
+        &mut self,
+        msg: impl Into<String>,
+        details: impl ToString,
+        action: Option<NoticeAction>,
+    ) {
+        let details = details.to_string();
+        self.notices.push_with(
+            msg.into(),
+            true,
+            Instant::now(),
+            (!details.is_empty()).then_some(details),
+            action,
+        );
+    }
+
+    /// Runs what a toast's "Try again" button stands for.
+    fn retry(&mut self, action: NoticeAction) {
+        match action {
+            NoticeAction::Download => self.turn_on_search(),
+            NoticeAction::Scan => self.start_indexing(),
+        }
     }
 
     /// Requests fresh library facts from a background thread (never blocks the UI).
@@ -400,7 +475,8 @@ impl App {
 
     fn start_indexing(&mut self) {
         if let Err(e) = self.lib.start_indexing() {
-            self.notify_error(format!("{e:#}"));
+            // Only "another task is running", which is not worth a toast of its own.
+            tracing::debug!("could not start looking for photos: {e:#}");
         }
     }
 
@@ -448,7 +524,10 @@ impl App {
                     self.results = Arc::new(h);
                     self.result_error = None;
                 }
-                Err(e) => self.result_error = Some(e),
+                Err(e) => {
+                    tracing::warn!("search failed: {e}");
+                    self.result_error = Some(guide::search_problem(&e));
+                }
             }
             // Keep the selection on the same file across refreshes.
             self.selected = prev.and_then(|p| self.results.iter().position(|h| h.path == p));
@@ -521,7 +600,8 @@ impl App {
         if self.status.error_seq != self.error_seq_seen {
             self.error_seq_seen = self.status.error_seq;
             if let Some(e) = self.status.last_error.clone() {
-                self.notify_error(format!("Something went wrong. {e}"));
+                let (text, action) = guide::describe_failure(self.status.last_error_kind);
+                self.notify_problem(text, e, action);
             }
         }
         if run_ended
@@ -577,59 +657,12 @@ impl App {
         }
     }
 
-    fn empty_state(
-        &mut self,
-        ui: &mut egui::Ui,
-        icon: egui_material_icons::MaterialIcon,
-        title: &str,
-        body: &str,
-    ) {
-        let pal = style::Palette::of(ui.ctx());
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.25);
-            ui.label(style::icon_text(icon, 48.0).color(pal.text_secondary));
-            ui.add_space(8.0);
-            ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
-            ui.add_space(4.0);
-            ui.label(RichText::new(body).color(pal.text_secondary));
-        });
-    }
-
-    /// The "nothing here yet" screen of a library without folders.
-    fn no_folders_state(&mut self, ui: &mut egui::Ui) {
-        let pal = style::Palette::of(ui.ctx());
-        self.empty_state(
-            ui,
-            style::icons::ICON_FOLDER_OPEN,
-            "Add a folder to get started",
-            "Recollect only reads your photos and videos; it never changes them.",
-        );
-        ui.vertical_centered(|ui| {
-            ui.add_space(12.0);
-            let b = egui::Button::new(RichText::new("Add your first folder").color(pal.on_accent))
-                .fill(pal.accent);
-            if ui.add(b).clicked() {
-                self.open_add_folder();
-            }
-        });
-    }
-
     fn results_grid(&mut self, ui: &mut egui::Ui) {
         if !self.selection_bar_ui(ui) {
             self.results_header(ui);
         }
         if self.results.is_empty() {
-            if self.awaiting.is_none()
-                && self.result_error.is_none()
-                && !self.result_label.is_empty()
-            {
-                self.empty_state(
-                    ui,
-                    style::icons::ICON_IMAGE_SEARCH,
-                    "Nothing found",
-                    "Try describing the photo in other words, or use fewer words.",
-                );
-            }
+            self.results_empty_state(ui);
             return;
         }
         let avail = ui.available_width() - 12.0; // leave room for the scroll bar
@@ -1118,6 +1151,11 @@ impl App {
             self.toasts(&ctx);
             return;
         }
+        if self.welcome_active() {
+            self.welcome_screen(ui);
+            self.toasts(&ctx);
+            return;
+        }
         let grid_was_shown = std::mem::take(&mut self.grid_shown);
         let timeline_was_shown = std::mem::take(&mut self.tl.shown);
         self.handle_navigation_keys(&ctx, grid_was_shown);
@@ -1155,8 +1193,9 @@ impl App {
         }
         self.model_confirm_dialog(&ctx);
         if self.help_open {
-            self.help_window(&ctx);
+            self.help_sheet(&ctx);
         }
+        self.search_help_dropdown(&ctx);
         self.album_dialogs(&ctx);
         self.folder_dialogs(&ctx);
         self.toasts(&ctx);

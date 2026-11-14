@@ -30,7 +30,7 @@ pub(super) struct StopFolder {
 
 /// Standard folders (Pictures, Videos, Desktop, Downloads) that exist on this computer, with
 /// the names the dialog shows.
-fn standard_folders() -> Vec<(String, PathBuf)> {
+pub(super) fn standard_folders() -> Vec<(String, PathBuf)> {
     let Some(dirs) = directories::UserDirs::new() else {
         return Vec::new();
     };
@@ -480,7 +480,7 @@ impl App {
     pub(super) fn retry_failed(&mut self) {
         match self.lib.retry_errors() {
             Ok(_) => self.start_indexing(),
-            Err(_) => self.notify_error("Couldn't try those files again. Please try later."),
+            Err(_) => self.notify_error("Couldn't try those files again. Please try in a moment."),
         }
     }
 
@@ -558,7 +558,10 @@ impl App {
                 });
             });
             if bad_path {
-                self.notify_error("That folder couldn't be found. Check the path and try again.");
+                self.notify_error(
+                    "That folder couldn't be found. Check the spelling of the path, or use \
+                     “Choose a folder…” to pick it.",
+                );
             }
             if let Some(p) = chosen {
                 self.add_folder(p);

@@ -198,7 +198,13 @@ fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, items: &[(T, &str)], curren
 }
 
 /// A large choice with a title and a description. Returns true when clicked.
-fn choice_card(ui: &mut egui::Ui, selected: bool, title: &str, blurb: &str, note: &str) -> bool {
+pub(super) fn choice_card(
+    ui: &mut egui::Ui,
+    selected: bool,
+    title: &str,
+    blurb: &str,
+    note: &str,
+) -> bool {
     let pal = Palette::of(ui.ctx());
     let width = ui.available_width();
     let text_w = width - 56.0;
@@ -347,7 +353,12 @@ impl App {
     pub(super) fn change_settings(&mut self, f: impl FnOnce(&mut Settings)) {
         match self.lib.update_settings(f) {
             Ok(()) => self.settings = self.lib.settings(),
-            Err(e) => self.notify_error(format!("Couldn't save your settings. {e:#}")),
+            Err(e) => self.notify_problem(
+                "Couldn't save your settings. Check that your disk isn't full or write-protected, \
+                 then try again.",
+                format!("{e:#}"),
+                None,
+            ),
         }
     }
 
@@ -496,6 +507,13 @@ impl App {
             self.change_settings(|s| s.text_size = t);
         }
         hint(ui, "Large makes all text and buttons about 15 % bigger.");
+        ui.add_space(14.0);
+        heading(ui, "Tips");
+        ui.label("Short hints appear now and then to show you what Recollect can do.");
+        ui.add_space(4.0);
+        if ui.button("Show tips again").clicked() {
+            self.change_settings(|s| s.tips_dismissed.clear());
+        }
     }
 
     fn settings_smart_search(&mut self, ui: &mut egui::Ui) {
@@ -800,7 +818,12 @@ impl App {
                             if r.clicked() {
                                 let _ = std::fs::create_dir_all(&dir);
                                 if let Err(e) = platform::open(&dir) {
-                                    self.notify_error(format!("Couldn't open that folder. {e:#}"));
+                                    self.notify_problem(
+                                        "Couldn't open that folder. Open it from your file manager \
+                                         instead.",
+                                        format!("{e:#}"),
+                                        None,
+                                    );
                                 }
                             }
                         });
@@ -892,12 +915,17 @@ impl App {
     fn switch_model(&mut self, spec: &'static ModelSpec) {
         if self.lib.is_busy() {
             self.notify(
-                "Wait for the current task to finish (or cancel it) before changing smart search.",
+                "Recollect is busy right now. Wait for it to finish, or press Stop in the left \
+                 panel, then try again.",
             );
             return;
         }
         match self.lib.set_model(spec.id) {
-            Err(e) => self.notify_error(format!("Couldn't save your settings. {e:#}")),
+            Err(e) => self.notify_problem(
+                "Couldn't change smart search. Please try again in a moment.",
+                format!("{e:#}"),
+                None,
+            ),
             Ok(()) => {
                 // Old results and queries belong to the previous choice.
                 self.set_search_prompt_dismissed(false);

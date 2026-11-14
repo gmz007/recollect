@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- A first-run **welcome**: four screens (what Recollect does, where your photos are, turn on
+  smart search, you're all set) with progress dots, Back and Skip. It is shown once, only when the
+  library has no folders; the `welcome_done` setting remembers it.
+- **Empty states** with an icon, one sentence and one button for a library without folders,
+  Photos, Recently added, Favorites, a folder, an album, searches with no results (with a button
+  to clear the date filter) and smart search being off.
+- **Search help**: clicking the empty search field shows example searches and up to eight recent
+  searches (`recent_searches`, kept on this computer, with **Clear recent searches**).
+- One-time **tips** (search, selecting several photos, filling an album) that appear one at a
+  time and stay dismissed (`tips_dismissed`); **Show tips again** in Settings, Appearance.
+- A **Help sheet** like Settings, with Getting started, Searching, Organizing, Keyboard shortcuts
+  and Privacy.
+
+### Changed
+
+- Error messages say what happened and what to do, with a **Try again** button for downloads and
+  scans and the technical text folded under **Details**.
+
 ## [0.5.0] - 2026-11-14
 
 ### Added

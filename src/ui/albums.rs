@@ -359,7 +359,8 @@ impl App {
         };
         let name = na.name.trim().to_string();
         if let Err(e) = self.check_album_name(&name, None) {
-            self.notify_error(e);
+            let (text, details) = super::guide::album_problem(&e);
+            self.notify_problem(text, details.unwrap_or_default(), None);
             self.new_album = Some(na);
             return;
         }
@@ -453,7 +454,8 @@ impl App {
                         self.lib.queue_album(AlbumOp::Rename { id: r.id, name });
                     }
                     Err(e) => {
-                        self.notify_error(e);
+                        let (text, details) = super::guide::album_problem(&e);
+                        self.notify_problem(text, details.unwrap_or_default(), None);
                         self.rename_album = Some(r);
                     }
                 }
@@ -556,7 +558,8 @@ impl App {
 
     fn report_album_write(&mut self, w: &AlbumWrite) {
         if let Some(e) = &w.error {
-            self.notify_error(e.clone());
+            let (text, details) = super::guide::album_problem(e);
+            self.notify_problem(text, details.unwrap_or_default(), None);
             // Nothing was changed: put back what the user was working on.
             match &w.op {
                 AlbumOp::Create { name, add } if self.new_album.is_none() => {

@@ -70,11 +70,26 @@ pub struct RunSummary {
     pub skipped_folders: Vec<PathBuf>,
 }
 
+/// What a recorded failure was doing, so the interface can explain it in plain words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ErrorKind {
+    #[default]
+    Other,
+    Download,
+    AddFolder,
+    RemoveFolder,
+    Scan,
+    SwitchModel,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Status {
     pub activity: Activity,
     pub paused: bool,
+    /// The technical text of the last failure (shown only under "Details").
     pub last_error: Option<String>,
+    /// What the last failure was doing.
+    pub last_error_kind: ErrorKind,
     /// Counts every time an error was recorded, so a repeat of the same message is still
     /// noticed as a new failure.
     pub error_seq: u64,
@@ -84,7 +99,13 @@ pub struct Status {
 impl Status {
     /// Records a failure (and counts it, see [`Status::error_seq`]).
     pub fn set_error(&mut self, message: impl Into<String>) {
+        self.set_error_of(ErrorKind::Other, message);
+    }
+
+    /// Like [`Status::set_error`], saying what was being done.
+    pub fn set_error_of(&mut self, kind: ErrorKind, message: impl Into<String>) {
         self.last_error = Some(message.into());
+        self.last_error_kind = kind;
         self.error_seq += 1;
     }
 }
@@ -756,7 +777,9 @@ impl Library {
                         let _ = lib.start_indexing();
                     }
                 }
-                Err(e) => lib.update_status(|s| s.set_error(format!("{e:#}"))),
+                Err(e) => {
+                    lib.update_status(|s| s.set_error_of(ErrorKind::AddFolder, format!("{e:#}")))
+                }
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
@@ -786,7 +809,12 @@ impl Library {
         let lib = Arc::clone(self);
         std::thread::spawn(move || {
             if let Err(e) = lib.remove_folder(folder_id) {
-                lib.update_status(|s| s.set_error(format!("Removing the folder failed: {e:#}")));
+                lib.update_status(|s| {
+                    s.set_error_of(
+                        ErrorKind::RemoveFolder,
+                        format!("Removing the folder failed: {e:#}"),
+                    )
+                });
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
@@ -834,7 +862,10 @@ impl Library {
                 s.activity = Activity::Idle;
                 s.last_run = None;
                 if let Err(e) = res {
-                    s.set_error(format!("Switching models failed: {e:#}"));
+                    s.set_error_of(
+                        ErrorKind::SwitchModel,
+                        format!("Switching models failed: {e:#}"),
+                    );
                 }
             });
             if ok {
@@ -898,7 +929,12 @@ impl Library {
                 lib.cancel();
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            lib.update_status(|s| s.set_error("Model download failed: another job would not stop"));
+            lib.update_status(|s| {
+                s.set_error_of(
+                    ErrorKind::Download,
+                    "Model download failed: another job would not stop",
+                )
+            });
         });
         Ok(())
     }
@@ -926,7 +962,7 @@ impl Library {
                 if let Err(e) = res
                     && !lib.control.is_cancelled()
                 {
-                    s.set_error(format!("Model download failed: {e:#}"));
+                    s.set_error_of(ErrorKind::Download, format!("Model download failed: {e:#}"));
                 }
             });
             if ok && !lib.control.is_cancelled() {
@@ -951,7 +987,7 @@ impl Library {
             s.paused = false;
             match res {
                 Ok(sum) => s.last_run = Some(sum),
-                Err(e) => s.set_error(format!("Indexing failed: {e:#}")),
+                Err(e) => s.set_error_of(ErrorKind::Scan, format!("Indexing failed: {e:#}")),
             }
         });
     }

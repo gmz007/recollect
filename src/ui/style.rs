@@ -300,6 +300,18 @@ pub fn icon_label_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> 
     r
 }
 
+/// The one main button of a screen: accent fill, a little larger than a normal button.
+/// Named `label` for assistive technology.
+pub fn primary_button(ui: &mut egui::Ui, label: &str) -> Response {
+    let pal = Palette::of(ui.ctx());
+    let b = egui::Button::new(RichText::new(label).color(pal.on_accent).size(15.0))
+        .fill(pal.accent)
+        .min_size(Vec2::new(0.0, 36.0));
+    let r = ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+    r
+}
+
 /// A frameless icon-only button with a hover tooltip that also names it for assistive
 /// technology.
 pub fn icon_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> Response {
