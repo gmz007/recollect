@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Albums: create, rename and delete albums from the sidebar; an album view that groups and sorts
+  like the timeline; "Add to album…" for the selected item (detail panel and viewer) with
+  "New album…" to create one on the spot. Deleting an album keeps the files; removing a library
+  folder drops its files from albums but keeps the albums.
+- Multi-select in every grid: `Ctrl/Cmd+click` toggles, `Shift+click` selects a range, `Ctrl/Cmd+A`
+  selects all, `Shift`+arrows extend, plain arrows collapse to one item and `Esc` clears. A bar
+  above the grid offers Add to album…, Favorite, Unfavorite, Remove from album (in albums) and
+  Clear selection. The selection survives reloads.
+- Favorite marks and album changes share one ordered background writer, so "create an album,
+  then add items" can never be reordered.
+
 ## [0.3.0] - 2026-11-14
 
 ### Added

@@ -9,6 +9,7 @@
 //! that snapshot while it is open, so reloads of the grid behind it do not move the photos
 //! under the user; favorite marks changed meanwhile are tracked separately.
 
+use super::albums::{AlbumChoice, album_menu};
 use super::preview::{self, Preview, PreviewKey, Previews};
 use super::timeline::{fmt_taken_at, paint_star};
 use super::workers::ThumbCache;
@@ -16,7 +17,7 @@ use super::{App, Query, consume_plain_key, fmt_time, platform};
 use crate::media::MediaKind;
 use crate::media::metadata::DateSource;
 use crate::search::SearchHit;
-use crate::store::db::{FileDetails, TimelineItem};
+use crate::store::db::{AlbumInfo, FileDetails, TimelineItem};
 use crate::thumbs::ThumbKey;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Vec2};
 use std::collections::HashMap;
@@ -163,6 +164,7 @@ impl ViewerEntry {
 pub(super) enum Action {
     Close,
     Favorite(i64, bool),
+    AddToAlbum(i64, AlbumChoice),
     Open(PathBuf),
     Reveal(PathBuf),
     PlayAt(PathBuf, f64),
@@ -343,6 +345,7 @@ impl Viewer {
         previews: &mut Previews,
         thumbs: &mut ThumbCache,
         can_find_similar: bool,
+        albums: &[AlbumInfo],
         notice: Option<&str>,
     ) -> Vec<Action> {
         let ctx = ui.ctx().clone();
@@ -350,7 +353,7 @@ impl Viewer {
         self.handle_keys(&ctx, &mut actions);
         egui::Panel::top("viewer_top").show(ui, |ui| {
             ui.add_space(6.0);
-            self.top_bar(ui, &mut actions);
+            self.top_bar(ui, albums, &mut actions);
             ui.add_space(6.0);
         });
         if let Some(text) = notice {
@@ -368,7 +371,7 @@ impl Viewer {
                 .min_size(240.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.info_panel(ui, previews, can_find_similar, &mut actions)
+                        self.info_panel(ui, previews, can_find_similar, albums, &mut actions)
                     });
                 });
         }
@@ -378,7 +381,7 @@ impl Viewer {
         actions
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    fn top_bar(&mut self, ui: &mut egui::Ui, albums: &[AlbumInfo], actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             if ui.button("Close").clicked() {
                 actions.push(Action::Close);
@@ -409,6 +412,7 @@ impl Viewer {
                     }
                 }
                 if !self.info {
+                    self.album_button(ui, albums, actions);
                     self.favorite_button(ui, actions);
                 }
             });
@@ -423,11 +427,18 @@ impl Viewer {
         }
     }
 
+    fn album_button(&self, ui: &mut egui::Ui, albums: &[AlbumInfo], actions: &mut Vec<Action>) {
+        if let Some(c) = album_menu(ui, albums) {
+            actions.push(Action::AddToAlbum(self.current().file_id, c));
+        }
+    }
+
     fn info_panel(
         &mut self,
         ui: &mut egui::Ui,
         previews: &mut Previews,
         can_find_similar: bool,
+        albums: &[AlbumInfo],
         actions: &mut Vec<Action>,
     ) {
         let e = self.current.clone();
@@ -495,6 +506,7 @@ impl Viewer {
                 });
             }
             self.favorite_button(ui, actions);
+            self.album_button(ui, albums, actions);
         });
         if e.moments.len() > 1 || (e.moments.len() == 1 && e.t.is_some()) {
             ui.add_space(10.0);
@@ -747,6 +759,7 @@ impl App {
             &mut self.previews,
             &mut self.thumbs,
             can_similar,
+            &self.snapshot.albums,
             notice,
         );
         self.viewer = Some(viewer);
@@ -754,6 +767,7 @@ impl App {
             match a {
                 Action::Close => self.close_viewer(),
                 Action::Favorite(id, fav) => self.set_favorite(id, fav),
+                Action::AddToAlbum(id, c) => self.add_to_album_choice(vec![id], c),
                 Action::Open(p) => {
                     if let Err(e) = platform::open(&p) {
                         self.notify(format!("{e:#}"));

@@ -1,9 +1,11 @@
 //! The egui desktop app. All work happens on background threads; this module only renders
 //! state and sends commands to the [`Library`].
 
+mod albums;
 mod frame_stats;
 mod platform;
 mod preview;
+mod selection;
 mod timeline;
 mod viewer;
 mod when;
@@ -15,11 +17,12 @@ use crate::library::{Activity, Status};
 use crate::media::MediaKind;
 use crate::model::{download, registry};
 use crate::search::{SearchHit, SearchOptions, SearchSort};
-use crate::store::db::{Folder, Stats};
+use crate::store::db::{AlbumInfo, Folder, Stats};
 use crate::thumbs::ThumbKey;
 use egui::{Align, Color32, Layout, RichText, Sense, Vec2};
 use frame_stats::FrameStats;
 use preview::Previews;
+use selection::{ClickMods, Selection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -72,6 +75,7 @@ fn marked(marks: &HashMap<i64, FavMark>, file_id: i64, listed: bool) -> bool {
 struct Snapshot {
     stats: Stats,
     folders: Vec<Folder>,
+    albums: Vec<AlbumInfo>,
     errors: Vec<(PathBuf, String)>,
     model_installed: bool,
     taken: Option<Instant>,
@@ -83,6 +87,7 @@ impl Snapshot {
         Self {
             stats: lib.stats().unwrap_or_default(),
             folders: lib.folders().unwrap_or_default(),
+            albums: lib.albums().unwrap_or_default(),
             errors: lib.errors(50).unwrap_or_default(),
             model_installed: lib.model_installed(),
             taken: Some(Instant::now()),
@@ -116,6 +121,11 @@ pub struct App {
     /// Favorite marks waiting for the writer or for lists to catch up.
     fav_marks: HashMap<i64, FavMark>,
     fav_version_seen: u64,
+    albums_version_seen: u64,
+    /// A name being typed for a new album, a rename and a pending deletion.
+    new_album: Option<albums::NewAlbum>,
+    rename_album: Option<albums::RenameAlbum>,
+    delete_album: Option<i64>,
     current: Option<Query>,
     awaiting: Option<u64>,
     /// Shared with the viewer while it is open.
@@ -125,6 +135,8 @@ pub struct App {
     result_error: Option<String>,
     last_search_at: Option<Instant>,
     selected: Option<usize>,
+    /// All selected results (by file id); `selected` is the primary one.
+    result_sel: Selection,
     /// Selected moment (seconds) for the selected video.
     selected_t: Option<f64>,
     /// Columns in the results grid as of the last layout (for up/down navigation).
@@ -181,6 +193,10 @@ impl App {
             years_seen: None,
             fav_marks: HashMap::new(),
             fav_version_seen: 0,
+            albums_version_seen: 0,
+            new_album: None,
+            rename_album: None,
+            delete_album: None,
             current: None,
             awaiting: None,
             results: Arc::default(),
@@ -189,6 +205,7 @@ impl App {
             result_error: None,
             last_search_at: None,
             selected: None,
+            result_sel: Selection::default(),
             selected_t: None,
             grid_cols: 1,
             scroll_to: None,
@@ -315,6 +332,9 @@ impl App {
             }
             // Keep the selection on the same file across refreshes.
             self.selected = prev.and_then(|p| self.results.iter().position(|h| h.path == p));
+            self.selected = self
+                .result_sel
+                .rebase(self.results.iter().map(|h| h.file_id), self.selected);
             if self.selected.is_none() {
                 self.selected_t = None;
             }
@@ -370,9 +390,20 @@ impl App {
             ctx.request_repaint_after(Duration::from_secs(6).saturating_sub(at.elapsed()));
         }
         self.poll_favorites();
+        self.poll_albums();
         self.update_timeline();
         self.poll_years(jobs);
         self.settle_favorites();
+        self.sync_selection();
+    }
+
+    /// Keeps each grid's selection consistent with its primary item (nothing is selected
+    /// without a primary; the primary is always selected).
+    fn sync_selection(&mut self) {
+        let primary = self.tl.selected.and_then(|i| self.tl.items.get(i));
+        self.tl.sel.sync(primary.map(|it| it.file_id));
+        let primary = self.selected.and_then(|i| self.results.get(i));
+        self.result_sel.sync(primary.map(|h| h.file_id));
     }
 
     /// Reads the list of years for the "When" selector in the background, again whenever a job
@@ -460,6 +491,8 @@ impl App {
         ui.heading("Library");
         ui.add_space(4.0);
         self.view_selector(ui);
+        ui.add_space(6.0);
+        self.albums_section(ui);
         ui.add_space(6.0);
         ui.label(RichText::new("Folders").strong());
         let mut remove = None;
@@ -754,6 +787,7 @@ impl App {
             }
         });
         ui.add_space(4.0);
+        self.selection_bar_ui(ui);
         if self.results.is_empty() {
             if self.awaiting.is_none()
                 && self.result_error.is_none()
@@ -769,7 +803,7 @@ impl App {
         let rows = self.results.len().div_ceil(cols);
         self.grid_cols = cols;
         self.grid_shown = true;
-        let mut clicked: Option<(usize, bool)> = None;
+        let mut clicked: Option<(usize, bool, ClickMods)> = None;
         let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
         if let Some(y) = self.scroll_to.take() {
             area = area.vertical_scroll_offset(y);
@@ -782,10 +816,9 @@ impl App {
                     ui.spacing_mut().item_spacing.x = GAP;
                     for i in row * cols..((row + 1) * cols).min(self.results.len()) {
                         let resp = self.tile(ui, i, tile);
-                        if resp.double_clicked() {
-                            clicked = Some((i, true));
-                        } else if resp.clicked() {
-                            clicked = Some((i, false));
+                        if resp.double_clicked() || resp.clicked() {
+                            let mods = ClickMods::of_click(ui.ctx());
+                            clicked = Some((i, resp.double_clicked() && mods.is_plain(), mods));
                         }
                     }
                 });
@@ -803,9 +836,18 @@ impl App {
                 ui.ctx().request_repaint();
             }
         }
-        if let Some((i, open)) = clicked {
-            self.selected = Some(i);
-            self.selected_t = self.results[i].t_start;
+        if let Some((i, open, mods)) = clicked {
+            let results = Arc::clone(&self.results);
+            self.selected = self.result_sel.click(
+                self.selected,
+                results.len(),
+                &|k| results[k].file_id,
+                i,
+                mods,
+            );
+            if let Some(p) = self.selected.and_then(|p| results.get(p)) {
+                self.selected_t = p.t_start;
+            }
             if open {
                 self.open_viewer_results(i);
             }
@@ -831,7 +873,7 @@ impl App {
         if ui.is_rect_visible(rect) {
             let badge =
                 (hit.kind == MediaKind::Video).then(|| fmt_time(hit.t_start.unwrap_or(0.0)));
-            let selected = self.selected == Some(i);
+            let selected = self.result_sel.contains(hit.file_id) || self.selected == Some(i);
             timeline::paint_tile(
                 ui,
                 &mut self.thumbs,
@@ -940,6 +982,9 @@ impl App {
             let label = if fav { "Unfavorite" } else { "Favorite" };
             if ui.button(label).clicked() {
                 self.set_favorite(hit.file_id, !fav);
+            }
+            if let Some(c) = albums::album_menu(ui, &self.snapshot.albums) {
+                self.add_to_album_choice(vec![hit.file_id], c);
             }
         });
         if hit.kind == MediaKind::Video {
@@ -1207,52 +1252,11 @@ fn scroll_offset_for_row(
     }
 }
 
-/// Reads this frame's plain arrow and Enter presses and applies the arrows to `selected`.
-/// Returns the new selection and whether Enter was pressed.
-fn apply_nav_keys(
-    ctx: &egui::Context,
-    selected: Option<usize>,
-    step: impl Fn(Option<usize>, Nav) -> Option<usize>,
-) -> (Option<usize>, bool) {
-    let (counts, enter) = ctx.input_mut(|i| {
-        let mut counts = [
-            (Nav::Left, 0usize),
-            (Nav::Right, 0),
-            (Nav::Up, 0),
-            (Nav::Down, 0),
-        ];
-        for (n, c) in &mut counts {
-            let key = match n {
-                Nav::Left => egui::Key::ArrowLeft,
-                Nav::Right => egui::Key::ArrowRight,
-                Nav::Up => egui::Key::ArrowUp,
-                Nav::Down => egui::Key::ArrowDown,
-            };
-            *c = consume_plain_key(i, key);
-        }
-        (counts, consume_plain_key(i, egui::Key::Enter) > 0)
-    });
-    let mut next = selected;
-    let mut handled = false;
-    for (n, c) in counts {
-        for _ in 0..c {
-            next = step(next, n);
-            handled = true;
-        }
-    }
-    if handled {
-        // Focus on a button would otherwise also move with the arrows.
-        if let Some(id) = ctx.memory(|m| m.focused()) {
-            ctx.memory_mut(|m| m.surrender_focus(id));
-        }
-    }
-    (next, enter)
-}
-
 impl App {
-    /// Arrow keys move the selection, Enter opens it. Only active when the results grid was
-    /// drawn last frame, the Settings window is closed and no text field has keyboard focus,
-    /// so typing in the search box is never hijacked. Keys with any modifier are ignored.
+    /// Arrow keys move the selection, Shift+arrows extend it, Ctrl/Cmd+A selects everything and
+    /// Enter opens the primary item. Only active when the results grid was drawn last frame, the
+    /// Settings window is closed and no text field has keyboard focus, so typing in the search
+    /// box is never hijacked. Keys with other modifiers are ignored.
     fn handle_navigation_keys(&mut self, ctx: &egui::Context, grid_was_shown: bool) {
         if !grid_was_shown
             || self.settings_open
@@ -1261,44 +1265,85 @@ impl App {
         {
             return;
         }
-        let (next, enter) = apply_nav_keys(ctx, self.selected, |sel, n| {
-            step(sel, self.results.len(), self.grid_cols, n)
-        });
-        if next != self.selected {
+        let input = selection::read_nav_keys(ctx);
+        let results = Arc::clone(&self.results);
+        let (len, cols) = (results.len(), self.grid_cols);
+        let before = self.selected;
+        let next = selection::apply_keys(
+            &input,
+            &mut self.result_sel,
+            before,
+            len,
+            &|i| results[i].file_id,
+            |sel, n| step(sel, len, cols, n),
+        );
+        if next != before {
             self.selected = next;
-            self.selected_t = next.and_then(|i| self.results[i].t_start);
+            self.selected_t = next.and_then(|i| results[i].t_start);
             self.keyboard_moved = true;
         }
-        if take_plain_key(ctx, egui::Key::F)
-            && let Some(h) = self.selected.and_then(|i| self.results.get(i))
-        {
-            let (id, fav) = (h.file_id, !marked(&self.fav_marks, h.file_id, h.favorite));
-            self.set_favorite(id, fav);
+        if take_plain_key(ctx, egui::Key::F) {
+            if self.result_sel.is_multi() {
+                self.toggle_favorite_of_selection();
+            } else if let Some(h) = self.selected.and_then(|i| self.results.get(i)) {
+                let (id, fav) = (h.file_id, !marked(&self.fav_marks, h.file_id, h.favorite));
+                self.set_favorite(id, fav);
+            }
         }
-        if enter && let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
+        if input.enter
+            && let Some(i) = self.selected.filter(|&i| i < self.results.len())
+        {
             self.open_viewer_results(i);
         }
+    }
+
+    /// F with several items selected: favorite them all, or unfavorite them all if they
+    /// already are.
+    pub(super) fn toggle_favorite_of_selection(&mut self) {
+        let ids = self.selected_file_ids();
+        let all_fav = if self.searching() {
+            self.results
+                .iter()
+                .filter(|h| self.result_sel.contains(h.file_id))
+                .all(|h| marked(&self.fav_marks, h.file_id, h.favorite))
+        } else {
+            self.tl
+                .items
+                .iter()
+                .filter(|it| self.tl.sel.contains(it.file_id))
+                .all(|it| marked(&self.fav_marks, it.file_id, it.favorite))
+        };
+        self.set_favorites(&ids, !all_fav);
     }
 
     /// Marks (or unmarks) a favorite everywhere it is shown right away, and has it stored in
     /// the background. The mark wins over lists loaded from the library until the write is
     /// confirmed; if the write fails, the mark is taken back (see [`Self::poll_favorites`]).
     fn set_favorite(&mut self, file_id: i64, fav: bool) {
-        self.fav_marks.insert(
-            file_id,
-            FavMark {
-                value: fav,
-                confirmed: false,
-            },
-        );
+        self.set_favorites(&[file_id], fav);
+    }
+
+    /// [`Self::set_favorite`] for several files, patching the lists once.
+    pub(super) fn set_favorites(&mut self, file_ids: &[i64], fav: bool) {
+        for &file_id in file_ids {
+            self.fav_marks.insert(
+                file_id,
+                FavMark {
+                    value: fav,
+                    confirmed: false,
+                },
+            );
+        }
         self.patch_lists();
-        if let Some(v) = &mut self.viewer {
-            v.set_favorite(file_id, fav);
+        for &file_id in file_ids {
+            if let Some(v) = &mut self.viewer {
+                v.set_favorite(file_id, fav);
+            }
+            if self.tl.view == View::Favorites && !fav {
+                self.tl.remove_file(file_id);
+            }
+            self.lib.queue_favorite(file_id, fav);
         }
-        if self.tl.view == View::Favorites && !fav {
-            self.tl.remove_file(file_id);
-        }
-        self.lib.queue_favorite(file_id, fav);
     }
 
     /// Writes the marks into the lists. A list the viewer holds a snapshot of is left alone
@@ -1398,11 +1443,17 @@ impl App {
             ctx.request_repaint();
         }
         self.update_state(&ctx);
+        if self.dialog_open()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.cancel_album_dialogs();
+        }
         if self.viewer_open() {
             // The viewer fills the window: no sidebar, top bar or grid while it is open.
             self.grid_shown = false;
             self.tl.shown = false;
             self.show_viewer(ui);
+            self.album_dialogs(&ctx);
             return;
         }
         let grid_was_shown = std::mem::take(&mut self.grid_shown);
@@ -1429,23 +1480,37 @@ impl App {
         let has_folders = !self.snapshot.folders.is_empty();
         if self.searching() {
             if let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
+                let multi = self.result_sel.len();
                 egui::Panel::right("detail")
                     .resizable(true)
                     .default_size(340.0)
                     .min_size(260.0)
                     .show(ui, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| self.detail_panel(ui, i));
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if multi >= 2 {
+                                self.selection_summary(ui, multi);
+                            } else {
+                                self.detail_panel(ui, i);
+                            }
+                        });
                     });
             }
         } else if let Some(i) = self.tl.selected.filter(|&i| i < self.tl.items.len())
             && has_folders
         {
+            let multi = self.tl.sel.len();
             egui::Panel::right("detail")
                 .resizable(true)
                 .default_size(340.0)
                 .min_size(260.0)
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.timeline_detail(ui, i));
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if multi >= 2 {
+                            self.selection_summary(ui, multi);
+                        } else {
+                            self.timeline_detail(ui, i);
+                        }
+                    });
                 });
         }
         egui::CentralPanel::default().show(ui, |ui| {
@@ -1463,9 +1528,9 @@ impl App {
         if self.settings_open {
             self.settings_window(&ctx);
         }
+        self.album_dialogs(&ctx);
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.selected = None;
-            self.clear_timeline_selection();
+            self.clear_selection();
         }
     }
 }

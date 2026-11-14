@@ -94,6 +94,21 @@ vectors, so the i8 index is also written to `data/index-<model>.bin`. Each chang
 increments an epoch in the database; the cache carries that epoch, the model id and a random
 library id, and is only used if all match. It is written after jobs, never while indexing writes.
 
+## Albums, favorites and selection
+
+Favorite marks and album changes (create, rename, delete, add, remove) go through **one ordered
+write queue** served by a single writer thread, so a burst such as "create an album, add these
+items" is applied in the order it was made. Consecutive favorite marks collapse to the latest
+value per file; an album change ends such a run. Each write reports back (the new album's id,
+how many items changed, or an error such as a duplicate name) and bumps a version counter that
+lists and views watch to reload. Album names are trimmed, non-empty and unique ignoring case;
+`album_items` rows cascade away with their file or album, so deleting an album or removing a
+library folder never touches files and never deletes an album.
+
+Grids keep a **selection by file id** plus a *primary* item (by list index) that drives the
+detail panel and the viewer; ids that vanish in a reload are dropped. Range selection runs in
+list order from an anchor, so it follows the grouping and sort order on screen.
+
 ## Incremental scanning and robustness
 
 Rescans compare size and modification time. Files are never deleted from the library because of

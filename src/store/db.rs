@@ -124,6 +124,26 @@ pub struct Folder {
     pub path: PathBuf,
 }
 
+/// The photo or video that stands for an album (its most recently taken item).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumCover {
+    pub file_id: i64,
+    pub path: PathBuf,
+    pub kind: MediaKind,
+    pub mtime: i64,
+}
+
+/// An album with its size and cover, for lists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumInfo {
+    pub id: i64,
+    pub name: String,
+    pub count: usize,
+    /// `None` while the album is empty.
+    pub cover: Option<AlbumCover>,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileRow {
     pub id: i64,
@@ -763,6 +783,131 @@ impl Db {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Checks an album name: non-empty after trimming, and not used by another album
+    /// (ignoring case). Returns the trimmed name.
+    fn checked_album_name(&self, name: &str, except: Option<i64>) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("An album needs a name");
+        }
+        let wanted = name.to_lowercase();
+        let mut st = self.conn.prepare("SELECT id, name FROM albums")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, other) = row?;
+            if Some(id) != except && other.to_lowercase() == wanted {
+                bail!("An album named “{other}” already exists");
+            }
+        }
+        Ok(name.to_string())
+    }
+
+    /// Creates an album and returns its id. Names are trimmed, must not be empty and must be
+    /// unique ignoring case.
+    pub fn create_album(&mut self, name: &str) -> Result<i64> {
+        let name = self.checked_album_name(name, None)?;
+        self.conn.execute(
+            "INSERT INTO albums(name, created_at) VALUES (?1, ?2)",
+            params![name, now()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Renames an album (same rules as [`Self::create_album`]; keeping its own name in another
+    /// case is allowed).
+    pub fn rename_album(&mut self, id: i64, name: &str) -> Result<()> {
+        let name = self.checked_album_name(name, Some(id))?;
+        let n = self.conn.execute(
+            "UPDATE albums SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        if n == 0 {
+            bail!("That album no longer exists");
+        }
+        Ok(())
+    }
+
+    /// Deletes an album and its entries. The files themselves are never touched.
+    pub fn delete_album(&mut self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM albums WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// All albums by name (ignoring case), with item counts and covers.
+    pub fn albums(&self) -> Result<Vec<AlbumInfo>> {
+        let mut st = self.conn.prepare(
+            "SELECT a.id, a.name, a.created_at,
+                    (SELECT COUNT(*) FROM album_items WHERE album_id = a.id)
+             FROM albums a",
+        )?;
+        let mut out: Vec<AlbumInfo> = st
+            .query_map([], |r| {
+                Ok(AlbumInfo {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    created_at: r.get(2)?,
+                    count: r.get::<_, i64>(3)? as usize,
+                    cover: None,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        // Taken time is approximated by the stored value or the file time (no time zone
+        // conversion), which is plenty to pick a cover.
+        let mut cover = self.conn.prepare(
+            "SELECT f.id, f.path, f.kind, f.mtime FROM album_items i
+             JOIN files f ON f.id = i.file_id WHERE i.album_id = ?1
+             ORDER BY COALESCE(f.taken_at, f.mtime) DESC, f.path LIMIT 1",
+        )?;
+        for a in out.iter_mut().filter(|a| a.count > 0) {
+            a.cover = cover
+                .query_row([a.id], |r| {
+                    Ok(AlbumCover {
+                        file_id: r.get(0)?,
+                        path: PathBuf::from(r.get::<_, String>(1)?),
+                        kind: MediaKind::from_i64(r.get(2)?),
+                        mtime: r.get(3)?,
+                    })
+                })
+                .optional()?;
+        }
+        out.sort_by_cached_key(|a| (a.name.to_lowercase(), a.id));
+        Ok(out)
+    }
+
+    /// Adds files to an album; files already in it are ignored. Returns how many were added.
+    pub fn add_to_album(&mut self, album: i64, file_ids: &[i64]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut added = 0;
+        {
+            let mut ins = tx.prepare(
+                "INSERT OR IGNORE INTO album_items(album_id, file_id, added_at)
+                 SELECT ?1, id, ?3 FROM files WHERE id = ?2",
+            )?;
+            let at = now();
+            for id in file_ids {
+                added += ins.execute(params![album, id, at])?;
+            }
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// Takes files out of an album (they stay in the library). Returns how many were removed.
+    pub fn remove_from_album(&mut self, album: i64, file_ids: &[i64]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut del =
+                tx.prepare("DELETE FROM album_items WHERE album_id = ?1 AND file_id = ?2")?;
+            for id in file_ids {
+                removed += del.execute(params![album, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// Date source, camera and favorite flag of one file.
@@ -1707,5 +1852,69 @@ mod tests {
         assert_eq!(names(&tl), ["b.jpg", "a.jpg"]);
         assert_eq!(tl[1].taken_at, local_wall_clock(1_500_000_000));
         assert_eq!(tl[1].date_source, DateSource::File);
+    }
+
+    #[test]
+    fn album_crud_and_name_rules() {
+        let (mut db, _, _) = timeline_db();
+        let trip = db.create_album("  Trip  ").unwrap();
+        assert_eq!(db.albums().unwrap()[0].name, "Trip");
+        assert!(db.create_album("   ").is_err());
+        assert!(db.create_album("trip").is_err(), "case-insensitive");
+        let b = db.create_album("beach").unwrap();
+        // Albums are listed by name.
+        let names: Vec<_> = db.albums().unwrap().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["beach", "Trip"]);
+        assert!(db.rename_album(b, "TRIP").is_err());
+        assert!(db.rename_album(b, " ").is_err());
+        db.rename_album(trip, "TRIP").unwrap();
+        db.rename_album(b, "Beach days").unwrap();
+        assert!(db.rename_album(9999, "x").is_err());
+        let names: Vec<_> = db.albums().unwrap().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["Beach days", "TRIP"]);
+    }
+
+    #[test]
+    fn album_items_are_idempotent_and_the_cover_is_the_newest() {
+        let (mut db, _, _) = timeline_db();
+        let (a, c) = (id_of(&db, "/one/a.jpg"), id_of(&db, "/two/c.jpg"));
+        db.conn
+            .execute("UPDATE files SET taken_at = 100 WHERE id = ?1", [a])
+            .unwrap();
+        db.conn
+            .execute("UPDATE files SET taken_at = 200 WHERE id = ?1", [c])
+            .unwrap();
+        let album = db.create_album("x").unwrap();
+        assert_eq!(db.albums().unwrap()[0].cover, None);
+        assert_eq!(db.add_to_album(album, &[a, c]).unwrap(), 2);
+        assert_eq!(db.add_to_album(album, &[a, c, 424242]).unwrap(), 0);
+        let info = &db.albums().unwrap()[0];
+        assert_eq!(info.count, 2);
+        assert_eq!(info.cover.as_ref().unwrap().file_id, c);
+        assert_eq!(db.remove_from_album(album, &[c, 777]).unwrap(), 1);
+        let info = &db.albums().unwrap()[0];
+        assert_eq!((info.count, info.cover.as_ref().unwrap().file_id), (1, a));
+    }
+
+    #[test]
+    fn deleting_an_album_keeps_files_and_removing_a_folder_keeps_albums() {
+        let (mut db, f1, _) = timeline_db();
+        let (a, c) = (id_of(&db, "/one/a.jpg"), id_of(&db, "/two/c.jpg"));
+        let keep = db.create_album("keep").unwrap();
+        let gone = db.create_album("gone").unwrap();
+        db.add_to_album(keep, &[a, c]).unwrap();
+        db.add_to_album(gone, &[a]).unwrap();
+        db.delete_album(gone).unwrap();
+        assert_eq!(db.timeline(&TimelineFilter::default()).unwrap().len(), 4);
+        assert_eq!(db.albums().unwrap().len(), 1);
+        // Removing a library folder drops its files' entries, not the album.
+        db.remove_folder(f1).unwrap();
+        let info = &db.albums().unwrap()[0];
+        assert_eq!((info.name.as_str(), info.count), ("keep", 1));
+        let rows: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM album_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 }

@@ -24,6 +24,15 @@ computer.
   per side, so very large photos are scaled down to that) and `Esc` to go back to the grid.
 - **Favorites:** press `F` on the selected item (or use the Favorite button) to star it; the
   **Favorites** view in the sidebar lists them.
+- **Albums:** make your own albums (**New album…** in the sidebar, or from any **Add to album…**
+  menu). An album opens like the timeline, grouped and sorted the same way; it has **Rename…** and
+  **Delete album…** (deleting an album never deletes photos or videos). Albums only hold references:
+  files stay where they are, and an album forgets files that leave the library.
+- **Multi-select** in every grid (timeline views, albums and search results): `Ctrl+click`
+  (`Cmd+click` on macOS) toggles an item, `Shift+click` selects a range, `Ctrl+A` (`Cmd+A`)
+  selects everything in the list, `Shift+←/→/↑/↓` extends the selection and `Esc` clears it. A bar
+  above the grid offers **Add to album…**, **Favorite**, **Unfavorite** and, inside an album,
+  **Remove from album**.
 - **On this day:** photos taken on today's date in earlier years, in a strip above the timeline
   (photos dated only by their file time are left out; 29 February shows on 28 February in years
   without one).
@@ -36,8 +45,10 @@ computer.
 - All / Images / Videos filter (applies to the album views too).
 - Background indexing with pause, resume and cancel; you can search while it runs.
 - Incremental rescans: new, changed and deleted files are picked up; unchanged files are skipped.
-- Keyboard: `Ctrl+F` (`Cmd+F` on macOS) focuses the search box, the arrow keys move the selection, `Enter` opens the
-  selected item in the viewer, `F` toggles favorite, `Esc` clears the selection.
+- Keyboard: `Ctrl+F` (`Cmd+F` on macOS) focuses the search box, the arrow keys move the selection
+  (`Shift` + arrows extends it, `Ctrl+A` / `Cmd+A` selects all), `Enter` opens the selected item
+  in the viewer, `F` toggles favorite (for every selected item when several are), `Esc` clears the
+  selection.
 
 ## How it works
 

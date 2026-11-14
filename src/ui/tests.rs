@@ -243,7 +243,7 @@ fn typing_in_search_blocks_arrows_until_focus_leaves() {
 fn modified_arrows_do_not_move_the_selection() {
     let d = tempfile::tempdir().unwrap();
     let mut h = grid_harness(grid_app(d.path()));
-    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowRight);
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowRight);
     h.run();
     assert!(h.query_by_label("a.jpg").is_none());
     h.key_press(egui::Key::ArrowRight);
@@ -365,6 +365,9 @@ fn navigator_jumps_to_a_year() {
     let app = album_app(d.path(), true);
     let mut h = album_harness(&app);
     assert!(h.query_by_label("December 2005 · 1").is_none());
+    // The sidebar's date list is short in a window this size: scroll the year into view.
+    h.get_by_label("2005 (12)").scroll_to_me();
+    h.run();
     h.get_by_label("2005 (12)").click();
     h.run();
     h.run();
@@ -948,4 +951,369 @@ fn find_similar_from_the_viewer_closes_it_like_any_other_close() {
     assert!(app.borrow().viewer.is_none());
     assert_eq!(app.borrow().previews.cached(), 0);
     assert!(app.borrow().searching());
+}
+
+// ---- Albums and multi-select ----------------------------------------------------------------
+
+/// A library with `n` dated files `p0.jpg`..: `p{n-1}` is the newest (first in the timeline).
+fn files_app(d: &std::path::Path, n: usize) -> (Arc<Library>, Rc<RefCell<App>>) {
+    use crate::media::ScannedFile;
+    use crate::media::metadata::{Capture, DateSource};
+    let lib = library(d);
+    {
+        let mut db = lib.db.lock();
+        let f = db.add_folder(std::path::Path::new("/nowhere")).unwrap();
+        let files: Vec<ScannedFile> = (0..n)
+            .map(|i| ScannedFile {
+                path: format!("/nowhere/p{i}.jpg").into(),
+                kind: MediaKind::Image,
+                size: 1,
+                mtime: 1,
+            })
+            .collect();
+        db.sync_folder(f, &files, &[]).unwrap();
+        let caps: Vec<_> = db
+            .pending("none")
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let i: i64 = r.path.file_stem().unwrap().to_str().unwrap()[1..]
+                    .parse()
+                    .unwrap();
+                (
+                    r.id,
+                    Capture {
+                        taken_at: 1_500_000_000 + i * 86_400,
+                        source: DateSource::Exif,
+                        camera: None,
+                        duration: None,
+                    },
+                )
+            })
+            .collect();
+        db.set_captures(&caps).unwrap();
+    }
+    let mut app = App::new(&egui::Context::default(), Arc::clone(&lib));
+    app.frame_stats = None;
+    (lib, Rc::new(RefCell::new(app)))
+}
+
+fn click_with(h: &mut Harness<'_>, label: &str, mods: egui::Modifiers) {
+    h.get_by_label(label).click_modifiers(mods);
+    h.run_steps(3);
+}
+
+fn type_name(h: &mut Harness<'_>, name: &str) {
+    h.run_steps(2);
+    h.get_by_label("Album name").type_text(name);
+    h.run_steps(2);
+}
+
+/// The album grouped by year with small tiles, so the first twelve photos are all on screen.
+fn small_tiles_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
+    {
+        let mut a = app.borrow_mut();
+        a.tl.group = super::timeline::Group::Year;
+        a.tl.tile_size = 96.0;
+    }
+    album_harness(app)
+}
+
+fn tl_selection(app: &Rc<RefCell<App>>) -> Vec<i64> {
+    app.borrow().selected_file_ids()
+}
+
+#[test]
+fn ctrl_and_shift_click_arrows_select_all_and_escape() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = small_tiles_harness(&app);
+    let (ctrl, shift) = (egui::Modifiers::COMMAND, egui::Modifiers::SHIFT);
+    h.get_by_label("Item img2.jpg").click();
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app), [2]);
+    h.get_by_label("img2.jpg");
+    click_with(&mut h, "Item img4.jpg", ctrl);
+    assert_eq!(tl_selection(&app), [2, 4]);
+    h.get_by_label("2 selected");
+    h.get_by_label("2 items selected");
+    // Shift+click selects from the anchor (img4) to the clicked item.
+    click_with(&mut h, "Item img7.jpg", shift);
+    assert_eq!(tl_selection(&app), [4, 5, 6, 7]);
+    h.get_by_label("4 selected");
+    // Ctrl+click toggles one item off again.
+    click_with(&mut h, "Item img5.jpg", ctrl);
+    assert_eq!(tl_selection(&app), [4, 6, 7]);
+    // Plain click collapses to one and shows its details.
+    h.get_by_label("Item img3.jpg").click();
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app), [3]);
+    assert!(h.query_by_label("Clear selection").is_none());
+    // Ctrl+A selects the whole list.
+    h.key_press_modifiers(ctrl, egui::Key::A);
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app).len(), 240);
+    h.get_by_label("240 selected");
+    // A plain arrow collapses to one selection, moved.
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app), [4]);
+    // Shift+arrows extend it.
+    h.key_press_modifiers(shift, egui::Key::ArrowRight);
+    h.run_steps(3);
+    h.key_press_modifiers(shift, egui::Key::ArrowRight);
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app), [4, 5, 6]);
+    h.get_by_label("3 selected");
+    // Escape clears everything.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(tl_selection(&app).is_empty());
+    assert_eq!(app.borrow().tl.selected, None);
+    assert!(h.query_by_label("Clear selection").is_none());
+}
+
+#[test]
+fn the_selection_survives_a_reload() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = small_tiles_harness(&app);
+    h.get_by_label("Item img1.jpg").click();
+    h.run_steps(3);
+    click_with(&mut h, "Item img2.jpg", egui::Modifiers::COMMAND);
+    click_with(&mut h, "Item img3.jpg", egui::Modifiers::COMMAND);
+    assert_eq!(tl_selection(&app), [1, 2, 3]);
+    // A reload in which img2 is gone and a new photo came in.
+    let mut items = spread_items();
+    items.retain(|it| it.file_id != 2);
+    items.insert(0, titem(999, 2020, 6, 1));
+    app.borrow_mut().inject_timeline(items);
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app), [1, 3]);
+    h.get_by_label("2 selected");
+}
+
+#[test]
+fn clear_selection_button_and_search_results_multi_select() {
+    use crate::media::MediaKind;
+    let d = tempfile::tempdir().unwrap();
+    let mut app = grid_app(d.path());
+    app.results = Arc::new(
+        (1..=4)
+            .map(|i| {
+                let mut h = hit(&format!("/nowhere/r{i}.jpg"), MediaKind::Image, None);
+                h.file_id = i;
+                h
+            })
+            .collect(),
+    );
+    let app = Rc::new(RefCell::new(app));
+    let mut h = album_harness(&app);
+    h.get_by_label("Result r1.jpg").click();
+    h.run_steps(3);
+    click_with(&mut h, "Result r3.jpg", egui::Modifiers::SHIFT);
+    assert_eq!(tl_selection(&app), [1, 2, 3]);
+    h.get_by_label("3 selected");
+    h.get_by_label("3 items selected");
+    h.get_by_label("Add to album…");
+    h.get_by_label("Favorite");
+    h.get_by_label("Unfavorite");
+    assert!(h.query_by_label("Remove from album").is_none());
+    h.get_by_label("Clear selection").click();
+    h.run_steps(3);
+    assert!(tl_selection(&app).is_empty());
+}
+
+#[test]
+fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 5);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 5);
+    let (ctrl, shift) = (egui::Modifiers::COMMAND, egui::Modifiers::SHIFT);
+
+    // Create an album from the sidebar.
+    h.get_by_label("No albums yet.");
+    h.get_by_label("New album…").click();
+    type_name(&mut h, "Trip");
+    h.get_by_label("Create").click();
+    settle(&mut h, || app.borrow().snapshot.albums.len() == 1);
+    h.get_by_label("Trip (0)");
+
+    // Add a multi-selection through the selection bar.
+    h.get_by_label("Item p4.jpg").click();
+    h.run_steps(3);
+    click_with(&mut h, "Item p2.jpg", ctrl);
+    click_with(&mut h, "Item p0.jpg", ctrl);
+    h.get_by_label("3 selected");
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_by_label("Trip").click();
+    settle(&mut h, || {
+        lib.albums().unwrap()[0].count == 3 && app.borrow().snapshot.albums[0].count == 3
+    });
+    h.get_by_label_contains("Added 3 items to “Trip”");
+    // Adding them again changes nothing.
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_by_label("Trip").click();
+    settle(&mut h, || {
+        app.borrow()
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.0.contains("Already in"))
+    });
+    assert_eq!(lib.albums().unwrap()[0].count, 3);
+
+    // The album view lists exactly those items.
+    h.get_by_label("Trip (3)").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.view == View::Album(a.snapshot.albums[0].id) && a.tl.items.len() == 3 && a.tl.loaded
+    });
+    h.run_steps(3);
+    h.get_by_label("Item p4.jpg");
+    h.get_by_label("Item p2.jpg");
+    h.get_by_label("Item p0.jpg");
+    assert!(h.query_by_label("Item p3.jpg").is_none());
+    h.get_by_label("Rename…");
+    h.get_by_label("Delete album…");
+
+    // Remove one from the album with the detail panel's button.
+    h.get_by_label("Item p2.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("Remove from album").click();
+    h.run_steps(3);
+    settle(&mut h, || lib.albums().unwrap()[0].count == 2);
+    assert!(h.query_by_label("Item p2.jpg").is_none());
+    // ...and two with the selection bar.
+    h.get_by_label("Item p4.jpg").click();
+    h.run_steps(3);
+    click_with(&mut h, "Item p0.jpg", shift);
+    h.get_by_label("Remove from album").click();
+    settle(&mut h, || lib.albums().unwrap()[0].count == 0);
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.items.is_empty() && a.tl.awaiting.is_none() && a.tl.loaded
+    });
+    h.run_steps(3);
+    h.get_by_label("This album is empty");
+    assert_eq!(lib.timeline(&Default::default()).unwrap().len(), 5);
+
+    // Put one back, then rename.
+    let p1 = file_id_of(&lib, "p1.jpg");
+    lib.add_to_album(lib.albums().unwrap()[0].id, &[p1])
+        .unwrap();
+    h.get_by_label("Rename…").click();
+    h.run_steps(2);
+    // The field starts with the old name: select all of it and replace it.
+    h.key_press_modifiers(ctrl, egui::Key::A);
+    h.run_steps(1);
+    h.get_by_label("Album name").type_text("  Holiday ");
+    h.run_steps(2);
+    h.get_by_label("Rename").click();
+    settle(&mut h, || {
+        lib.albums().unwrap()[0].name == "Holiday"
+            && app.borrow().snapshot.albums[0].name == "Holiday"
+    });
+    h.get_by_label("Holiday");
+    h.get_by_label_contains("Holiday (");
+
+    // Delete needs a confirmation that says the photos stay.
+    h.get_by_label("Delete album…").click();
+    h.run_steps(3);
+    h.get_by_label("The photos and videos in it are not deleted.");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert_eq!(lib.albums().unwrap().len(), 1);
+    h.get_by_label("Delete album…").click();
+    h.run_steps(3);
+    h.get_by_label("Delete").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        lib.albums().unwrap().is_empty() && a.tl.view == View::Timeline && a.tl.items.len() == 5
+    });
+    h.get_by_label("No albums yet.");
+    h.get_by_label("Item p4.jpg");
+}
+
+#[test]
+fn a_new_album_from_the_add_menu_gets_the_selection_and_names_must_be_unique() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 4);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 4);
+    lib.create_album("Existing", &[]).unwrap();
+    app.borrow_mut().refresh_snapshot(true);
+    settle(&mut h, || app.borrow().snapshot.albums.len() == 1);
+    h.get_by_label("Item p3.jpg").click();
+    h.run_steps(3);
+    // Single item: detail panel menu; "New album…" creates an album holding the item.
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_by_label("Existing");
+    h.get_all_by_label("New album…").last().unwrap().click();
+    h.run_steps(3);
+    h.get_by_label("1 item will be added to it.");
+    // A duplicate name (any case) is refused and the dialog stays open.
+    type_name(&mut h, "EXISTING");
+    h.get_by_label("Create").click();
+    h.run_steps(3);
+    h.get_by_label_contains("already exists");
+    assert_eq!(lib.albums().unwrap().len(), 1);
+    // Fix the name (clicking the button took the focus away).
+    h.get_by_label("Album name").click();
+    h.run_steps(2);
+    h.get_by_label("Album name").type_text("2");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    settle(&mut h, || lib.albums().unwrap().len() == 2);
+    let created = lib
+        .albums()
+        .unwrap()
+        .into_iter()
+        .find(|a| a.name == "EXISTING2")
+        .unwrap();
+    assert_eq!(created.count, 1);
+    // Escape closes a dialog without touching the selection.
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_all_by_label("New album…").last().unwrap().click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().new_album.is_none());
+    assert_eq!(tl_selection(&app).len(), 1);
+}
+
+#[test]
+fn the_viewer_offers_add_to_album() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 3);
+    lib.create_album("Trip", &[]).unwrap();
+    let mut h = quick_harness(&app);
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.items.len() == 3 && a.snapshot.albums.len() == 1
+    });
+    app.borrow_mut().refresh_snapshot(true);
+    settle(&mut h, || !app.borrow().snapshot.albums.is_empty());
+    double_click(&mut h, "Item p1.jpg");
+    h.run_steps(3);
+    let target = file_id_of(&lib, "p1.jpg");
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_by_label("Trip").click();
+    settle(&mut h, || lib.albums().unwrap()[0].count == 1);
+    let id = lib.albums().unwrap()[0].id;
+    let items = lib
+        .timeline(&crate::store::db::TimelineFilter {
+            album: Some(id),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        items.iter().map(|i| i.file_id).collect::<Vec<_>>(),
+        [target]
+    );
 }

@@ -5,7 +5,9 @@ use crate::config::{Paths, Settings};
 use crate::indexer;
 use crate::model::{Device, ModelSpec, TextEncoder, download, registry};
 use crate::search::{self, SearchHit, SearchOptions};
-use crate::store::db::{DateCounts, FileDetails, Folder, Stats, TimelineFilter, TimelineItem};
+use crate::store::db::{
+    AlbumInfo, DateCounts, FileDetails, Folder, Stats, TimelineFilter, TimelineItem,
+};
 use crate::store::{Db, VectorIndex};
 use anyhow::{Context, Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender};
@@ -115,11 +117,37 @@ impl Control {
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
 
-/// Work for the favorites writer thread.
-enum FavoriteMsg {
-    Set(i64, bool),
+/// Work for the library writer thread.
+enum WriteMsg {
+    Favorite(i64, bool),
+    Album(u64, AlbumOp),
     /// Answered once everything queued before it has been written.
     Flush(Sender<()>),
+}
+
+/// A change to the albums, applied by the writer in the order it was queued.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlbumOp {
+    /// Creates an album and puts `add` in it.
+    Create {
+        name: String,
+        add: Vec<i64>,
+    },
+    Rename {
+        id: i64,
+        name: String,
+    },
+    Delete {
+        id: i64,
+    },
+    Add {
+        album: i64,
+        files: Vec<i64>,
+    },
+    Remove {
+        album: i64,
+        files: Vec<i64>,
+    },
 }
 
 /// The outcome of one favorites write, as reported by the writer thread.
@@ -128,6 +156,20 @@ pub struct FavoriteWrite {
     pub file_id: i64,
     /// The value that was written (or that failed to be written).
     pub fav: bool,
+    /// Why the write failed; `None` once it is committed.
+    pub error: Option<String>,
+}
+
+/// The outcome of one album write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumWrite {
+    /// What [`Library::queue_album`] returned for this write.
+    pub ticket: u64,
+    pub op: AlbumOp,
+    /// The album that was created, or the one the write was about.
+    pub album: Option<i64>,
+    /// How many items were added or removed (for `Create`: put into the new album).
+    pub changed: usize,
     /// Why the write failed; `None` once it is committed.
     pub error: Option<String>,
 }
@@ -158,74 +200,118 @@ pub struct Library {
     saved: Mutex<Option<(&'static str, u64)>>,
     /// Whether `open` found a usable cache (instead of rebuilding from the database).
     from_cache: bool,
-    /// Favorite marks go to one writer thread in order (see [`Library::queue_favorite`]).
-    favorite_tx: Sender<FavoriteMsg>,
+    /// Favorite marks and album changes go to one writer thread in order (see
+    /// [`Library::queue_favorite`] and [`Library::queue_album`]).
+    write_tx: Sender<WriteMsg>,
     favorite_results: Receiver<FavoriteWrite>,
+    album_results: Receiver<AlbumWrite>,
+    next_ticket: AtomicU64,
     /// Incremented after each committed favorites write.
     favorites_version: AtomicU64,
+    /// Incremented after each album write that changed something.
+    albums_version: AtomicU64,
     /// Makes the next favorites writes fail (tests).
     #[cfg(test)]
     pub(crate) fail_favorites: AtomicBool,
 }
 
-/// The favorites writer: applies queued marks in order on one thread, collapsing writes for
-/// the same file to the latest value, and reports each outcome. Exits when the library is gone.
-fn favorite_writer(
+/// Collapsed favorite marks waiting to be written.
+#[derive(Default)]
+struct FavoriteRun(HashMap<i64, bool>);
+
+/// The library writer: applies queued writes in order on one thread and reports each outcome.
+/// Consecutive favorite marks collapse to the latest value per file; an album change ends the
+/// run, so nothing is ever reordered. Exits when the library is gone.
+fn library_writer(
     lib: std::sync::Weak<Library>,
-    rx: Receiver<FavoriteMsg>,
-    results: Sender<FavoriteWrite>,
+    rx: Receiver<WriteMsg>,
+    favorites: Sender<FavoriteWrite>,
+    albums: Sender<AlbumWrite>,
 ) {
     while let Ok(first) = rx.recv() {
-        let mut latest: HashMap<i64, bool> = HashMap::new();
-        let mut flushes = Vec::new();
-        let mut msg = Some(first);
-        while let Some(m) = msg {
-            match m {
-                FavoriteMsg::Set(id, fav) => {
-                    latest.insert(id, fav);
-                }
-                FavoriteMsg::Flush(done) => flushes.push(done),
-            }
-            msg = rx.try_recv().ok();
+        let mut batch = vec![first];
+        while let Ok(m) = rx.try_recv() {
+            batch.push(m);
         }
         let Some(lib) = lib.upgrade() else {
             return;
         };
-        for fav in [true, false] {
-            let ids: Vec<i64> = latest
-                .iter()
-                .filter(|(_, v)| **v == fav)
-                .map(|(id, _)| *id)
-                .collect();
-            if ids.is_empty() {
-                continue;
-            }
-            #[cfg(test)]
-            let outcome = if lib.fail_favorites.load(Ordering::Acquire) {
-                Err(anyhow!("simulated failure"))
-            } else {
-                lib.db.lock().set_favorite(&ids, fav)
-            };
-            #[cfg(not(test))]
-            let outcome = lib.db.lock().set_favorite(&ids, fav);
-            let error = outcome.err().map(|e| format!("{e:#}"));
-            if let Some(e) = &error {
-                tracing::warn!("could not save the favorite mark: {e}");
-            } else {
-                lib.favorites_version.fetch_add(1, Ordering::AcqRel);
-            }
-            for file_id in ids {
-                let _ = results.send(FavoriteWrite {
-                    file_id,
-                    fav,
-                    error: error.clone(),
-                });
+        let mut run = FavoriteRun::default();
+        let mut flushes = Vec::new();
+        for m in batch {
+            match m {
+                WriteMsg::Favorite(id, fav) => {
+                    run.0.insert(id, fav);
+                }
+                WriteMsg::Album(ticket, op) => {
+                    write_favorites(&lib, &mut run, &favorites);
+                    let result = write_album(&lib, ticket, op);
+                    let _ = albums.send(result);
+                }
+                WriteMsg::Flush(done) => flushes.push(done),
             }
         }
+        write_favorites(&lib, &mut run, &favorites);
         lib.notify();
         for done in flushes {
             let _ = done.send(());
         }
+    }
+}
+
+fn write_favorites(lib: &Library, run: &mut FavoriteRun, results: &Sender<FavoriteWrite>) {
+    let latest = std::mem::take(&mut run.0);
+    for fav in [true, false] {
+        let ids: Vec<i64> = latest
+            .iter()
+            .filter(|(_, v)| **v == fav)
+            .map(|(id, _)| *id)
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        #[cfg(test)]
+        let outcome = if lib.fail_favorites.load(Ordering::Acquire) {
+            Err(anyhow!("simulated failure"))
+        } else {
+            lib.db.lock().set_favorite(&ids, fav)
+        };
+        #[cfg(not(test))]
+        let outcome = lib.db.lock().set_favorite(&ids, fav);
+        let error = outcome.err().map(|e| format!("{e:#}"));
+        if let Some(e) = &error {
+            tracing::warn!("could not save the favorite mark: {e}");
+        } else {
+            lib.favorites_version.fetch_add(1, Ordering::AcqRel);
+        }
+        for file_id in ids {
+            let _ = results.send(FavoriteWrite {
+                file_id,
+                fav,
+                error: error.clone(),
+            });
+        }
+    }
+}
+
+fn write_album(lib: &Library, ticket: u64, op: AlbumOp) -> AlbumWrite {
+    let outcome = lib.apply_album_op(&op);
+    let (album, changed, error) = match outcome {
+        Ok((album, changed)) => {
+            lib.albums_version.fetch_add(1, Ordering::AcqRel);
+            (album, changed, None)
+        }
+        Err(e) => {
+            tracing::warn!("could not save the album change: {e:#}");
+            (None, 0, Some(format!("{e:#}")))
+        }
+    };
+    AlbumWrite {
+        ticket,
+        op,
+        album,
+        changed,
+        error,
     }
 }
 
@@ -289,8 +375,9 @@ impl Library {
             Some(i) => (i, true),
             None => (load_index(&db, spec)?, false),
         };
-        let (favorite_tx, favorite_rx) = crossbeam_channel::unbounded();
-        let (result_tx, favorite_results) = crossbeam_channel::unbounded();
+        let (write_tx, write_rx) = crossbeam_channel::unbounded();
+        let (favorite_tx, favorite_results) = crossbeam_channel::unbounded();
+        let (album_tx, album_results) = crossbeam_channel::unbounded();
         let lib = Arc::new(Self {
             paths,
             settings: RwLock::new(settings),
@@ -309,18 +396,21 @@ impl Library {
             save_lock: Mutex::new(()),
             saved: Mutex::new(from_cache.then_some((spec.id, epoch))),
             from_cache,
-            favorite_tx,
+            write_tx,
             favorite_results,
+            album_results,
+            next_ticket: AtomicU64::new(1),
             favorites_version: AtomicU64::new(0),
+            albums_version: AtomicU64::new(0),
             #[cfg(test)]
             fail_favorites: AtomicBool::new(false),
         });
         *lib.self_ref.write() = Arc::downgrade(&lib);
         let weak = Arc::downgrade(&lib);
         std::thread::Builder::new()
-            .name("recollect-favorites".into())
-            .spawn(move || favorite_writer(weak, favorite_rx, result_tx))
-            .context("starting the favorites writer")?;
+            .name("recollect-writer".into())
+            .spawn(move || library_writer(weak, write_rx, favorite_tx, album_tx))
+            .context("starting the library writer")?;
         Ok(lib)
     }
 
@@ -449,15 +539,92 @@ impl Library {
     /// in order; consecutive writes for one file collapse into the latest value. The outcome
     /// arrives through [`Self::take_favorite_results`].
     pub fn queue_favorite(&self, file_id: i64, fav: bool) {
-        let _ = self.favorite_tx.send(FavoriteMsg::Set(file_id, fav));
+        let _ = self.write_tx.send(WriteMsg::Favorite(file_id, fav));
     }
 
-    /// Blocks until every favorite queued so far has been written (or has failed).
-    pub fn wait_favorites(&self) {
+    /// Blocks until every write queued so far (favorites and album changes) has been written
+    /// (or has failed).
+    pub fn wait_writes(&self) {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        if self.favorite_tx.send(FavoriteMsg::Flush(tx)).is_ok() {
+        if self.write_tx.send(WriteMsg::Flush(tx)).is_ok() {
             let _ = rx.recv();
         }
+    }
+
+    /// Queues an album change for the writer thread and returns its ticket at once. Changes
+    /// are applied in the order queued, also relative to favorite marks; the outcome (with the
+    /// ticket, and the new album's id for `Create`) arrives through
+    /// [`Self::take_album_results`].
+    pub fn queue_album(&self, op: AlbumOp) -> u64 {
+        let ticket = self.next_ticket.fetch_add(1, Ordering::AcqRel);
+        let _ = self.write_tx.send(WriteMsg::Album(ticket, op));
+        ticket
+    }
+
+    /// Outcomes of the album writes finished since the last call, oldest first.
+    pub fn take_album_results(&self) -> Vec<AlbumWrite> {
+        self.album_results.try_iter().collect()
+    }
+
+    /// Changes after every committed album write: album lists and album views are stale once
+    /// it moves.
+    pub fn albums_version(&self) -> u64 {
+        self.albums_version.load(Ordering::Acquire)
+    }
+
+    /// Applies one album change; returns the album concerned and the number of items changed.
+    fn apply_album_op(&self, op: &AlbumOp) -> Result<(Option<i64>, usize)> {
+        let mut db = self.db.lock();
+        Ok(match op {
+            AlbumOp::Create { name, add } => {
+                let id = db.create_album(name)?;
+                let n = if add.is_empty() {
+                    0
+                } else {
+                    db.add_to_album(id, add)?
+                };
+                (Some(id), n)
+            }
+            AlbumOp::Rename { id, name } => {
+                db.rename_album(*id, name)?;
+                (Some(*id), 0)
+            }
+            AlbumOp::Delete { id } => {
+                db.delete_album(*id)?;
+                (Some(*id), 0)
+            }
+            AlbumOp::Add { album, files } => (Some(*album), db.add_to_album(*album, files)?),
+            AlbumOp::Remove { album, files } => {
+                (Some(*album), db.remove_from_album(*album, files)?)
+            }
+        })
+    }
+
+    /// All albums with counts and covers.
+    pub fn albums(&self) -> Result<Vec<AlbumInfo>> {
+        self.db.lock().albums()
+    }
+
+    /// Creates an album, waiting for the write; `add` goes into it. The GUI uses
+    /// [`Self::queue_album`] instead.
+    pub fn create_album(&self, name: &str, add: &[i64]) -> Result<i64> {
+        let op = AlbumOp::Create {
+            name: name.to_string(),
+            add: add.to_vec(),
+        };
+        let (id, _) = self.apply_album_op(&op)?;
+        self.albums_version.fetch_add(1, Ordering::AcqRel);
+        Ok(id.expect("create returns an id"))
+    }
+
+    /// Adds files to an album, waiting for the write; returns how many were new to it.
+    pub fn add_to_album(&self, album: i64, files: &[i64]) -> Result<usize> {
+        let (_, n) = self.apply_album_op(&AlbumOp::Add {
+            album,
+            files: files.to_vec(),
+        })?;
+        self.albums_version.fetch_add(1, Ordering::AcqRel);
+        Ok(n)
     }
 
     /// Outcomes of the favorites writes finished since the last call, oldest first.
@@ -1680,7 +1847,7 @@ mod tests {
         for fav in [true, false, true] {
             lib.queue_favorite(id, fav);
         }
-        lib.wait_favorites();
+        lib.wait_writes();
         assert_eq!(favorite_ids(&lib), [id]);
         assert!(lib.favorites_version() > v0);
         let results = lib.take_favorite_results();
@@ -1689,8 +1856,80 @@ mod tests {
         assert!(results.last().unwrap().fav);
         // And off again.
         lib.queue_favorite(id, false);
-        lib.wait_favorites();
+        lib.wait_writes();
         assert!(favorite_ids(&lib).is_empty());
+    }
+
+    #[test]
+    fn album_writes_keep_their_order_and_report_back() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        seed_dated(&lib, &[]);
+        let ids: Vec<i64> = lib
+            .timeline(&TimelineFilter::default())
+            .unwrap()
+            .iter()
+            .map(|t| t.file_id)
+            .collect();
+        let v0 = lib.albums_version();
+        // Create-with-items and a duplicate name, in one burst with favorite marks between.
+        let t1 = lib.queue_album(AlbumOp::Create {
+            name: "Trip".into(),
+            add: ids[..2].to_vec(),
+        });
+        lib.queue_favorite(ids[0], true);
+        let t2 = lib.queue_album(AlbumOp::Create {
+            name: "trip".into(),
+            add: vec![],
+        });
+        lib.queue_favorite(ids[0], false);
+        lib.wait_writes();
+        let results = lib.take_album_results();
+        assert_eq!(results.len(), 2);
+        assert_eq!((results[0].ticket, results[1].ticket), (t1, t2));
+        let album = results[0].album.unwrap();
+        assert_eq!((results[0].changed, results[0].error.as_deref()), (2, None));
+        assert!(
+            results[1]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("already exists")
+        );
+        assert!(lib.albums_version() > v0);
+        assert!(favorite_ids(&lib).is_empty(), "the later mark won");
+        // Add, remove, rename, queued back to back: applied in that order.
+        lib.queue_album(AlbumOp::Add {
+            album,
+            files: ids.clone(),
+        });
+        lib.queue_album(AlbumOp::Remove {
+            album,
+            files: ids[..1].to_vec(),
+        });
+        lib.queue_album(AlbumOp::Rename {
+            id: album,
+            name: "Holiday".into(),
+        });
+        lib.wait_writes();
+        let r = lib.take_album_results();
+        assert_eq!(
+            r.iter().map(|w| w.changed).collect::<Vec<_>>(),
+            [ids.len() - 2, 1, 0]
+        );
+        let info = lib.albums().unwrap();
+        assert_eq!(
+            (info[0].name.as_str(), info[0].count),
+            ("Holiday", ids.len() - 1)
+        );
+        // Deleting the album leaves the files.
+        lib.queue_album(AlbumOp::Delete { id: album });
+        lib.wait_writes();
+        assert!(lib.albums().unwrap().is_empty());
+        assert_eq!(
+            lib.timeline(&TimelineFilter::default()).unwrap().len(),
+            ids.len()
+        );
     }
 
     #[test]
@@ -1702,7 +1941,7 @@ mod tests {
         let v0 = lib.favorites_version();
         lib.fail_favorites.store(true, Ordering::Release);
         lib.queue_favorite(id, true);
-        lib.wait_favorites();
+        lib.wait_writes();
         let results = lib.take_favorite_results();
         assert_eq!(results.len(), 1);
         assert_eq!((results[0].file_id, results[0].fav), (id, true));

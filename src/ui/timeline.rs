@@ -1,14 +1,15 @@
-//! Album browsing: the timeline, recently added and per-folder views.
+//! Browsing: the timeline, recently added, favorites, per-folder and per-album views.
 //!
 //! Files are loaded in the background, grouped by capture day, month or year in memory and laid
 //! out as rows (section headers and rows of tiles) with known vertical offsets. Only the rows
 //! inside the scroll viewport are drawn, found by binary search, so very large libraries stay
 //! smooth.
 
+use super::selection::{self, ClickMods, Selection};
 use super::workers::ThumbCache;
-use super::{App, Nav, Query, apply_nav_keys, fmt_time, marked, platform, take_plain_key};
+use super::{App, Nav, Query, albums, fmt_time, marked, platform, take_plain_key};
 use crate::Library;
-use crate::library::Activity;
+use crate::library::{Activity, AlbumOp};
 use crate::media::MediaKind;
 use crate::media::metadata::DateSource;
 use crate::store::db::{TimelineFilter, TimelineItem, TimelineOrder};
@@ -36,6 +37,7 @@ pub enum View {
     RecentlyAdded,
     Favorites,
     Folder(i64),
+    Album(i64),
 }
 
 /// How the timeline is split into sections.
@@ -529,7 +531,9 @@ pub(super) struct TimelineState {
     /// The filter whose last load failed, and when; it is not retried right away.
     failed: Option<(TimelineFilter, Instant)>,
     error: Option<String>,
+    /// The primary selected item (last clicked); see [`Selection`].
     pub(super) selected: Option<usize>,
+    pub(super) sel: Selection,
     expanded: HashSet<i32>,
     top_year: Option<i32>,
     top_item: Option<usize>,
@@ -566,6 +570,7 @@ impl TimelineState {
             failed: None,
             error: None,
             selected: None,
+            sel: Selection::default(),
             expanded: HashSet::new(),
             top_year: None,
             top_item: None,
@@ -600,7 +605,10 @@ impl TimelineState {
             },
             kind,
             favorites_only: self.view == View::Favorites,
-            album: None,
+            album: match self.view {
+                View::Album(id) => Some(id),
+                _ => None,
+            },
             order: match (self.view, self.newest_first) {
                 (View::RecentlyAdded, _) => TimelineOrder::AddedDesc,
                 (_, true) => TimelineOrder::TakenDesc,
@@ -622,6 +630,10 @@ impl TimelineState {
         self.generation += 1;
         self.dates = date_index(&self.items);
         self.selected = prev.and_then(|f| self.items.iter().position(|it| it.file_id == f));
+        // Several selected items stay selected by file id; those that are gone are dropped.
+        self.selected = self
+            .sel
+            .rebase(self.items.iter().map(|it| it.file_id), self.selected);
         self.top_item = None;
         self.loaded = true;
     }
@@ -635,6 +647,7 @@ impl TimelineState {
             return;
         };
         Arc::make_mut(&mut self.items).remove(pos);
+        self.sel.remove(file_id);
         self.generation += 1;
         self.dates = date_index(&self.items);
         let len = self.items.len();
@@ -1128,10 +1141,20 @@ impl App {
                 .request_repaint_after(until_next_midnight(now) + Duration::from_secs(1));
             self.on_this_day_strip(ui);
         }
+        if let View::Album(id) = self.tl.view {
+            self.album_header(ui, id);
+        }
+        self.selection_bar_ui(ui);
         self.timeline_toolbar(ui);
         if self.tl.items.is_empty() {
             if self.tl.awaiting.is_none() {
-                if self.tl.view == View::Favorites {
+                if matches!(self.tl.view, View::Album(_)) {
+                    self.empty_state(
+                        ui,
+                        "This album is empty",
+                        "Select photos or videos and use “Add to album…”.",
+                    );
+                } else if self.tl.view == View::Favorites {
                     self.empty_state(
                         ui,
                         "No favorites yet",
@@ -1161,7 +1184,7 @@ impl App {
         let marks = &self.fav_marks;
         let thumbs = &mut self.thumbs;
         let layout = tl.layout.as_ref().expect("layout was just built");
-        let mut clicked: Option<(usize, bool)> = None;
+        let mut clicked: Option<(usize, bool, ClickMods)> = None;
         let mut top_item = None;
         let out = area.show_viewport(ui, |ui, viewport| {
             let (origin, _) =
@@ -1209,7 +1232,8 @@ impl App {
                                     TileMarks {
                                         badge,
                                         favorite: marked(marks, item.file_id, item.favorite),
-                                        selected: tl.selected == Some(i),
+                                        selected: tl.selected == Some(i)
+                                            || tl.sel.contains(item.file_id),
                                         hovered: resp.hovered(),
                                     },
                                 );
@@ -1219,10 +1243,9 @@ impl App {
                             resp.widget_info(|| {
                                 egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
                             });
-                            if resp.double_clicked() {
-                                clicked = Some((i, true));
-                            } else if resp.clicked() {
-                                clicked = Some((i, false));
+                            if resp.double_clicked() || resp.clicked() {
+                                let mods = ClickMods::of_click(ui.ctx());
+                                clicked = Some((i, resp.double_clicked() && mods.is_plain(), mods));
                             }
                             resp.on_hover_text(format!("{name}\n{}", fmt_taken(item)));
                         }
@@ -1252,8 +1275,15 @@ impl App {
         if self.tl.pending.is_some() {
             ui.ctx().request_repaint();
         }
-        if let Some((i, open)) = clicked {
-            self.tl.selected = Some(i);
+        if let Some((i, open, mods)) = clicked {
+            let items = Arc::clone(&self.tl.items);
+            self.tl.selected = self.tl.sel.click(
+                self.tl.selected,
+                items.len(),
+                &|k| items[k].file_id,
+                i,
+                mods,
+            );
             if open {
                 self.open_timeline_item(i);
             }
@@ -1340,7 +1370,8 @@ impl App {
         }
     }
 
-    /// Arrow keys and Enter for the album grid (same rules as for search results).
+    /// Keys for the grid (same rules as for search results): arrows, Shift+arrows,
+    /// Ctrl/Cmd+A, Enter and F.
     pub(super) fn handle_timeline_keys(&mut self, ctx: &egui::Context, grid_was_shown: bool) {
         if !grid_was_shown
             || self.settings_open
@@ -1349,27 +1380,41 @@ impl App {
         {
             return;
         }
-        let len = self.tl.items.len();
-        if take_plain_key(ctx, egui::Key::F)
-            && let Some(item) = self.tl.selected.and_then(|i| self.tl.items.get(i))
-        {
-            let id = item.file_id;
-            let fav = !marked(&self.fav_marks, id, item.favorite);
-            self.set_favorite(id, fav);
+        if take_plain_key(ctx, egui::Key::F) {
+            if self.tl.sel.is_multi() {
+                self.toggle_favorite_of_selection();
+            } else if let Some(item) = self.tl.selected.and_then(|i| self.tl.items.get(i)) {
+                let id = item.file_id;
+                let fav = !marked(&self.fav_marks, id, item.favorite);
+                self.set_favorite(id, fav);
+            }
         }
+        let input = selection::read_nav_keys(ctx);
+        let items = Arc::clone(&self.tl.items);
+        let len = items.len();
         let layout = self.tl.layout.as_ref();
-        let (next, enter) = apply_nav_keys(ctx, self.tl.selected, |sel, n| {
-            // Nothing (valid) selected: any arrow picks the first item.
-            let Some(cur) = sel.filter(|&i| i < len) else {
-                return Some(0);
-            };
-            Some(layout.map_or(cur, |l| l.step(cur, len, n)))
-        });
-        if next != self.tl.selected {
+        let before = self.tl.selected;
+        let next = selection::apply_keys(
+            &input,
+            &mut self.tl.sel,
+            before,
+            len,
+            &|i| items[i].file_id,
+            |sel, n| {
+                // Nothing (valid) selected: any arrow picks the first item.
+                let Some(cur) = sel.filter(|&i| i < len) else {
+                    return Some(0);
+                };
+                Some(layout.map_or(cur, |l| l.step(cur, len, n)))
+            },
+        );
+        if next != before {
             self.tl.selected = next;
             self.tl.keyboard_moved = true;
         }
-        if enter && let Some(i) = self.tl.selected {
+        if input.enter
+            && let Some(i) = self.tl.selected
+        {
             self.open_timeline_item(i);
         }
     }
@@ -1441,12 +1486,19 @@ impl App {
             if ui.button(label).clicked() {
                 self.set_favorite(item.file_id, !fav);
             }
+            if let Some(c) = albums::album_menu(ui, &self.snapshot.albums) {
+                self.add_to_album_choice(vec![item.file_id], c);
+            }
+            if let View::Album(album) = self.tl.view
+                && ui.button("Remove from album").clicked()
+            {
+                self.lib.queue_album(AlbumOp::Remove {
+                    album,
+                    files: vec![item.file_id],
+                });
+                self.tl.remove_file(item.file_id);
+            }
         });
-    }
-
-    /// Escape in the album grid.
-    pub(super) fn clear_timeline_selection(&mut self) {
-        self.tl.selected = None;
     }
 }
 
