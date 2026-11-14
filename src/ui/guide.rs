@@ -427,7 +427,7 @@ impl App {
     pub(super) fn search_now(&mut self) {
         self.query_changed_at = Some(
             Instant::now()
-                .checked_sub(super::DEBOUNCE)
+                .checked_sub(super::results::DEBOUNCE)
                 .unwrap_or_else(Instant::now),
         );
     }

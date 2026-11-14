@@ -1,0 +1,203 @@
+//! Toasts: short messages about what just happened, and what the library reports.
+
+use super::{App, guide};
+use std::time::{Duration, Instant};
+
+/// Short messages shown as toasts. An error stays visible until the next error or
+/// [`Notices::ERROR_FOR`]; later plain messages do not push it out (they show once it is gone).
+#[derive(Default)]
+pub(super) struct Notices {
+    pub(super) items: Vec<Notice>,
+}
+
+pub(super) struct Notice {
+    pub(super) text: String,
+    pub(super) at: Instant,
+    pub(super) error: bool,
+    /// Technical text, shown only when the user unfolds "Details".
+    pub(super) details: Option<String>,
+    /// A button that tries the failed thing again.
+    pub(super) action: Option<NoticeAction>,
+}
+
+/// What the "Try again" button of an error does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NoticeAction {
+    Download,
+    Scan,
+}
+
+impl Notices {
+    pub(super) const INFO_FOR: Duration = Duration::from_secs(5);
+    pub(super) const ERROR_FOR: Duration = Duration::from_secs(10);
+    /// More than this many pending messages are never useful.
+    pub(super) const MAX: usize = 6;
+
+    pub(super) fn ttl(n: &Notice) -> Duration {
+        if n.error {
+            Self::ERROR_FOR
+        } else {
+            Self::INFO_FOR
+        }
+    }
+
+    pub(super) fn push(&mut self, text: String, error: bool, now: Instant) {
+        self.push_with(text, error, now, None, None);
+    }
+
+    pub(super) fn push_with(
+        &mut self,
+        text: String,
+        error: bool,
+        now: Instant,
+        details: Option<String>,
+        action: Option<NoticeAction>,
+    ) {
+        self.expire(now);
+        if error {
+            // A newer error replaces the older ones.
+            self.items.retain(|n| !n.error);
+        }
+        self.items.push(Notice {
+            text,
+            at: now,
+            error,
+            details,
+            action,
+        });
+        while self.items.len() > Self::MAX {
+            self.items.remove(0);
+        }
+    }
+
+    pub(super) fn expire(&mut self, now: Instant) {
+        self.items
+            .retain(|n| now.saturating_duration_since(n.at) < Self::ttl(n));
+    }
+
+    /// What to show: the error if there is one, else the latest message.
+    #[cfg(test)]
+    pub(super) fn current(&self) -> Option<&str> {
+        self.items
+            .iter()
+            .find(|n| n.error)
+            .or(self.items.last())
+            .map(|n| n.text.as_str())
+    }
+
+    /// The notice [`Notices::current`] shows.
+    pub(super) fn current_notice(&self) -> Option<&Notice> {
+        self.items.iter().find(|n| n.error).or(self.items.last())
+    }
+
+    /// Time until the next message disappears (to schedule a repaint).
+    pub(super) fn next_expiry(&self, now: Instant) -> Option<Duration> {
+        self.items
+            .iter()
+            .map(|n| Self::ttl(n).saturating_sub(now.saturating_duration_since(n.at)))
+            .min()
+    }
+}
+
+impl App {
+    pub(super) fn notify(&mut self, msg: impl Into<String>) {
+        self.notices.push(msg.into(), false, Instant::now());
+    }
+
+    /// Like [`Self::notify`] for failures: stays visible longer and is not pushed out by the
+    /// messages that follow.
+    pub(super) fn notify_error(&mut self, msg: impl Into<String>) {
+        self.notices.push(msg.into(), true, Instant::now());
+    }
+
+    /// An error in two parts: what happened and what to do (`msg`), and the technical text
+    /// that goes under "Details". `action` adds a "Try again" button.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers pass temporaries such as format!() output or an error"
+    )]
+    pub(super) fn notify_problem(
+        &mut self,
+        msg: impl Into<String>,
+        details: impl ToString,
+        action: Option<NoticeAction>,
+    ) {
+        let details = details.to_string();
+        self.notices.push_with(
+            msg.into(),
+            true,
+            Instant::now(),
+            (!details.is_empty()).then_some(details),
+            action,
+        );
+    }
+
+    /// Runs what a toast's "Try again" button stands for.
+    pub(super) fn retry(&mut self, action: NoticeAction) {
+        match action {
+            NoticeAction::Download => self.turn_on_search(),
+            NoticeAction::Scan => self.start_indexing(),
+        }
+    }
+
+    /// Toasts for what the status says, and expiry of old ones.
+    pub(super) fn report_status_and_notices(&mut self, ctx: &egui::Context, run_ended: bool) {
+        self.report_status(run_ended);
+        let now = Instant::now();
+        self.notices.expire(now);
+        if let Some(left) = self.notices.next_expiry(now) {
+            ctx.request_repaint_after(left);
+        }
+    }
+
+    /// Turns what the library reports into toasts: each failure once (also when the same
+    /// message comes again), and folders that could not be reached when a run has just ended.
+    pub(super) fn report_status(&mut self, run_ended: bool) {
+        if self.status.error_seq != self.error_seq_seen {
+            self.error_seq_seen = self.status.error_seq;
+            if let Some(e) = self.status.last_error.clone() {
+                let (text, action) = guide::describe_failure(self.status.last_error_kind);
+                self.notify_problem(text, e, action);
+            }
+        }
+        if run_ended
+            && self
+                .status
+                .last_run
+                .as_ref()
+                .is_some_and(|r| !r.skipped_folders.is_empty())
+        {
+            self.notify("Some folders couldn't be reached, so they were left as they were.");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Notices;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn an_error_is_not_swallowed_by_later_messages() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut n = Notices::default();
+        n.push("could not save".into(), true, t0);
+        n.push("Added 2 items".into(), false, at(1));
+        assert_eq!(n.current(), Some("could not save"));
+        // A newer error replaces the older one.
+        n.push("disk full".into(), true, at(2));
+        assert_eq!(n.current(), Some("disk full"));
+        // Plain messages expire sooner than errors; the error outlives them.
+        n.expire(at(7));
+        assert_eq!(n.current(), Some("disk full"));
+        assert_eq!(n.next_expiry(at(7)), Some(Duration::from_secs(5)));
+        // After the error's time the message is gone.
+        n.expire(at(13));
+        assert_eq!(n.current(), None);
+        // With no error, the latest message shows.
+        n.push("one".into(), false, at(20));
+        n.push("two".into(), false, at(21));
+        assert_eq!(n.current(), Some("two"));
+    }
+}
