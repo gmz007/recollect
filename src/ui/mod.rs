@@ -20,6 +20,7 @@ use crate::thumbs::ThumbKey;
 use egui::{Align, Color32, Layout, RichText, Sense, Vec2};
 use frame_stats::FrameStats;
 use preview::Previews;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,6 +49,22 @@ pub fn run(lib: Arc<Library>) -> anyhow::Result<()> {
         Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, lib)))),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+}
+
+/// A favorite mark the user set that the library may not have stored yet. While one exists it
+/// wins over what a list loaded from the library says (a reload that started before the write
+/// finished still carries the old value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FavMark {
+    value: bool,
+    /// The write was committed (or given up on); the mark is dropped once no list that was
+    /// loaded earlier can still arrive.
+    confirmed: bool,
+}
+
+/// The favorite flag to show for a file: the pending mark if there is one, else `listed`.
+fn marked(marks: &HashMap<i64, FavMark>, file_id: i64, listed: bool) -> bool {
+    marks.get(&file_id).map_or(listed, |m| m.value)
 }
 
 /// Cached library facts, refreshed a few times per second rather than every frame.
@@ -90,11 +107,19 @@ pub struct App {
     /// Search narrowing and ordering (the "When" and "Sort" selectors).
     date: DateFilter,
     sort: SearchSort,
-    /// Years that have items in the timeline, newest first (feeds the "When" selector).
+    /// Years that have files in the library, newest first (feeds the "When" selector); read in
+    /// the background and refreshed when a job finishes.
     known_years: Vec<i32>,
+    years_rx: Option<crossbeam_channel::Receiver<Vec<i32>>>,
+    /// `jobs_finished` as of the last years request.
+    years_seen: Option<u64>,
+    /// Favorite marks waiting for the writer or for lists to catch up.
+    fav_marks: HashMap<i64, FavMark>,
+    fav_version_seen: u64,
     current: Option<Query>,
     awaiting: Option<u64>,
-    results: Vec<SearchHit>,
+    /// Shared with the viewer while it is open.
+    results: Arc<Vec<SearchHit>>,
     result_label: String,
     result_ms: f32,
     result_error: Option<String>,
@@ -152,9 +177,13 @@ impl App {
             date: DateFilter::default(),
             sort: SearchSort::Relevance,
             known_years: Vec::new(),
+            years_rx: None,
+            years_seen: None,
+            fav_marks: HashMap::new(),
+            fav_version_seen: 0,
             current: None,
             awaiting: None,
-            results: Vec::new(),
+            results: Arc::default(),
             result_label: String::new(),
             result_ms: 0.0,
             result_error: None,
@@ -279,7 +308,7 @@ impl App {
                 .map(|h| h.path.clone());
             match r.hits {
                 Ok(h) => {
-                    self.results = h;
+                    self.results = Arc::new(h);
                     self.result_error = None;
                 }
                 Err(e) => self.result_error = Some(e),
@@ -297,7 +326,7 @@ impl App {
             let q = self.query.trim().to_string();
             if q.is_empty() {
                 self.current = None;
-                self.results.clear();
+                self.results = Arc::default();
                 self.selected = None;
             } else {
                 self.submit(Query::Text(q));
@@ -337,12 +366,35 @@ impl App {
         {
             self.notice = None;
         }
+        if let Some((_, at)) = &self.notice {
+            ctx.request_repaint_after(Duration::from_secs(6).saturating_sub(at.elapsed()));
+        }
+        self.poll_favorites();
         self.update_timeline();
-        if self.tl.view == View::Timeline && self.tl.loaded {
-            let years: Vec<i32> = self.tl.dates.iter().map(|y| y.year).collect();
-            if years != self.known_years {
-                self.known_years = years;
-            }
+        self.poll_years(jobs);
+        self.settle_favorites();
+    }
+
+    /// Reads the list of years for the "When" selector in the background, again whenever a job
+    /// has finished (files were added, removed or dated).
+    fn poll_years(&mut self, jobs: u64) {
+        if let Some(rx) = &self.years_rx
+            && let Ok(years) = rx.try_recv()
+        {
+            self.known_years = years;
+            self.years_rx = None;
+        }
+        if self.years_rx.is_none() && self.years_seen != Some(jobs) {
+            self.years_seen = Some(jobs);
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let (lib, ctx) = (Arc::clone(&self.lib), self.ctx.clone());
+            std::thread::spawn(move || {
+                if let Ok(years) = lib.years() {
+                    let _ = tx.send(years);
+                    ctx.request_repaint();
+                }
+            });
+            self.years_rx = Some(rx);
         }
     }
 
@@ -787,7 +839,7 @@ impl App {
                 rect,
                 timeline::TileMarks {
                     badge,
-                    favorite: hit.favorite,
+                    favorite: marked(&self.fav_marks, hit.file_id, hit.favorite),
                     selected,
                     hovered: resp.hovered(),
                 },
@@ -884,13 +936,10 @@ impl App {
                     label: name.clone(),
                 });
             }
-            let label = if hit.favorite {
-                "Unfavorite"
-            } else {
-                "Favorite"
-            };
+            let fav = marked(&self.fav_marks, hit.file_id, hit.favorite);
+            let label = if fav { "Unfavorite" } else { "Favorite" };
             if ui.button(label).clicked() {
-                self.set_favorite(hit.file_id, !hit.favorite);
+                self.set_favorite(hit.file_id, !fav);
             }
         });
         if hit.kind == MediaKind::Video {
@@ -993,8 +1042,8 @@ impl App {
                 if switching {
                     // Old results and queries belong to the previous model.
                     self.consent_dismissed = false;
-                    self.results.clear();
-                    self.viewer = None;
+                    self.results = Arc::default();
+                    self.end_viewer();
                     self.current = None;
                     self.query.clear();
                     self.result_label.clear();
@@ -1223,7 +1272,7 @@ impl App {
         if take_plain_key(ctx, egui::Key::F)
             && let Some(h) = self.selected.and_then(|i| self.results.get(i))
         {
-            let (id, fav) = (h.file_id, !h.favorite);
+            let (id, fav) = (h.file_id, !marked(&self.fav_marks, h.file_id, h.favorite));
             self.set_favorite(id, fav);
         }
         if enter && let Some(i) = self.selected.filter(|&i| i < self.results.len()) {
@@ -1231,24 +1280,113 @@ impl App {
         }
     }
 
-    /// Marks (or unmarks) a favorite everywhere it is shown right away, and stores it in the
-    /// background.
+    /// Marks (or unmarks) a favorite everywhere it is shown right away, and has it stored in
+    /// the background. The mark wins over lists loaded from the library until the write is
+    /// confirmed; if the write fails, the mark is taken back (see [`Self::poll_favorites`]).
     fn set_favorite(&mut self, file_id: i64, fav: bool) {
-        for it in self.tl.items.iter_mut().filter(|it| it.file_id == file_id) {
-            it.favorite = fav;
-        }
-        for h in self.results.iter_mut().filter(|h| h.file_id == file_id) {
-            h.favorite = fav;
-        }
+        self.fav_marks.insert(
+            file_id,
+            FavMark {
+                value: fav,
+                confirmed: false,
+            },
+        );
+        self.patch_lists();
         if let Some(v) = &mut self.viewer {
             v.set_favorite(file_id, fav);
         }
-        let lib = Arc::clone(&self.lib);
-        std::thread::spawn(move || {
-            if let Err(e) = lib.set_favorite(&[file_id], fav) {
-                tracing::warn!("could not save the favorite mark: {e:#}");
+        if self.tl.view == View::Favorites && !fav {
+            self.tl.remove_file(file_id);
+        }
+        self.lib.queue_favorite(file_id, fav);
+    }
+
+    /// Writes the marks into the lists. A list the viewer holds a snapshot of is left alone
+    /// (copying it just for a flag could mean hundreds of thousands of items); the grids draw
+    /// marks over their lists anyway, and the list is patched once the viewer is gone.
+    fn patch_lists(&mut self) {
+        let marks = &self.fav_marks;
+        if marks.is_empty() {
+            return;
+        }
+        if let Some(items) = Arc::get_mut(&mut self.tl.items) {
+            for it in items.iter_mut() {
+                if let Some(m) = marks.get(&it.file_id) {
+                    it.favorite = m.value;
+                }
             }
-        });
+        }
+        if let Some(hits) = Arc::get_mut(&mut self.results) {
+            for h in hits.iter_mut() {
+                if let Some(m) = marks.get(&h.file_id) {
+                    h.favorite = m.value;
+                }
+            }
+        }
+    }
+
+    /// Per frame: confirmations and failures of favorite writes, and what the writes changed.
+    fn poll_favorites(&mut self) {
+        for w in self.lib.take_favorite_results() {
+            let pending = self
+                .fav_marks
+                .get(&w.file_id)
+                .is_some_and(|m| m.value == w.fav);
+            match w.error {
+                None => {
+                    if pending && let Some(m) = self.fav_marks.get_mut(&w.file_id) {
+                        m.confirmed = true;
+                    }
+                }
+                Some(e) => {
+                    self.notify(format!("Could not save the favorite mark: {e}"));
+                    // A newer mark for the same file is still on its way: it decides.
+                    if pending {
+                        // The library still has the earlier state.
+                        let value = !w.fav;
+                        self.fav_marks.insert(
+                            w.file_id,
+                            FavMark {
+                                value,
+                                confirmed: true,
+                            },
+                        );
+                        if let Some(v) = &mut self.viewer {
+                            v.set_favorite(w.file_id, value);
+                        }
+                        // An item taken out of the Favorites list has to come back.
+                        if self.tl.view == View::Favorites {
+                            self.tl.requested = None;
+                        }
+                        self.patch_lists();
+                    }
+                }
+            }
+        }
+        let version = self.lib.favorites_version();
+        if version != self.fav_version_seen {
+            self.fav_version_seen = version;
+            if self.tl.view == View::Favorites {
+                // What the view lists has changed. (Search results have no favorites filter or
+                // order: patching their flags is all they need.)
+                self.tl.requested = None;
+            }
+        }
+    }
+
+    /// Drops confirmed marks once nothing loaded earlier can arrive any more and the lists
+    /// carry the values themselves.
+    fn settle_favorites(&mut self) {
+        if !self.fav_marks.values().any(|m| m.confirmed)
+            || self.tl.awaiting.is_some()
+            || self.awaiting.is_some()
+        {
+            return;
+        }
+        self.patch_lists();
+        if Arc::strong_count(&self.tl.items) == 1 && Arc::strong_count(&self.results) == 1 {
+            self.fav_marks.retain(|_, m| !m.confirmed);
+        }
     }
 
     /// Draws the whole app into `ui` (separate from `eframe::App` for headless UI tests).

@@ -6,7 +6,7 @@
 //! smooth.
 
 use super::workers::ThumbCache;
-use super::{App, Nav, Query, apply_nav_keys, fmt_time, platform, take_plain_key};
+use super::{App, Nav, Query, apply_nav_keys, fmt_time, marked, platform, take_plain_key};
 use crate::Library;
 use crate::library::Activity;
 use crate::media::MediaKind;
@@ -369,15 +369,28 @@ pub struct OnThisDay {
 const ON_THIS_DAY_MAX: usize = 30;
 
 /// Items taken on the same month and day as `today` in earlier years, newest first (at most
-/// [`ON_THIS_DAY_MAX`]). `index` points into `items`, whatever order they are in.
+/// [`ON_THIS_DAY_MAX`]). `index` points into `items`, whatever order they are in. Items whose
+/// date is only the file's own time are left out: that is when the file was saved or copied,
+/// not when it was taken. In years without a 29 February, its photos show up on 28 February.
 pub fn on_this_day(items: &[TimelineItem], today: NaiveDate) -> Vec<OnThisDay> {
+    let leap_day_too = today.month() == 2
+        && today.day() == 28
+        && NaiveDate::from_ymd_opt(today.year(), 2, 29).is_none();
     let mut hits: Vec<(i64, usize, i32)> = items
         .iter()
         .enumerate()
         .filter_map(|(i, it)| {
+            if it.date_source == DateSource::File {
+                return None;
+            }
             let d = date_of(it.taken_at);
-            (d.month() == today.month() && d.day() == today.day() && d.year() < today.year())
-                .then_some((it.taken_at, i, today.year() - d.year()))
+            let same_day = d.month() == today.month() && d.day() == today.day()
+                || leap_day_too && d.month() == 2 && d.day() == 29;
+            (same_day && d.year() < today.year()).then_some((
+                it.taken_at,
+                i,
+                today.year() - d.year(),
+            ))
         })
         .collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(items[a.1].path.cmp(&items[b.1].path)));
@@ -385,6 +398,15 @@ pub fn on_this_day(items: &[TimelineItem], today: NaiveDate) -> Vec<OnThisDay> {
     hits.into_iter()
         .map(|(_, index, years_ago)| OnThisDay { index, years_ago })
         .collect()
+}
+
+/// Time until the next local midnight after `now` (when "today" changes).
+pub fn until_next_midnight(now: chrono::NaiveDateTime) -> Duration {
+    now.date()
+        .succ_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|m| (m - now).to_std().ok())
+        .unwrap_or(Duration::from_secs(3600))
 }
 
 fn years_ago_text(n: i32) -> String {
@@ -408,23 +430,28 @@ pub fn thumb_key(item: &TimelineItem) -> ThumbKey {
 // Background loading
 // ---------------------------------------------------------------------------------------------
 
-struct Loaded {
-    id: u64,
-    filter: TimelineFilter,
-    items: Result<Vec<TimelineItem>, String>,
+pub(super) struct Loaded {
+    pub(super) id: u64,
+    pub(super) filter: TimelineFilter,
+    pub(super) items: Result<Vec<TimelineItem>, String>,
 }
 
 /// Loads timelines on a dedicated thread; only the newest pending request is executed.
-struct TimelineWorker {
+pub(super) struct TimelineWorker {
     tx: Sender<(u64, TimelineFilter)>,
     rx: Receiver<Loaded>,
     next_id: u64,
+    /// Lets tests deliver a load result of their own making.
+    #[cfg(test)]
+    inject: Sender<Loaded>,
 }
 
 impl TimelineWorker {
     fn new(lib: Arc<Library>, repaint: impl Fn() + Send + 'static) -> Self {
         let (tx, req_rx) = unbounded::<(u64, TimelineFilter)>();
         let (resp_tx, rx) = unbounded();
+        #[cfg(test)]
+        let inject = resp_tx.clone();
         std::thread::Builder::new()
             .name("recollect-timeline".into())
             .spawn(move || {
@@ -445,7 +472,18 @@ impl TimelineWorker {
                 }
             })
             .expect("spawning timeline thread");
-        Self { tx, rx, next_id: 0 }
+        Self {
+            tx,
+            rx,
+            next_id: 0,
+            #[cfg(test)]
+            inject,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject(&self, loaded: Loaded) {
+        let _ = self.inject.send(loaded);
     }
 
     fn submit(&mut self, filter: TimelineFilter) -> u64 {
@@ -468,13 +506,14 @@ impl TimelineWorker {
 // ---------------------------------------------------------------------------------------------
 
 pub(super) struct TimelineState {
-    worker: TimelineWorker,
+    pub(super) worker: TimelineWorker,
     pub(super) view: View,
     pub(super) group: Group,
     pub(super) newest_first: bool,
     pub(super) tile_size: f32,
-    pub(super) items: Vec<TimelineItem>,
-    generation: u64,
+    /// Shared with the viewer, which keeps its own snapshot of the list while it is open.
+    pub(super) items: Arc<Vec<TimelineItem>>,
+    pub(super) generation: u64,
     groups: Vec<GroupSpan>,
     groups_key: Option<(u64, Group, bool)>,
     pub(super) dates: Vec<YearEntry>,
@@ -483,9 +522,9 @@ pub(super) struct TimelineState {
     otd: Option<(u64, NaiveDate, Vec<OnThisDay>)>,
     layout_key: Option<(u64, Group, bool, i32, u32)>,
     pub(super) loaded: bool,
-    awaiting: Option<(u64, TimelineFilter)>,
+    pub(super) awaiting: Option<(u64, TimelineFilter)>,
     loaded_filter: Option<TimelineFilter>,
-    requested: Option<(TimelineFilter, u64)>,
+    pub(super) requested: Option<(TimelineFilter, u64)>,
     requested_at: Instant,
     /// The filter whose last load failed, and when; it is not retried right away.
     failed: Option<(TimelineFilter, Instant)>,
@@ -511,7 +550,7 @@ impl TimelineState {
             group: Group::Month,
             newest_first: true,
             tile_size: 180.0,
-            items: Vec::new(),
+            items: Arc::new(Vec::new()),
             generation: 0,
             groups: Vec::new(),
             groups_key: None,
@@ -572,19 +611,45 @@ impl TimelineState {
 
     /// Replaces the items; keeps the selection on the same file.
     pub(super) fn set_items(&mut self, items: Vec<TimelineItem>) {
-        if self.loaded && items == self.items {
+        if self.loaded && items == *self.items {
             return; // a reload that found nothing new: keep layout and scroll position
         }
         let prev = self
             .selected
             .and_then(|i| self.items.get(i))
             .map(|it| it.file_id);
-        self.items = items;
+        self.items = Arc::new(items);
         self.generation += 1;
         self.dates = date_index(&self.items);
         self.selected = prev.and_then(|f| self.items.iter().position(|it| it.file_id == f));
         self.top_item = None;
         self.loaded = true;
+    }
+
+    /// Takes a file out of the list (it no longer belongs to the view, e.g. it was unfavorited
+    /// in Favorites). The selection stays on the same file, or moves to the one after a
+    /// removed selection; the scroll position stays on the photo at the top. The list is
+    /// copied only if the viewer holds a snapshot of it.
+    pub(super) fn remove_file(&mut self, file_id: i64) {
+        let Some(pos) = self.items.iter().position(|it| it.file_id == file_id) else {
+            return;
+        };
+        Arc::make_mut(&mut self.items).remove(pos);
+        self.generation += 1;
+        self.dates = date_index(&self.items);
+        let len = self.items.len();
+        self.selected = match self.selected {
+            Some(s) if s == pos => (len > 0).then(|| pos.min(len - 1)),
+            Some(s) if s > pos => Some(s - 1),
+            other => other,
+        };
+        if self.selected.is_some() {
+            self.keyboard_moved = true;
+        }
+        if let Some(top) = self.top_item.filter(|&t| t > 0) {
+            self.pending = Some((if top > pos { top - 1 } else { top }, false));
+        }
+        self.top_item = None;
     }
 
     /// Before `new` replaces the items: remembers which photo is at the top of the viewport so
@@ -821,7 +886,7 @@ impl App {
         self.query_changed_at = None;
         self.current = None;
         self.awaiting = None;
-        self.results.clear();
+        self.results = Arc::default();
         self.result_label.clear();
         self.result_error = None;
         self.selected = None;
@@ -849,7 +914,11 @@ impl App {
             self.tl.requested_at = Instant::now();
             let same_view = self.tl.loaded_filter.as_ref() == Some(&r.filter);
             match r.items {
-                Ok(items) => {
+                Ok(mut items) => {
+                    if r.filter.favorites_only {
+                        // A list read before an unfavorite was saved still has the item.
+                        items.retain(|it| self.fav_marks.get(&it.file_id).is_none_or(|m| m.value));
+                    }
                     if same_view {
                         // A reload of what is shown: stay on the same photo.
                         self.tl.anchor_scroll(&items);
@@ -1053,6 +1122,10 @@ impl App {
             return;
         }
         if self.tl.view == View::Timeline {
+            // "Today" changes at midnight, whether or not anything else happens by then.
+            let now = chrono::Local::now().naive_local();
+            ui.ctx()
+                .request_repaint_after(until_next_midnight(now) + Duration::from_secs(1));
             self.on_this_day_strip(ui);
         }
         self.timeline_toolbar(ui);
@@ -1085,6 +1158,7 @@ impl App {
             area = area.vertical_scroll_offset(y);
         }
         let tl = &self.tl;
+        let marks = &self.fav_marks;
         let thumbs = &mut self.thumbs;
         let layout = tl.layout.as_ref().expect("layout was just built");
         let mut clicked: Option<(usize, bool)> = None;
@@ -1134,7 +1208,7 @@ impl App {
                                     rect,
                                     TileMarks {
                                         badge,
-                                        favorite: item.favorite,
+                                        favorite: marked(marks, item.file_id, item.favorite),
                                         selected: tl.selected == Some(i),
                                         hovered: resp.hovered(),
                                     },
@@ -1229,7 +1303,11 @@ impl App {
                                     rect,
                                     TileMarks {
                                         badge,
-                                        favorite: item.favorite,
+                                        favorite: marked(
+                                            &self.fav_marks,
+                                            item.file_id,
+                                            item.favorite,
+                                        ),
                                         hovered: resp.hovered(),
                                         ..Default::default()
                                     },
@@ -1275,7 +1353,8 @@ impl App {
         if take_plain_key(ctx, egui::Key::F)
             && let Some(item) = self.tl.selected.and_then(|i| self.tl.items.get(i))
         {
-            let (id, fav) = (item.file_id, !item.favorite);
+            let id = item.file_id;
+            let fav = !marked(&self.fav_marks, id, item.favorite);
             self.set_favorite(id, fav);
         }
         let layout = self.tl.layout.as_ref();
@@ -1357,13 +1436,10 @@ impl App {
                     label: name.clone(),
                 });
             }
-            let label = if item.favorite {
-                "Unfavorite"
-            } else {
-                "Favorite"
-            };
+            let fav = marked(&self.fav_marks, item.file_id, item.favorite);
+            let label = if fav { "Unfavorite" } else { "Favorite" };
             if ui.button(label).clicked() {
-                self.set_favorite(item.file_id, !item.favorite);
+                self.set_favorite(item.file_id, !fav);
             }
         });
     }
@@ -1742,12 +1818,85 @@ mod tests {
         assert_eq!(items[got[0].index].taken_at, ts(2019, 7, 4, 12, 0, 0));
         assert_eq!(got[0].years_ago, 7);
         assert_eq!(got.last().unwrap().years_ago, 7 + 29);
-        // 29 February only matches 29 February.
-        let leap = vec![item(ts(2020, 2, 29, 12, 0, 0))];
-        assert!(on_this_day(&leap, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn leap_day_photos_show_on_28_february_in_years_without_one() {
+        let leap = vec![
+            item(ts(2020, 2, 29, 12, 0, 0)),
+            item(ts(2021, 2, 28, 9, 0, 0)),
+        ];
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        // 2026 has no 29 February: both photos belong to 28 February.
+        let got = on_this_day(&leap, day(2026, 2, 28));
+        assert_eq!(got.iter().map(|e| e.index).collect::<Vec<_>>(), [1, 0]);
+        // 2028 does: 28 February is its own day, and 29 February matches only 29 February.
+        let got = on_this_day(&leap, day(2028, 2, 28));
+        assert_eq!(got.iter().map(|e| e.index).collect::<Vec<_>>(), [1]);
+        let got = on_this_day(&leap, day(2028, 2, 29));
+        assert_eq!(got.iter().map(|e| e.index).collect::<Vec<_>>(), [0]);
+        assert!(on_this_day(&leap, day(2026, 3, 1)).is_empty());
+    }
+
+    #[test]
+    fn dates_taken_from_the_file_time_are_not_memories() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let mut copied = item(ts(2019, 7, 4, 12, 0, 0));
+        copied.date_source = DateSource::File;
+        let mut video = item(ts(2018, 7, 4, 12, 0, 0));
+        video.date_source = DateSource::Video;
+        let items = vec![copied, video, item(ts(2017, 7, 4, 12, 0, 0))];
+        let got = on_this_day(&items, today);
+        assert_eq!(got.iter().map(|e| e.index).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[test]
+    fn the_day_rolls_over_at_local_midnight() {
+        let at = |h, m, s| {
+            NaiveDate::from_ymd_opt(2026, 12, 31)
+                .unwrap()
+                .and_hms_opt(h, m, s)
+                .unwrap()
+        };
+        assert_eq!(until_next_midnight(at(23, 59, 0)), Duration::from_secs(60));
         assert_eq!(
-            on_this_day(&leap, NaiveDate::from_ymd_opt(2028, 2, 29).unwrap()).len(),
-            1
+            until_next_midnight(at(0, 0, 0)),
+            Duration::from_secs(86_400)
         );
+    }
+
+    #[test]
+    fn removing_a_file_keeps_the_selection_sane() {
+        let mut tl_items: Vec<TimelineItem> = (0..5).map(|i| item(1_000_000 + i)).collect();
+        let mut st = state_for_test();
+        st.set_items(std::mem::take(&mut tl_items));
+        st.selected = Some(3);
+        st.remove_file(1_000_001);
+        assert_eq!(st.items.len(), 4);
+        assert_eq!(st.selected, Some(2), "still the same file");
+        assert_eq!(st.items[2].file_id, 1_000_003);
+        // Removing the selected one selects the next; at the end, the new last one.
+        st.remove_file(1_000_003);
+        assert_eq!(st.selected, Some(2));
+        assert_eq!(st.items[2].file_id, 1_000_004);
+        st.remove_file(1_000_004);
+        assert_eq!(st.selected, Some(1));
+        st.remove_file(1_000_000);
+        st.remove_file(1_000_002);
+        assert_eq!(st.selected, None);
+        assert!(st.items.is_empty());
+        st.remove_file(42); // unknown: nothing happens
+    }
+
+    /// A timeline state without a real library behind it.
+    fn state_for_test() -> TimelineState {
+        crate::gpu::force_cpu(true);
+        let d = tempfile::tempdir().unwrap();
+        let lib = Library::open(
+            crate::config::Paths::under(d.path()),
+            Some(crate::model::registry::CLIP_B32.id),
+        )
+        .unwrap();
+        TimelineState::new(lib, &egui::Context::default())
     }
 }

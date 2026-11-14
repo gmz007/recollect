@@ -122,10 +122,10 @@ fn results_and_video_detail_panel() {
         id: 1,
         path: "/nowhere".into(),
     }];
-    app.results = vec![
+    app.results = Arc::new(vec![
         hit("/nowhere/clip.mp4", MediaKind::Video, Some(42.0)),
         hit("/nowhere/photo.jpg", MediaKind::Image, None),
-    ];
+    ]);
     app.current = Some(super::Query::Text("a dragon".into()));
     app.result_label = "a dragon".into();
     app.selected = Some(0);
@@ -155,10 +155,12 @@ fn arrow_keys_move_the_selection() {
         id: 1,
         path: "/nowhere".into(),
     }];
-    app.results = ["a.jpg", "b.jpg", "c.jpg"]
-        .iter()
-        .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
-        .collect();
+    app.results = Arc::new(
+        ["a.jpg", "b.jpg", "c.jpg"]
+            .iter()
+            .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
+            .collect(),
+    );
     app.current = Some(super::Query::Text("a dragon".into()));
     app.result_label = "a dragon".into();
     let mut h = Harness::builder()
@@ -198,10 +200,12 @@ fn grid_app_with(d: &std::path::Path, installed: bool) -> App {
         id: 1,
         path: "/nowhere".into(),
     }];
-    app.results = ["a.jpg", "b.jpg", "c.jpg"]
-        .iter()
-        .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
-        .collect();
+    app.results = Arc::new(
+        ["a.jpg", "b.jpg", "c.jpg"]
+            .iter()
+            .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
+            .collect(),
+    );
     app.current = Some(super::Query::Text("a dragon".into()));
     app.result_label = "a dragon".into();
     app
@@ -553,8 +557,9 @@ fn double_click_opens_the_viewer_and_the_info_panel_toggles() {
 fn viewer_from_a_search_hit_offers_the_moments_of_a_video() {
     let d = tempfile::tempdir().unwrap();
     let mut app = grid_app(d.path());
-    app.results[0] = hit("/nowhere/clip.mp4", MediaKind::Video, Some(42.0));
-    for (i, h) in app.results.iter_mut().enumerate() {
+    let results = Arc::make_mut(&mut app.results);
+    results[0] = hit("/nowhere/clip.mp4", MediaKind::Video, Some(42.0));
+    for (i, h) in results.iter_mut().enumerate() {
         h.file_id = i as i64 + 1;
     }
     app.selected = Some(0);
@@ -649,13 +654,18 @@ fn f_marks_a_favorite_and_the_favorites_view_lists_it() {
     });
     h.get_by_label("Item b.jpg");
     assert!(h.query_by_label("Item a.jpg").is_none());
-    // F again removes the mark; the view keeps the item until it is reloaded.
+    // F again removes the mark; the item leaves the view right away.
     h.get_by_label("Item b.jpg").click();
     h.run_steps(3);
     h.key_press(egui::Key::F);
     h.run_steps(3);
-    h.get_by_label("Favorite");
+    assert!(h.query_by_label("Item b.jpg").is_none());
+    h.get_by_label("No favorites yet");
+    assert_eq!(app.borrow().tl.selected, None);
     settle(&mut h, || lib.timeline(&fav).unwrap().is_empty());
+    // ...and it stays gone after the view is reloaded.
+    settle(&mut h, || app.borrow().fav_marks.is_empty());
+    assert!(app.borrow().tl.items.is_empty());
 }
 
 #[test]
@@ -668,11 +678,16 @@ fn favorites_toggle_in_the_viewer() {
     h.get_by_label("Favorite").click();
     h.run_steps(3);
     h.get_by_label("Unfavorite");
-    assert!(app.borrow().tl.items[0].favorite);
+    // The viewer holds the list, so the list itself is left alone and the mark is drawn over it.
+    let shown = |app: &Rc<RefCell<App>>| {
+        let a = app.borrow();
+        super::marked(&a.fav_marks, a.tl.items[0].file_id, a.tl.items[0].favorite)
+    };
+    assert!(shown(&app));
     h.key_press(egui::Key::F);
     h.run_steps(3);
     h.get_by_label("Favorite");
-    assert!(!app.borrow().tl.items[0].favorite);
+    assert!(!shown(&app));
 }
 
 #[test]
@@ -740,4 +755,197 @@ fn the_status_bar_does_not_blame_waiting_without_a_model() {
         super::waiting_for_model_text(1),
         "1 file will be searchable after the model download"
     );
+}
+
+// ---- Favorites: pending marks, write failures ---------------------------------------------
+
+fn file_id_of(lib: &Library, name: &str) -> i64 {
+    lib.timeline(&crate::store::db::TimelineFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|t| t.path.ends_with(name))
+        .unwrap()
+        .file_id
+}
+
+#[test]
+fn a_pending_mark_wins_over_a_reload_with_stale_values() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = favorites_app(d.path());
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    let b = file_id_of(&lib, "b.jpg");
+    let mut a = app.borrow_mut();
+    a.set_favorite(b, true);
+    // A list that was read before the write finished arrives (the writer is not polled here,
+    // so the mark is still pending).
+    let stale: Vec<_> =
+        a.tl.items
+            .iter()
+            .cloned()
+            .map(|mut it| {
+                it.favorite = false;
+                it
+            })
+            .collect();
+    let filter = a.tl.filter(a.kind);
+    a.tl.awaiting = Some((u64::MAX, filter.clone()));
+    a.tl.worker.inject(super::timeline::Loaded {
+        id: u64::MAX,
+        filter,
+        items: Ok(stale),
+    });
+    a.update_timeline();
+    let it = a.tl.items.iter().find(|it| it.file_id == b).unwrap();
+    assert!(!it.favorite, "the list itself is stale");
+    assert!(super::marked(&a.fav_marks, b, it.favorite), "the mark wins");
+    drop(a);
+    // Once the write is confirmed and nothing stale can arrive, the list carries the value.
+    settle(&mut h, || app.borrow().fav_marks.is_empty());
+    assert!(app.borrow().tl.items.iter().any(|it| it.favorite));
+}
+
+#[test]
+fn a_stale_favorites_list_does_not_bring_back_an_unfavorited_item() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = favorites_app(d.path());
+    let b = file_id_of(&lib, "b.jpg");
+    lib.set_favorite(&[b], true).unwrap();
+    app.borrow_mut().set_view(View::Favorites);
+    let mut h = album_harness(&app);
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.view == View::Favorites && a.tl.items.len() == 1
+    });
+    let mut a = app.borrow_mut();
+    let stale = a.tl.items.to_vec();
+    a.set_favorite(b, false);
+    assert!(a.tl.items.is_empty());
+    let filter = a.tl.filter(a.kind);
+    a.tl.awaiting = Some((u64::MAX, filter.clone()));
+    a.tl.worker.inject(super::timeline::Loaded {
+        id: u64::MAX,
+        filter,
+        items: Ok(stale),
+    });
+    a.update_timeline();
+    assert!(a.tl.items.is_empty());
+}
+
+#[test]
+fn a_failed_favorite_write_takes_the_mark_back() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = favorites_app(d.path());
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    let b = file_id_of(&lib, "b.jpg");
+    lib.fail_favorites
+        .store(true, std::sync::atomic::Ordering::Release);
+    app.borrow_mut().set_favorite(b, true);
+    let shown = || {
+        let a = app.borrow();
+        let it = a.tl.items.iter().find(|it| it.file_id == b).unwrap();
+        super::marked(&a.fav_marks, b, it.favorite)
+    };
+    assert!(shown(), "marked right away");
+    settle(&mut h, || {
+        app.borrow()
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.0.contains("Could not save"))
+    });
+    assert!(!shown(), "the flag is back to what the library has");
+    settle(&mut h, || app.borrow().fav_marks.is_empty());
+    assert!(app.borrow().tl.items.iter().all(|it| !it.favorite));
+    assert!(
+        lib.timeline(&crate::store::db::TimelineFilter {
+            favorites_only: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn years_for_the_when_selector_come_from_the_whole_library() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = favorites_app(d.path());
+    let mut h = album_harness(&app);
+    // 1_500_000_000 is in 2017; the list is read in the background.
+    settle(&mut h, || app.borrow().known_years == [2017]);
+}
+
+// ---- Viewer: shared list, notices, cleanup --------------------------------------------------
+
+#[test]
+fn opening_the_viewer_on_a_huge_album_copies_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut a = app.borrow_mut();
+    let mut items = Vec::with_capacity(200_000);
+    for i in 0..200_000 {
+        let mut it = titem(i + 1, 2020, 1, 1);
+        it.camera = None;
+        items.push(it);
+    }
+    a.tl.set_items(items);
+    assert_eq!(Arc::strong_count(&a.tl.items), 1);
+    a.open_viewer_timeline(150_000);
+    assert!(a.viewer.is_some());
+    assert_eq!(
+        Arc::strong_count(&a.tl.items),
+        2,
+        "the viewer shares the list"
+    );
+    // A favorite mark meanwhile does not copy it either.
+    a.set_favorite(5, true);
+    assert_eq!(Arc::strong_count(&a.tl.items), 2);
+    a.close_viewer();
+    assert_eq!(Arc::strong_count(&a.tl.items), 1);
+}
+
+#[test]
+fn notices_show_inside_the_viewer() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    double_click(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    assert!(h.query_by_label("No video player found").is_none());
+    app.borrow_mut().notify("No video player found");
+    h.run_steps(3);
+    h.get_by_label("No video player found");
+}
+
+#[test]
+fn closing_the_viewer_frees_its_previews() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    double_click(&mut h, "Item img1.jpg");
+    h.run_steps(5);
+    assert!(
+        app.borrow().previews.cached() > 0,
+        "previews were requested"
+    );
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    assert_eq!(app.borrow().previews.cached(), 0);
+}
+
+#[test]
+fn find_similar_from_the_viewer_closes_it_like_any_other_close() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    double_click(&mut h, "Item img1.jpg");
+    h.run_steps(5);
+    assert!(app.borrow().previews.cached() > 0);
+    h.get_by_label("Find similar").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    assert_eq!(app.borrow().previews.cached(), 0);
+    assert!(app.borrow().searching());
 }

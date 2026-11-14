@@ -61,7 +61,12 @@ fn padding_and_devices_give_the_same_embeddings() {
 /// Copies (hard-links where possible) a test model into a fresh Recollect home.
 fn home_with_model(id: &str) -> Option<(tempfile::TempDir, recollect::config::Paths)> {
     let src = model_dir(id)?;
-    let home = tempfile::tempdir().unwrap();
+    // Create the throwaway home next to the model files: hard links then work (no copy of
+    // hundreds of MB), and nothing large lands in /tmp, which is often RAM-backed.
+    let home = tempfile::Builder::new()
+        .prefix(".recollect-test-")
+        .tempdir_in(src.parent().unwrap_or(&src))
+        .unwrap();
     let paths = recollect::config::Paths::under(home.path());
     let dst = paths.models_dir().join(id);
     std::fs::create_dir_all(&dst).unwrap();

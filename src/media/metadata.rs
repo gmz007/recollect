@@ -60,6 +60,14 @@ pub fn local_wall_clock(utc_secs: i64) -> i64 {
     }
 }
 
+/// The capture time every list, filter and sort uses for a file: the stored date, or, while
+/// none is known, the modification time `mtime` (UTC seconds) in local wall-clock encoding.
+/// All readers of the `files` table go through this one rule so a file has the same date
+/// everywhere.
+pub fn effective_taken(taken_at: Option<i64>, mtime: i64) -> i64 {
+    taken_at.unwrap_or_else(|| local_wall_clock(mtime))
+}
+
 fn plausible(wall: i64) -> bool {
     wall >= MIN_PLAUSIBLE && wall <= local_wall_clock(Utc::now().timestamp()) + 86_400
 }
@@ -75,7 +83,7 @@ const MAX_TIFF_EXIF_BYTES: u64 = 64 << 20;
 /// try again later instead of settling for a guess.
 pub fn read_capture(path: &Path, kind: MediaKind, mtime: i64) -> Option<Capture> {
     let fallback = |duration| Capture {
-        taken_at: local_wall_clock(mtime),
+        taken_at: effective_taken(None, mtime),
         source: DateSource::File,
         camera: None,
         duration,

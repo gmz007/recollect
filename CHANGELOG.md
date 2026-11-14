@@ -10,15 +10,27 @@ All notable changes to this project are documented here. The format is based on
 
 - Viewer: double-click or press `Enter` on a photo or video frame to open it as large as the
   window allows, with an info panel, previous/next through the list you came from, 100 % zoom
-  with panning, and a large frame for videos (at the matching moment for search hits).
+  with panning (up to 4096 px per side: very large photos are scaled down to that), and a large
+  frame for videos (at the matching moment for search hits). Messages such as "No video player
+  found" appear at the bottom of the viewer.
 - Favorites: mark items with `F` or the Favorite button; stars on tiles and a Favorites view in
-  the sidebar.
+  the sidebar. Marks are saved in order by one background writer, shown at once, kept when a
+  reload carries older values, and taken back with a message if saving fails.
 - Search by date: a "When" selector (any time, this year, last year, a given year or a range of
   years) and a "Sort" selector (relevance, newest, oldest) while searching.
-- "On this day" strip above the timeline with photos taken on today's date in earlier years.
+- "On this day" strip above the timeline with photos taken on today's date in earlier years
+  (not for photos dated only by their file time; 29 February shows on 28 February in years
+  without one; the strip updates at midnight).
 
 ### Changed
 
+- Files without a known capture date use the same date (their file time) in the timeline, the
+  info panel, the search index and the date filter; search results sort by the date the filter
+  used.
+- Reading dates patches the search index once per run instead of once per batch.
+- The "When" selector lists the years of the whole library, read in the background.
+- The viewer shares the list it was opened on instead of copying it, so opening it on a very
+  large library is instant; closing it frees its previews.
 - The search index cache now records capture dates, so it is rebuilt once after updating.
 - Without a downloaded model the status bar says how many files will become searchable after the
   download instead of "still waiting".

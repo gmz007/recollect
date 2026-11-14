@@ -3,11 +3,12 @@
 //! Previews are decoded at (about) the window size, never larger than [`MAX_FIT_SIDE`] pixels
 //! on the longest side, using the same DCT-scaled decoder as the indexer. A handful of textures
 //! is kept in memory (least recently used first) and nothing is cached on disk. The viewer asks
-//! for the neighbouring items ahead of time so stepping through a list feels instant.
+//! for the neighbouring items ahead of time so stepping through a list feels instant; what is
+//! on screen is always decoded before those prefetches ([`Previews::get_urgent`]).
 
 use crate::Library;
 use crate::media::image::{self as img, Rgb};
-use crate::media::metadata::DateSource;
+use crate::store::db::FileDetails;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::{Condvar, Mutex};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +22,8 @@ pub const MAX_FIT_SIDE: u32 = 2048;
 pub const MAX_ZOOM_SIDE: u32 = 4096;
 /// Textures kept in memory.
 const MAX_TEXTURES: usize = 8;
+/// Of those, at most this many are 100 % zoom textures (up to 4096 px a side, about 64 MB each).
+const MAX_ZOOM_TEXTURES: usize = 2;
 
 /// One decoded preview: a file version, a video position and the size it is decoded at.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -33,6 +36,8 @@ pub struct PreviewKey {
     pub side: u32,
     /// The decoder may skip detail as long as the shorter side stays at least this big.
     pub min_side: u32,
+    /// The sharper preview for 100 % zoom (as opposed to one that fits the window).
+    pub zoom: bool,
 }
 
 /// Longest side to decode for a window of `window` points at `ppp` pixels per point: rounded
@@ -61,6 +66,14 @@ fn decode_preview(key: &PreviewKey) -> anyhow::Result<Rgb> {
     img::fit_within(&full, key.side)
 }
 
+/// Moves `key` to the back of the queue, which is where workers take their next request from.
+fn promote(queue: &mut Vec<PreviewKey>, key: &PreviewKey) {
+    if let Some(pos) = queue.iter().position(|k| k == key) {
+        let k = queue.remove(pos);
+        queue.push(k);
+    }
+}
+
 /// What the viewer knows about a preview right now.
 pub enum Preview<'a> {
     Loading,
@@ -81,22 +94,17 @@ struct Shared {
     stop: AtomicBool,
 }
 
-/// Facts about a file that are read on demand (file size, and what list views do not carry).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Details {
-    pub taken_at: i64,
-    pub date_source: DateSource,
-    pub camera: Option<String>,
-    pub size: Option<u64>,
-}
-
 pub struct Previews {
     shared: Arc<Shared>,
     states: HashMap<PreviewKey, (State, u64)>,
     frame: u64,
-    details: HashMap<i64, Option<Details>>,
-    details_tx: Sender<i64>,
-    details_rx: Receiver<(i64, Option<Details>)>,
+    details: HashMap<i64, Option<FileDetails>>,
+    /// Bumped whenever the details cache is emptied; answers to older requests are ignored.
+    details_epoch: u64,
+    /// What the cached details were read under (see [`Self::sync_details`]).
+    details_stamp: Option<(u64, u64)>,
+    details_tx: Sender<(i64, u64)>,
+    details_rx: Receiver<(i64, u64, Option<FileDetails>)>,
 }
 
 impl Previews {
@@ -137,24 +145,15 @@ impl Previews {
         }
         // Reading details touches the database and the file system, so it happens off the UI
         // thread too.
-        let (details_tx, req_rx) = unbounded::<i64>();
+        let (details_tx, req_rx) = unbounded::<(i64, u64)>();
         let (resp_tx, details_rx) = unbounded();
         let c = ctx.clone();
         std::thread::Builder::new()
             .name("recollect-details".into())
             .spawn(move || {
-                while let Ok(id) = req_rx.recv() {
-                    let d = lib
-                        .file_details(id)
-                        .ok()
-                        .flatten()
-                        .map(|(d, size)| Details {
-                            taken_at: d.taken_at,
-                            date_source: d.date_source,
-                            camera: d.camera,
-                            size,
-                        });
-                    if resp_tx.send((id, d)).is_err() {
+                while let Ok((id, epoch)) = req_rx.recv() {
+                    let d = lib.file_details(id).ok().flatten();
+                    if resp_tx.send((id, epoch, d)).is_err() {
                         break;
                     }
                     c.request_repaint();
@@ -166,6 +165,8 @@ impl Previews {
             states: HashMap::new(),
             frame: 0,
             details: HashMap::new(),
+            details_epoch: 0,
+            details_stamp: None,
             details_tx,
             details_rx,
         }
@@ -196,8 +197,10 @@ impl Previews {
             let used = self.states.get(&key).map_or(self.frame, |s| s.1);
             self.states.insert(key, (state, used));
         }
-        while let Ok((id, d)) = self.details_rx.try_recv() {
-            self.details.insert(id, d);
+        while let Ok((id, epoch, d)) = self.details_rx.try_recv() {
+            if epoch == self.details_epoch {
+                self.details.insert(id, d);
+            }
         }
         let finished = self
             .states
@@ -216,18 +219,57 @@ impl Previews {
                 self.states.remove(&k);
             }
         }
+        self.evict_zoom_textures();
     }
 
-    /// The preview for `key`; schedules decoding if it is not known yet. The newest request is
-    /// decoded first, so ask for neighbours before the current item.
-    pub fn get(&mut self, key: &PreviewKey) -> Preview<'_> {
-        let frame = self.frame;
-        if !self.states.contains_key(key) {
-            self.shared.queue.lock().push(key.clone());
-            self.shared.cv.notify_one();
-            self.states.insert(key.clone(), (State::Loading, frame));
+    /// Keeps at most [`MAX_ZOOM_TEXTURES`] zoom textures, dropping the least recently used.
+    fn evict_zoom_textures(&mut self) {
+        let mut zooms: Vec<(u64, PreviewKey)> = self
+            .states
+            .iter()
+            .filter(|(k, (s, f))| k.zoom && !matches!(s, State::Loading) && *f + 1 < self.frame)
+            .map(|(k, (_, f))| (*f, k.clone()))
+            .collect();
+        let total = self
+            .states
+            .iter()
+            .filter(|(k, (s, _))| k.zoom && !matches!(s, State::Loading))
+            .count();
+        if total > MAX_ZOOM_TEXTURES {
+            zooms.sort_by_key(|x| x.0);
+            for (_, k) in zooms.into_iter().take(total - MAX_ZOOM_TEXTURES) {
+                self.states.remove(&k);
+            }
         }
-        let entry = self.states.get_mut(key).expect("state was just inserted");
+    }
+
+    /// The preview for `key`; schedules decoding if it is not known yet. Meant for prefetching:
+    /// it goes behind everything asked for with [`Self::get_urgent`].
+    pub fn get(&mut self, key: &PreviewKey) -> Preview<'_> {
+        self.request(key, false)
+    }
+
+    /// Like [`Self::get`], for what is on screen: while the preview is not ready its request
+    /// is moved to the front of the decode queue, in front of all prefetches (call it every
+    /// frame; of several urgent keys, the one asked for last is decoded first).
+    pub fn get_urgent(&mut self, key: &PreviewKey) -> Preview<'_> {
+        self.request(key, true)
+    }
+
+    fn request(&mut self, key: &PreviewKey, urgent: bool) -> Preview<'_> {
+        let frame = self.frame;
+        match self.states.get(key) {
+            None => {
+                self.shared.queue.lock().push(key.clone());
+                self.shared.cv.notify_one();
+                self.states.insert(key.clone(), (State::Loading, frame));
+            }
+            Some((State::Loading, _)) if urgent => {
+                promote(&mut self.shared.queue.lock(), key);
+            }
+            Some(_) => {}
+        }
+        let entry = self.states.get_mut(key).expect("state exists");
         entry.1 = frame;
         match &entry.0 {
             State::Ready(t) => Preview::Ready(t),
@@ -251,15 +293,44 @@ impl Previews {
         }
     }
 
+    /// Empties the decode queue and drops every texture and cached detail: for when the viewer
+    /// goes away. Decodes already running finish, but their results are discarded.
+    pub fn clear(&mut self) {
+        self.shared.queue.lock().clear();
+        self.states.clear();
+        self.details.clear();
+        self.details_epoch += 1;
+        self.details_stamp = None;
+    }
+
     /// Details of a file once they were read (requested on first use).
-    pub fn details(&mut self, file_id: i64) -> Option<&Details> {
+    pub fn details(&mut self, file_id: i64) -> Option<&FileDetails> {
         match self.details.entry(file_id) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut().as_ref(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 e.insert(None);
-                let _ = self.details_tx.send(file_id);
+                let _ = self.details_tx.send((file_id, self.details_epoch));
                 None
             }
+        }
+    }
+
+    /// Number of previews and details held (tests).
+    #[cfg(test)]
+    pub(super) fn cached(&self) -> usize {
+        self.states.len() + self.details.len() + self.shared.queue.lock().len()
+    }
+
+    /// Drops the cached details when `stamp` (what the library looked like when they were
+    /// read: the album generation and the number of finished jobs) is not the one they were
+    /// read under. Call every frame while the viewer is open.
+    pub fn sync_details(&mut self, stamp: (u64, u64)) {
+        if self.details_stamp != Some(stamp) {
+            if self.details_stamp.is_some() {
+                self.details.clear();
+                self.details_epoch += 1;
+            }
+            self.details_stamp = Some(stamp);
         }
     }
 }
@@ -295,6 +366,93 @@ mod tests {
         assert_eq!(min_side_for(Some((0, 5)), 2048), 2048);
     }
 
+    fn key(name: &str, zoom: bool) -> PreviewKey {
+        PreviewKey {
+            path: format!("/nowhere/{name}.jpg").into(),
+            mtime: 1,
+            t_ms: None,
+            side: 1024,
+            min_side: 1024,
+            zoom,
+        }
+    }
+
+    fn previews() -> (tempfile::TempDir, Previews) {
+        let d = tempfile::tempdir().unwrap();
+        crate::gpu::force_cpu(true);
+        let lib = Library::open(
+            crate::config::Paths::under(d.path()),
+            Some(crate::model::registry::CLIP_B32.id),
+        )
+        .unwrap();
+        let p = Previews::new(&egui::Context::default(), lib, 1);
+        (d, p)
+    }
+
+    #[test]
+    fn the_item_on_screen_goes_before_prefetches() {
+        let mut q = vec![
+            key("current", false),
+            key("next", false),
+            key("prev", false),
+        ];
+        // Workers pop from the back: the prefetches would come first.
+        assert_eq!(q.last().unwrap(), &key("prev", false));
+        promote(&mut q, &key("current", false));
+        assert_eq!(q.pop().unwrap(), key("current", false));
+        assert_eq!(q.pop().unwrap(), key("prev", false));
+        // A key that is not queued (already being decoded) changes nothing.
+        promote(&mut q, &key("gone", false));
+        assert_eq!(q, [key("next", false)]);
+    }
+
+    #[test]
+    fn clearing_forgets_queue_textures_and_details() {
+        let (_d, mut p) = previews();
+        p.shared.queue.lock().push(key("queued", false));
+        p.states.insert(key("failed", false), (State::Failed, 1));
+        p.details.insert(7, None);
+        p.clear();
+        assert!(p.shared.queue.lock().is_empty());
+        assert!(p.states.is_empty());
+        assert!(p.details.is_empty());
+    }
+
+    #[test]
+    fn only_two_zoom_textures_are_kept() {
+        let (_d, mut p) = previews();
+        p.frame = 100;
+        for (i, n) in ["a", "b", "c", "d"].iter().enumerate() {
+            p.states
+                .insert(key(n, true), (State::Failed, 10 + i as u64));
+        }
+        p.states.insert(key("fit", false), (State::Failed, 1));
+        p.evict_zoom_textures();
+        let mut left: Vec<_> = p
+            .states
+            .keys()
+            .filter(|k| k.zoom)
+            .map(|k| k.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["c.jpg", "d.jpg"], "the most recently used stay");
+        assert!(p.states.contains_key(&key("fit", false)));
+    }
+
+    #[test]
+    fn details_are_dropped_when_the_library_changes() {
+        let (_d, mut p) = previews();
+        p.sync_details((1, 1));
+        p.details.insert(7, None);
+        p.sync_details((1, 1));
+        assert!(p.details.contains_key(&7));
+        p.sync_details((2, 1));
+        assert!(p.details.is_empty());
+        p.details.insert(7, None);
+        p.sync_details((2, 2));
+        assert!(p.details.is_empty());
+    }
+
     #[test]
     fn previews_are_scaled_to_the_requested_side() {
         let d = tempfile::tempdir().unwrap();
@@ -308,6 +466,7 @@ mod tests {
             t_ms: None,
             side: 1024,
             min_side: min_side_for(Some((3000, 1500)), 1024),
+            zoom: false,
         };
         let rgb = decode_preview(&key).unwrap();
         assert_eq!((rgb.width, rgb.height), (1024, 512));

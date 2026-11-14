@@ -13,7 +13,7 @@ use crate::model::registry::Family;
 use crate::model::{Device, ModelSpec, VisionEncoder};
 use crate::store::db::{FileMeta, FileRow, NewItem};
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -72,49 +72,63 @@ fn read_dates(lib: &Library, summary: &mut RunSummary) -> Result<()> {
         .num_threads(lib.settings().decode_threads())
         .thread_name(|i| format!("recollect-dates-{i}"))
         .build()?;
-    let mut done = 0;
-    for chunk in pending.chunks(DATE_BATCH) {
-        lib.update_status(|s| s.activity = Activity::ReadingDates { done, total });
-        if lib.control.checkpoint() {
-            return Ok(());
+    // Dates of files that already have items, patched into the search index in one pass at the
+    // end (also when the pass stops early: the database changes are already committed).
+    let mut embedded: HashMap<i64, i64> = HashMap::new();
+    let result = (|| -> Result<()> {
+        let mut done = 0;
+        for chunk in pending.chunks(DATE_BATCH) {
+            lib.update_status(|s| s.activity = Activity::ReadingDates { done, total });
+            if lib.control.checkpoint() {
+                return Ok(());
+            }
+            let caps: Vec<Option<(i64, Capture)>> = pool.install(|| {
+                chunk
+                    .par_iter()
+                    .map(|f| {
+                        if lib.control.checkpoint() {
+                            return None;
+                        }
+                        // `None` inside: unreadable right now, left undated for the next run.
+                        read_capture(&f.path, f.kind, f.mtime).map(|c| (f.id, c))
+                    })
+                    .collect()
+            });
+            if lib.control.is_cancelled() {
+                return Ok(()); // a partly read chunk is simply read again next time
+            }
+            let caps: Vec<(i64, Capture)> = caps.into_iter().flatten().collect();
+            embedded.extend(apply_captures(lib, &caps)?);
+            done += chunk.len();
+            summary.dates_read += caps.len();
         }
-        let caps: Vec<Option<(i64, Capture)>> = pool.install(|| {
-            chunk
-                .par_iter()
-                .map(|f| {
-                    if lib.control.checkpoint() {
-                        return None;
-                    }
-                    // `None` inside: unreadable right now, left undated for the next run.
-                    read_capture(&f.path, f.kind, f.mtime).map(|c| (f.id, c))
-                })
-                .collect()
-        });
-        if lib.control.is_cancelled() {
-            return Ok(()); // a partly read chunk is simply read again next time
-        }
-        let caps: Vec<(i64, Capture)> = caps.into_iter().flatten().collect();
-        apply_captures(lib, &caps)?;
-        done += chunk.len();
-        summary.dates_read += caps.len();
-    }
-    Ok(())
+        Ok(())
+    })();
+    patch_index_dates(lib, &embedded);
+    result
 }
 
-/// Stores capture times. Files that were embedded before their date was known (it was
-/// unreadable at the time) have the fallback time in the search index; the in-memory column is
-/// patched in one pass, and the database write moves the epoch so the on-disk cache is
-/// rewritten instead of reused with the old time.
-pub(crate) fn apply_captures(lib: &Library, caps: &[(i64, Capture)]) -> Result<()> {
-    // Lock order: db, then index.
-    let mut db = lib.db.lock();
-    db.set_captures(caps)?;
-    let mut index = lib.index.write();
-    if !index.is_empty() {
-        let times = caps.iter().map(|(id, c)| (*id, c.taken_at)).collect();
-        index.set_taken(&times);
+/// Stores capture times. Returns the dates (file id to time) of the files that already have
+/// items, which are the only ones the search index holds a time for; the caller passes them
+/// to [`patch_index_dates`]. The index is not touched here, so a batch of files without items
+/// never contends for its write lock.
+pub(crate) fn apply_captures(lib: &Library, caps: &[(i64, Capture)]) -> Result<HashMap<i64, i64>> {
+    let embedded = lib.db.lock().set_captures(caps)?;
+    let times: HashMap<i64, i64> = caps.iter().map(|(id, c)| (*id, c.taken_at)).collect();
+    Ok(embedded
+        .into_iter()
+        .filter_map(|id| times.get(&id).map(|t| (id, *t)))
+        .collect())
+}
+
+/// Patches capture times into the search index in one pass over its rows. The matching
+/// database change moved the epoch, so the on-disk cache is rewritten instead of reused with
+/// the old times.
+pub(crate) fn patch_index_dates(lib: &Library, times: &HashMap<i64, i64>) {
+    if times.is_empty() {
+        return;
     }
-    Ok(())
+    lib.index.write().set_taken(times);
 }
 
 fn index_pending(lib: &Library, summary: &mut RunSummary) -> Result<()> {
@@ -409,7 +423,10 @@ pub(crate) fn write_items(
     let taken = db.taken_times(&file_ids)?;
     let mut index = lib.index.write();
     for (((file_id, _, items), item_ids), kind) in batch.iter().zip(&ids).zip(kinds) {
-        let t = taken.get(file_id).copied().unwrap_or_default();
+        // A file that vanished meanwhile has no row (and no items) any more.
+        let Some(&t) = taken.get(file_id) else {
+            continue;
+        };
         for (it, id) in items.iter().zip(item_ids) {
             index.add(*id, *file_id, kind, t, &it.embedding);
         }

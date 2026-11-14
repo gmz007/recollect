@@ -3,6 +3,11 @@
 //!
 //! [`Viewer`] holds only view state and returns [`Action`]s for everything that touches the rest
 //! of the app; the `impl App` block at the bottom connects it to the grids.
+//!
+//! The list being viewed is shared with the grid it was opened from (an `Arc`), never copied:
+//! entries are built one at a time, for the item on screen and its neighbours. The viewer keeps
+//! that snapshot while it is open, so reloads of the grid behind it do not move the photos
+//! under the user; favorite marks changed meanwhile are tracked separately.
 
 use super::preview::{self, Preview, PreviewKey, Previews};
 use super::timeline::{fmt_taken_at, paint_star};
@@ -11,10 +16,12 @@ use super::{App, Query, consume_plain_key, fmt_time, platform};
 use crate::media::MediaKind;
 use crate::media::metadata::DateSource;
 use crate::search::SearchHit;
-use crate::store::db::TimelineItem;
+use crate::store::db::{FileDetails, TimelineItem};
 use crate::thumbs::ThumbKey;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Vec2};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// A matching moment of a video (from a search hit).
 #[derive(Debug, Clone, PartialEq)]
@@ -130,13 +137,14 @@ impl ViewerEntry {
         self.width.zip(self.height)
     }
 
-    fn preview_key(&self, side: u32) -> PreviewKey {
+    fn preview_key(&self, side: u32, zoom: bool) -> PreviewKey {
         PreviewKey {
             path: self.path.clone(),
             mtime: self.mtime,
             t_ms: self.frame_time().map(|t| (t * 1000.0) as i64),
             side,
             min_side: preview::min_side_for(self.dims(), side),
+            zoom,
         }
     }
 
@@ -161,43 +169,115 @@ pub(super) enum Action {
     FindSimilar { item_id: i64, label: String },
 }
 
+/// The list a viewer was opened on.
+#[derive(Clone)]
+pub(super) enum Source {
+    /// The album (shared with the timeline).
+    Timeline(Arc<Vec<TimelineItem>>),
+    /// Search results (shared with the results grid).
+    Results(Arc<Vec<SearchHit>>),
+    /// A short list built for the occasion (the "On this day" strip).
+    Entries(Vec<ViewerEntry>),
+}
+
+impl Source {
+    fn len(&self) -> usize {
+        match self {
+            Source::Timeline(v) => v.len(),
+            Source::Results(v) => v.len(),
+            Source::Entries(v) => v.len(),
+        }
+    }
+
+    /// The entry at `i` (`i < len`), built on demand.
+    fn entry(&self, i: usize) -> ViewerEntry {
+        match self {
+            Source::Timeline(v) => ViewerEntry::from_timeline(&v[i]),
+            Source::Results(v) => ViewerEntry::from_hit(&v[i]),
+            Source::Entries(v) => v[i].clone(),
+        }
+    }
+}
+
 pub(super) struct Viewer {
-    entries: Vec<ViewerEntry>,
+    source: Source,
     index: usize,
+    /// The entry at `index`.
+    current: ViewerEntry,
     pub info: bool,
     /// Showing the image at 100 % (one image pixel per screen pixel) instead of fitted.
     zoom: bool,
     /// Offset of the image centre from the centre of the view while zoomed.
     pan: Vec2,
+    /// Favorite marks that differ from the snapshot (file id to value).
+    marks: HashMap<i64, bool>,
+    /// Video moments picked in the info panel (index to seconds).
+    moments: HashMap<usize, f64>,
 }
 
 impl Viewer {
-    pub fn new(entries: Vec<ViewerEntry>, index: usize, info: bool) -> Self {
-        let index = index.min(entries.len().saturating_sub(1));
+    pub fn new(source: Source, index: usize, info: bool) -> Self {
+        let index = index.min(source.len().saturating_sub(1));
+        let current = source.entry(index);
         Self {
-            entries,
+            source,
             index,
+            current,
             info,
             zoom: false,
             pan: Vec2::ZERO,
+            marks: HashMap::new(),
+            moments: HashMap::new(),
         }
     }
 
+    /// Starts with these favorite marks applied on top of the list's own.
+    pub fn with_marks(mut self, marks: HashMap<i64, bool>) -> Self {
+        self.marks = marks;
+        self.current = self.entry_at(self.index);
+        self
+    }
+
+    /// Starts the item at `index` at video position `t`.
+    pub fn with_moment(mut self, index: usize, t: f64) -> Self {
+        self.moments.insert(index, t);
+        self.current = self.entry_at(self.index);
+        self
+    }
+
+    fn len(&self) -> usize {
+        self.source.len()
+    }
+
+    /// The entry at `i` with this viewer's own changes applied.
+    fn entry_at(&self, i: usize) -> ViewerEntry {
+        let mut e = self.source.entry(i);
+        if let Some(&fav) = self.marks.get(&e.file_id) {
+            e.favorite = fav;
+        }
+        if let Some(&t) = self.moments.get(&i) {
+            e.t = Some(t);
+        }
+        e
+    }
+
     pub fn current(&self) -> &ViewerEntry {
-        &self.entries[self.index]
+        &self.current
     }
 
     /// Keeps the favorite mark of every entry for `file_id` in line with the library.
     pub fn set_favorite(&mut self, file_id: i64, fav: bool) {
-        for e in self.entries.iter_mut().filter(|e| e.file_id == file_id) {
-            e.favorite = fav;
+        self.marks.insert(file_id, fav);
+        if self.current.file_id == file_id {
+            self.current.favorite = fav;
         }
     }
 
     fn go(&mut self, to: usize) {
-        let to = to.min(self.entries.len() - 1);
+        let to = to.min(self.len() - 1);
         if to != self.index {
             self.index = to;
+            self.current = self.entry_at(to);
             self.zoom = false;
             self.pan = Vec2::ZERO;
         }
@@ -212,7 +292,7 @@ impl Viewer {
 
     fn handle_keys(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         use egui::Key;
-        let n = self.entries.len();
+        let n = self.len();
         let (esc, left, right, home, end, info, zoom, fav) = ctx.input_mut(|i| {
             (
                 consume_plain_key(i, Key::Escape),
@@ -263,6 +343,7 @@ impl Viewer {
         previews: &mut Previews,
         thumbs: &mut ThumbCache,
         can_find_similar: bool,
+        notice: Option<&str>,
     ) -> Vec<Action> {
         let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
@@ -272,6 +353,14 @@ impl Viewer {
             self.top_bar(ui, &mut actions);
             ui.add_space(6.0);
         });
+        if let Some(text) = notice {
+            // Messages such as "no video player found" must not stay hidden behind the viewer.
+            egui::Panel::bottom("viewer_notice").show(ui, |ui| {
+                ui.add_space(3.0);
+                ui.label(text);
+                ui.add_space(3.0);
+            });
+        }
         if self.info {
             egui::Panel::right("viewer_info")
                 .resizable(true)
@@ -299,7 +388,7 @@ impl Viewer {
             if !self.info {
                 ui.label(RichText::new(self.current().name()).strong());
             }
-            ui.label(RichText::new(format!("{} / {}", self.index + 1, self.entries.len())).weak());
+            ui.label(RichText::new(format!("{} / {}", self.index + 1, self.len())).weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.toggle_value(&mut self.info, "Info");
                 if self.current().kind == MediaKind::Image {
@@ -308,7 +397,14 @@ impl Viewer {
                     } else {
                         "Zoom to 100%"
                     };
-                    if ui.button(label).clicked() {
+                    if ui
+                        .button(label)
+                        .on_hover_text(
+                            "One image pixel per screen pixel; photos larger than \
+                             4096 px on a side are scaled down to that first",
+                        )
+                        .clicked()
+                    {
                         self.toggle_zoom();
                     }
                 }
@@ -334,8 +430,8 @@ impl Viewer {
         can_find_similar: bool,
         actions: &mut Vec<Action>,
     ) {
-        let e = self.current().clone();
-        let details = previews.details(e.file_id).cloned();
+        let e = self.current.clone();
+        let details: Option<FileDetails> = previews.details(e.file_id).cloned();
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(e.name()).strong());
@@ -411,7 +507,8 @@ impl Viewer {
                         .on_hover_text(format!("match {:.3}", m.score))
                         .clicked()
                     {
-                        self.entries[self.index].t = Some(m.t_start);
+                        self.moments.insert(self.index, m.t_start);
+                        self.current.t = Some(m.t_start);
                     }
                 }
             });
@@ -429,32 +526,36 @@ impl Viewer {
         }
         let ppp = ctx.pixels_per_point();
         let side = preview::fit_side(ctx.content_rect().size(), ppp);
-        let e = self.current().clone();
-        // Ask for the neighbours first (the newest request is decoded first), then the current
-        // item, and forget what is no longer wanted.
+        let e = self.current.clone();
+        // The neighbours are prefetched; the item on screen is asked for urgently every frame,
+        // so it is decoded before them even if they were queued first (the fitted preview
+        // last of all, hence first in line). Whatever is no longer wanted is forgotten.
         let mut wanted = Vec::new();
         for i in [self.index + 1, self.index.wrapping_sub(1)] {
-            if let Some(n) = self.entries.get(i) {
-                let k = n.preview_key(side);
+            if i < self.len() {
+                let k = self.entry_at(i).preview_key(side, false);
                 previews.get(&k);
                 wanted.push(k);
             }
         }
-        let fit_key = e.preview_key(side);
+        let fit_key = e.preview_key(side, false);
         let zoom_key = (self.zoom && e.kind == MediaKind::Image)
             .then(|| {
                 let longest = e.dims().map_or(preview::MAX_ZOOM_SIDE, |(w, h)| w.max(h));
                 longest.min(preview::MAX_ZOOM_SIDE)
             })
             .filter(|&s| s > side)
-            .map(|s| e.preview_key(s));
+            .map(|s| e.preview_key(s, true));
         let mut tex = None;
         let mut failed = false;
         if let Some(k) = &zoom_key {
             wanted.push(k.clone());
         }
         wanted.push(fit_key.clone());
-        match previews.get(&fit_key) {
+        if let Some(k) = &zoom_key {
+            previews.get_urgent(k);
+        }
+        match previews.get_urgent(&fit_key) {
             Preview::Ready(t) => tex = Some(t.clone()),
             Preview::Failed => failed = true,
             Preview::Loading => {}
@@ -528,7 +629,7 @@ impl Viewer {
         if self.index > 0 && nav_button(ui, prev, "Previous", -1.0) {
             self.go(self.index - 1);
         }
-        if self.index + 1 < self.entries.len() && nav_button(ui, next, "Next", 1.0) {
+        if self.index + 1 < self.len() && nav_button(ui, next, "Next", 1.0) {
             self.go(self.index + 1);
         }
     }
@@ -584,37 +685,41 @@ impl App {
         self.viewer.is_some()
     }
 
-    fn start_viewer(&mut self, entries: Vec<ViewerEntry>, index: usize) {
-        if entries.is_empty() {
+    /// Opens a viewer on `source` at `index`, at video position `moment` if given.
+    fn start_viewer(&mut self, source: Source, index: usize, moment: Option<f64>) {
+        if source.len() == 0 {
             return;
         }
-        self.viewer = Some(Viewer::new(entries, index, self.viewer_info));
-    }
-
-    /// Opens the viewer on the whole album list at `i`.
-    pub(super) fn open_viewer_timeline(&mut self, i: usize) {
-        let entries = self
-            .tl
-            .items
+        let marks = self
+            .fav_marks
             .iter()
-            .map(ViewerEntry::from_timeline)
+            .map(|(id, m)| (*id, m.value))
             .collect();
-        self.tl.selected = Some(i);
-        self.start_viewer(entries, i);
+        let mut v = Viewer::new(source, index, self.viewer_info).with_marks(marks);
+        if let Some(t) = moment {
+            v = v.with_moment(index, t);
+        }
+        self.viewer = Some(v);
     }
 
-    /// Opens the viewer on the search results at `i`.
+    /// Opens the viewer on the whole album list at `i`. The list is shared, not copied.
+    pub(super) fn open_viewer_timeline(&mut self, i: usize) {
+        self.tl.selected = Some(i);
+        self.start_viewer(Source::Timeline(Arc::clone(&self.tl.items)), i, None);
+    }
+
+    /// Opens the viewer on the search results at `i`. The list is shared, not copied.
     pub(super) fn open_viewer_results(&mut self, i: usize) {
-        let mut entries: Vec<ViewerEntry> =
-            self.results.iter().map(ViewerEntry::from_hit).collect();
-        if let (Some(e), Some(t)) = (entries.get_mut(i), self.selected_t)
-            && self.selected == Some(i)
-            && e.kind == MediaKind::Video
-        {
-            e.t = Some(t);
-        }
+        let moment = self
+            .selected_t
+            .filter(|_| self.selected == Some(i))
+            .filter(|_| {
+                self.results
+                    .get(i)
+                    .is_some_and(|h| h.kind == MediaKind::Video)
+            });
         self.selected = Some(i);
-        self.start_viewer(entries, i);
+        self.start_viewer(Source::Results(Arc::clone(&self.results)), i, moment);
     }
 
     /// Opens the viewer on a subset of the album (e.g. the "On this day" strip).
@@ -624,7 +729,7 @@ impl App {
             .filter_map(|&i| self.tl.items.get(i))
             .map(ViewerEntry::from_timeline)
             .collect();
-        self.start_viewer(entries, pos);
+        self.start_viewer(Source::Entries(entries), pos, None);
     }
 
     /// Draws the viewer instead of the album and applies what it asks for.
@@ -633,7 +738,17 @@ impl App {
             return;
         };
         let can_similar = self.snapshot.model_installed;
-        let actions = viewer.show(ui, &mut self.previews, &mut self.thumbs, can_similar);
+        // Details (file size, camera) are re-read once the library has changed under them.
+        self.previews
+            .sync_details((self.tl.generation, self.lib.jobs_finished()));
+        let notice = self.notice.as_ref().map(|n| n.0.as_str());
+        let actions = viewer.show(
+            ui,
+            &mut self.previews,
+            &mut self.thumbs,
+            can_similar,
+            notice,
+        );
         self.viewer = Some(viewer);
         for a in actions {
             match a {
@@ -655,7 +770,7 @@ impl App {
                     }
                 }
                 Action::FindSimilar { item_id, label } => {
-                    self.viewer = None;
+                    self.end_viewer();
                     self.tl.selected = None;
                     self.query.clear();
                     self.submit(Query::Similar { item_id, label });
@@ -664,12 +779,21 @@ impl App {
         }
     }
 
+    /// Takes the viewer down for any reason: remembers whether its info panel was open and
+    /// frees the previews and details it was holding. Returns it for whoever wants to know
+    /// where it was.
+    pub(super) fn end_viewer(&mut self) -> Option<Viewer> {
+        let v = self.viewer.take()?;
+        self.viewer_info = v.info;
+        self.previews.clear();
+        Some(v)
+    }
+
     /// Back to the grid with the item that was being viewed selected and scrolled into view.
     pub(super) fn close_viewer(&mut self) {
-        let Some(v) = self.viewer.take() else {
+        let Some(v) = self.end_viewer() else {
             return;
         };
-        self.viewer_info = v.info;
         let e = v.current();
         if self.searching() {
             if let Some(i) = self.results.iter().position(|h| h.file_id == e.file_id) {
@@ -724,7 +848,7 @@ mod tests {
         assert_eq!(v.frame_time(), Some(2.0));
         v.t = Some(42.5);
         assert_eq!(v.frame_time(), Some(42.5));
-        assert_eq!(v.preview_key(1024).t_ms, Some(42_500));
+        assert_eq!(v.preview_key(1024, false).t_ms, Some(42_500));
         assert_eq!(v.thumb_key().t_ms, Some(42_500));
         assert_eq!(entry(MediaKind::Image).frame_time(), None);
     }
@@ -756,7 +880,7 @@ mod tests {
 
     #[test]
     fn navigation_stays_inside_the_list() {
-        let mut v = Viewer::new(vec![entry(MediaKind::Image); 3], 1, true);
+        let mut v = Viewer::new(Source::Entries(vec![entry(MediaKind::Image); 3]), 1, true);
         v.zoom = true;
         v.go(2);
         assert_eq!(v.index, 2);
@@ -765,6 +889,57 @@ mod tests {
         assert_eq!(v.index, 2);
         v.go(0);
         assert_eq!(v.index, 0);
-        assert_eq!(Viewer::new(vec![entry(MediaKind::Image)], 7, true).index, 0);
+        let one = Source::Entries(vec![entry(MediaKind::Image)]);
+        assert_eq!(Viewer::new(one, 7, true).index, 0);
+    }
+
+    fn timeline_item(i: i64) -> TimelineItem {
+        TimelineItem {
+            file_id: i,
+            item_id: None,
+            path: format!("/p/{i}.jpg").into(),
+            kind: MediaKind::Image,
+            mtime: 0,
+            taken_at: i,
+            date_source: DateSource::Exif,
+            duration: None,
+            width: None,
+            height: None,
+            favorite: false,
+            camera: None,
+        }
+    }
+
+    #[test]
+    fn a_huge_list_is_shared_not_copied() {
+        let items: Arc<Vec<TimelineItem>> = Arc::new((0..200_000).map(timeline_item).collect());
+        let mut v = Viewer::new(Source::Timeline(Arc::clone(&items)), 123_456, true);
+        // The viewer holds the very same list; building the entry for the item on screen is
+        // all it did per item.
+        assert_eq!(Arc::strong_count(&items), 2);
+        assert_eq!(v.current().file_id, 123_456);
+        assert_eq!(v.len(), 200_000);
+        v.go(7);
+        assert_eq!(v.current().path, PathBuf::from("/p/7.jpg"));
+        assert_eq!(Arc::strong_count(&items), 2);
+        drop(v);
+        assert_eq!(Arc::strong_count(&items), 1);
+    }
+
+    #[test]
+    fn favorite_marks_and_picked_moments_follow_the_viewer_across_entries() {
+        let items: Arc<Vec<TimelineItem>> = Arc::new((0..3).map(timeline_item).collect());
+        let mut v = Viewer::new(Source::Timeline(items), 0, true)
+            .with_marks(HashMap::from([(2, true)]))
+            .with_moment(1, 9.0);
+        assert!(!v.current().favorite);
+        v.set_favorite(0, true);
+        assert!(v.current().favorite);
+        v.go(1);
+        assert_eq!(v.current().t, Some(9.0));
+        v.go(2);
+        assert!(v.current().favorite, "the mark given at the start applies");
+        v.go(0);
+        assert!(v.current().favorite, "and the one set while open");
     }
 }

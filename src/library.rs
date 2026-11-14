@@ -8,8 +8,9 @@ use crate::search::{self, SearchHit, SearchOptions};
 use crate::store::db::{DateCounts, FileDetails, Folder, Stats, TimelineFilter, TimelineItem};
 use crate::store::{Db, VectorIndex};
 use anyhow::{Context, Result, anyhow, bail};
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{Condvar, Mutex, RwLock};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -114,6 +115,23 @@ impl Control {
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
 
+/// Work for the favorites writer thread.
+enum FavoriteMsg {
+    Set(i64, bool),
+    /// Answered once everything queued before it has been written.
+    Flush(Sender<()>),
+}
+
+/// The outcome of one favorites write, as reported by the writer thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FavoriteWrite {
+    pub file_id: i64,
+    /// The value that was written (or that failed to be written).
+    pub fav: bool,
+    /// Why the write failed; `None` once it is committed.
+    pub error: Option<String>,
+}
+
 pub struct Library {
     paths: Paths,
     settings: RwLock<Settings>,
@@ -140,6 +158,75 @@ pub struct Library {
     saved: Mutex<Option<(&'static str, u64)>>,
     /// Whether `open` found a usable cache (instead of rebuilding from the database).
     from_cache: bool,
+    /// Favorite marks go to one writer thread in order (see [`Library::queue_favorite`]).
+    favorite_tx: Sender<FavoriteMsg>,
+    favorite_results: Receiver<FavoriteWrite>,
+    /// Incremented after each committed favorites write.
+    favorites_version: AtomicU64,
+    /// Makes the next favorites writes fail (tests).
+    #[cfg(test)]
+    pub(crate) fail_favorites: AtomicBool,
+}
+
+/// The favorites writer: applies queued marks in order on one thread, collapsing writes for
+/// the same file to the latest value, and reports each outcome. Exits when the library is gone.
+fn favorite_writer(
+    lib: std::sync::Weak<Library>,
+    rx: Receiver<FavoriteMsg>,
+    results: Sender<FavoriteWrite>,
+) {
+    while let Ok(first) = rx.recv() {
+        let mut latest: HashMap<i64, bool> = HashMap::new();
+        let mut flushes = Vec::new();
+        let mut msg = Some(first);
+        while let Some(m) = msg {
+            match m {
+                FavoriteMsg::Set(id, fav) => {
+                    latest.insert(id, fav);
+                }
+                FavoriteMsg::Flush(done) => flushes.push(done),
+            }
+            msg = rx.try_recv().ok();
+        }
+        let Some(lib) = lib.upgrade() else {
+            return;
+        };
+        for fav in [true, false] {
+            let ids: Vec<i64> = latest
+                .iter()
+                .filter(|(_, v)| **v == fav)
+                .map(|(id, _)| *id)
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            #[cfg(test)]
+            let outcome = if lib.fail_favorites.load(Ordering::Acquire) {
+                Err(anyhow!("simulated failure"))
+            } else {
+                lib.db.lock().set_favorite(&ids, fav)
+            };
+            #[cfg(not(test))]
+            let outcome = lib.db.lock().set_favorite(&ids, fav);
+            let error = outcome.err().map(|e| format!("{e:#}"));
+            if let Some(e) = &error {
+                tracing::warn!("could not save the favorite mark: {e}");
+            } else {
+                lib.favorites_version.fetch_add(1, Ordering::AcqRel);
+            }
+            for file_id in ids {
+                let _ = results.send(FavoriteWrite {
+                    file_id,
+                    fav,
+                    error: error.clone(),
+                });
+            }
+        }
+        lib.notify();
+        for done in flushes {
+            let _ = done.send(());
+        }
+    }
 }
 
 /// Picks the default model by hardware: a discrete GPU gets the quality model.
@@ -202,6 +289,8 @@ impl Library {
             Some(i) => (i, true),
             None => (load_index(&db, spec)?, false),
         };
+        let (favorite_tx, favorite_rx) = crossbeam_channel::unbounded();
+        let (result_tx, favorite_results) = crossbeam_channel::unbounded();
         let lib = Arc::new(Self {
             paths,
             settings: RwLock::new(settings),
@@ -220,8 +309,18 @@ impl Library {
             save_lock: Mutex::new(()),
             saved: Mutex::new(from_cache.then_some((spec.id, epoch))),
             from_cache,
+            favorite_tx,
+            favorite_results,
+            favorites_version: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_favorites: AtomicBool::new(false),
         });
         *lib.self_ref.write() = Arc::downgrade(&lib);
+        let weak = Arc::downgrade(&lib);
+        std::thread::Builder::new()
+            .name("recollect-favorites".into())
+            .spawn(move || favorite_writer(weak, favorite_rx, result_tx))
+            .context("starting the favorites writer")?;
         Ok(lib)
     }
 
@@ -338,18 +437,52 @@ impl Library {
         Ok(rows.into_sorted(filter.order))
     }
 
-    /// Marks files as favorites (or removes the mark).
+    /// Marks files as favorites (or removes the mark), waiting for the write. The GUI uses
+    /// [`Self::queue_favorite`] instead.
     pub fn set_favorite(&self, file_ids: &[i64], fav: bool) -> Result<()> {
-        self.db.lock().set_favorite(file_ids, fav)
+        self.db.lock().set_favorite(file_ids, fav)?;
+        self.favorites_version.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Queues a favorite mark for the writer thread and returns at once. Writes are applied
+    /// in order; consecutive writes for one file collapse into the latest value. The outcome
+    /// arrives through [`Self::take_favorite_results`].
+    pub fn queue_favorite(&self, file_id: i64, fav: bool) {
+        let _ = self.favorite_tx.send(FavoriteMsg::Set(file_id, fav));
+    }
+
+    /// Blocks until every favorite queued so far has been written (or has failed).
+    pub fn wait_favorites(&self) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        if self.favorite_tx.send(FavoriteMsg::Flush(tx)).is_ok() {
+            let _ = rx.recv();
+        }
+    }
+
+    /// Outcomes of the favorites writes finished since the last call, oldest first.
+    pub fn take_favorite_results(&self) -> Vec<FavoriteWrite> {
+        self.favorite_results.try_iter().collect()
+    }
+
+    /// Changes after every committed favorites write: lists filtered by favorites are stale
+    /// once it moves.
+    pub fn favorites_version(&self) -> u64 {
+        self.favorites_version.load(Ordering::Acquire)
     }
 
     /// Date source, camera and favorite flag of a file, and its size on disk if readable.
-    pub fn file_details(&self, file_id: i64) -> Result<Option<(FileDetails, Option<u64>)>> {
-        let Some(d) = self.db.lock().file_details(file_id)? else {
+    pub fn file_details(&self, file_id: i64) -> Result<Option<FileDetails>> {
+        let Some(mut d) = self.db.lock().file_details(file_id)? else {
             return Ok(None);
         };
-        let size = std::fs::metadata(&d.path).ok().map(|m| m.len());
-        Ok(Some((d, size)))
+        d.size = std::fs::metadata(&d.path).ok().map(|m| m.len());
+        Ok(Some(d))
+    }
+
+    /// Years (newest first) with any file, over the whole library.
+    pub fn years(&self) -> Result<Vec<i32>> {
+        self.db.lock().years()
     }
 
     /// Number of files per capture-date source.
@@ -1392,11 +1525,16 @@ mod tests {
             camera: None,
             duration: None,
         };
-        crate::indexer::apply_captures(&lib, &[(id_b, cap(day(2022, 12, 31)))]).unwrap();
+        let times =
+            crate::indexer::apply_captures(&lib, &[(id_b, cap(day(2022, 12, 31)))]).unwrap();
         assert!(
             lib.db.lock().items_epoch().unwrap() > epoch,
             "the cache is stale now"
         );
+        // The index is patched separately, once per date pass.
+        assert_eq!(times, HashMap::from([(id_b, day(2022, 12, 31))]));
+        assert_eq!(search_with(&lib, None, SearchSort::Newest)[3], "b.jpg");
+        crate::indexer::patch_index_dates(&lib, &times);
         assert_eq!(
             search_with(&lib, None, SearchSort::Newest),
             ["b.jpg", "d.jpg", "a.jpg", "c.jpg"]
@@ -1409,8 +1547,177 @@ mod tests {
         assert_eq!(search_with(&lib, None, SearchSort::Newest)[0], "b.jpg");
         // A file without items leaves the epoch alone.
         let epoch = lib.db.lock().items_epoch().unwrap();
-        crate::indexer::apply_captures(&lib, &[(9999, cap(5))]).unwrap();
+        let none = crate::indexer::apply_captures(&lib, &[(9999, cap(5))]).unwrap();
+        assert!(none.is_empty());
         assert_eq!(lib.db.lock().items_epoch().unwrap(), epoch);
+    }
+
+    #[test]
+    fn dates_of_files_without_items_never_touch_the_index() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        // Files are known (and undated) but nothing is embedded yet.
+        let rows = seed_dated(&lib, &["a", "b", "c", "d"]);
+        let cap = |t| crate::media::metadata::Capture {
+            taken_at: t,
+            source: crate::media::metadata::DateSource::Exif,
+            camera: None,
+            duration: None,
+        };
+        let caps: Vec<_> = rows
+            .iter()
+            .map(|r| (r.0.id, cap(day(2020, 1, 1))))
+            .collect();
+        // With a reader holding the index, any attempt to write to it would block for good.
+        let guard = lib.index.read();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let l = Arc::clone(&lib);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::indexer::apply_captures(&l, &caps).unwrap());
+        });
+        let times = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("apply_captures waited for the index");
+        drop(guard);
+        assert!(times.is_empty());
+        crate::indexer::patch_index_dates(&lib, &times);
+        assert_eq!(lib.indexed_items(), 0);
+    }
+
+    #[test]
+    fn an_undated_file_has_the_same_date_everywhere() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        let mut rows = seed_dated(&lib, &["b"]);
+        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        let expected = crate::media::metadata::effective_taken(None, 1);
+        let b = lib
+            .timeline(&TimelineFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|t| t.path.ends_with("b.jpg"))
+            .unwrap();
+        assert_eq!(b.taken_at, expected);
+        let item = b.item_id.unwrap();
+        assert_eq!(
+            lib.db.lock().item_info(&[item]).unwrap()[0].taken_at,
+            expected
+        );
+        assert_eq!(
+            lib.db.lock().taken_times(&[b.file_id]).unwrap()[&b.file_id],
+            expected
+        );
+        assert_eq!(
+            lib.db
+                .lock()
+                .file_details(b.file_id)
+                .unwrap()
+                .unwrap()
+                .taken_at,
+            expected
+        );
+        let mut stored = Vec::new();
+        lib.db
+            .lock()
+            .for_each_item(lib.model().id, |i| stored.push((i.file_id, i.taken_at)))
+            .unwrap();
+        assert!(stored.contains(&(b.file_id, expected)));
+        let cands = lib.index.read().search(&query(), 10, None);
+        assert_eq!(
+            cands
+                .iter()
+                .find(|c| c.file_id == b.file_id)
+                .unwrap()
+                .taken_at,
+            expected
+        );
+        let hits = search::by_vector(&lib, &query(), &SearchOptions::default(), None).unwrap();
+        assert_eq!(
+            hits.iter()
+                .find(|h| h.file_id == b.file_id)
+                .unwrap()
+                .taken_at,
+            expected
+        );
+        // Sorting by date uses that same value: b (1970) is the oldest.
+        let opts = SearchOptions {
+            sort: SearchSort::Oldest,
+            ..Default::default()
+        };
+        let oldest = search::by_vector(&lib, &query(), &opts, None).unwrap();
+        assert_eq!(names(&oldest)[0], "b.jpg");
+    }
+
+    #[test]
+    fn a_file_removed_before_its_vectors_are_written_adds_none() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        let mut rows = seed_dated(&lib, &[]);
+        let folder = lib.db.lock().folders().unwrap()[0].id;
+        lib.db.lock().remove_folder(folder).unwrap();
+        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        assert_eq!(lib.indexed_items(), 0);
+    }
+
+    fn favorite_ids(lib: &Library) -> Vec<i64> {
+        lib.timeline(&TimelineFilter {
+            favorites_only: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .iter()
+        .map(|t| t.file_id)
+        .collect()
+    }
+
+    #[test]
+    fn rapid_favorite_toggles_end_as_the_last_one() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        seed_dated(&lib, &[]);
+        let id = lib.timeline(&TimelineFilter::default()).unwrap()[0].file_id;
+        let v0 = lib.favorites_version();
+        for fav in [true, false, true] {
+            lib.queue_favorite(id, fav);
+        }
+        lib.wait_favorites();
+        assert_eq!(favorite_ids(&lib), [id]);
+        assert!(lib.favorites_version() > v0);
+        let results = lib.take_favorite_results();
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|w| w.error.is_none() && w.file_id == id));
+        assert!(results.last().unwrap().fav);
+        // And off again.
+        lib.queue_favorite(id, false);
+        lib.wait_favorites();
+        assert!(favorite_ids(&lib).is_empty());
+    }
+
+    #[test]
+    fn a_failed_favorite_write_is_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        seed_dated(&lib, &[]);
+        let id = lib.timeline(&TimelineFilter::default()).unwrap()[0].file_id;
+        let v0 = lib.favorites_version();
+        lib.fail_favorites.store(true, Ordering::Release);
+        lib.queue_favorite(id, true);
+        lib.wait_favorites();
+        let results = lib.take_favorite_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!((results[0].file_id, results[0].fav), (id, true));
+        assert!(results[0].error.is_some());
+        assert!(favorite_ids(&lib).is_empty());
+        assert_eq!(lib.favorites_version(), v0, "nothing was committed");
+    }
+
+    #[test]
+    fn years_cover_the_whole_library() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(d.path());
+        seed_dated(&lib, &["b"]);
+        // b is undated: its file time (1970) counts.
+        assert_eq!(lib.years().unwrap(), [2021, 2020, 2019, 1970]);
     }
 
     #[test]

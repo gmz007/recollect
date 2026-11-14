@@ -20,11 +20,13 @@ computer.
 - **Folder view** (click a folder in the sidebar) and **Recently added**.
 - **Viewer:** double-click or press `Enter` on any photo or video frame to see it as large as the
   window allows, with an info panel (`I`: date, camera, size, folder), `←`/`→` to step through the
-  list you came from, `Home`/`End`, `Z` or a double-click for 100 % zoom (drag to pan) and `Esc` to
-  go back to the grid.
+  list you came from, `Home`/`End`, `Z` or a double-click for 100 % zoom (drag to pan; up to 4096 px
+  per side, so very large photos are scaled down to that) and `Esc` to go back to the grid.
 - **Favorites:** press `F` on the selected item (or use the Favorite button) to star it; the
   **Favorites** view in the sidebar lists them.
-- **On this day:** photos taken on today's date in earlier years, in a strip above the timeline.
+- **On this day:** photos taken on today's date in earlier years, in a strip above the timeline
+  (photos dated only by their file time are left out; 29 February shows on 28 February in years
+  without one).
 - Text search over images and video moments ("a dog in the snow").
 - Video results show the moment's timestamp; **Play at** opens the video at that time in mpv or VLC
   when installed (otherwise in the default player).

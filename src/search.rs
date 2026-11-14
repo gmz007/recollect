@@ -57,7 +57,8 @@ pub struct SearchHit {
     pub path: PathBuf,
     pub kind: MediaKind,
     pub mtime: i64,
-    /// Local wall-clock capture time; the file time if unknown.
+    /// Local wall-clock capture time as held by the search index (the value the date filter
+    /// and the date sort use); the file time if unknown.
     pub taken_at: i64,
     pub favorite: bool,
     pub score: f32,
@@ -127,6 +128,9 @@ pub(crate) fn by_vector(
     // Ranking uses the i8 scores directly: re-scoring with the stored f32 vectors made no
     // measurable difference in retrieval quality but cost ~30 ms of random disk reads per
     // query at 1.2 M vectors.
+    // The capture time the date filter used: the index's value, for the filter and the sort
+    // alike, so a hit never shows a different date than the one it was selected by.
+    let taken: HashMap<i64, i64> = cands.iter().map(|c| (c.file_id, c.taken_at)).collect();
     let scored: Vec<(i64, i64, f32)> = cands
         .iter()
         .map(|c| (c.item_id, c.file_id, c.score))
@@ -162,7 +166,7 @@ pub(crate) fn by_vector(
                 path: i.path.clone(),
                 kind: i.kind,
                 mtime: i.mtime,
-                taken_at: i.taken_at,
+                taken_at: taken.get(&i.file_id).copied().unwrap_or(i.taken_at),
                 favorite: i.favorite,
                 score,
                 t_start: i.t_start,

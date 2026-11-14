@@ -1,7 +1,7 @@
 //! SQLite persistence: folders, files, embedded items. The database is the source of truth;
 //! the in-memory vector index is rebuilt from it at startup (see `docs/design.md`).
 
-use crate::media::metadata::{Capture, DateSource, local_wall_clock};
+use crate::media::metadata::{Capture, DateSource, effective_taken};
 use crate::media::{MediaKind, ScannedFile};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -187,6 +187,8 @@ pub struct FileDetails {
     pub date_source: DateSource,
     pub camera: Option<String>,
     pub favorite: bool,
+    /// Size on disk; the database does not know it, `Library::file_details` fills it in.
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -294,7 +296,7 @@ impl TimelineRows {
                         path: PathBuf::from(r.path),
                         kind: MediaKind::from_i64(r.kind),
                         mtime: r.mtime,
-                        taken_at: r.taken_at.unwrap_or_else(|| local_wall_clock(r.mtime)),
+                        taken_at: effective_taken(r.taken_at, r.mtime),
                         date_source: DateSource::from_i64(r.date_source.unwrap_or(0)),
                         duration: r.duration,
                         width: r.width,
@@ -339,14 +341,16 @@ fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
     })
 }
 
-fn any_items_of(conn: &Connection, files: impl Iterator<Item = i64>) -> Result<bool> {
+/// The given files that have at least one item.
+fn embedded_files(conn: &Connection, files: impl Iterator<Item = i64>) -> Result<Vec<i64>> {
     let mut st = conn.prepare_cached("SELECT 1 FROM items WHERE file_id = ?1 LIMIT 1")?;
+    let mut out = Vec::new();
     for f in files {
         if st.exists([f])? {
-            return Ok(true);
+            out.push(f);
         }
     }
-    Ok(false)
+    Ok(out)
 }
 
 fn bump_epoch(conn: &Connection) -> Result<()> {
@@ -704,7 +708,11 @@ impl Db {
     }
 
     /// Stores capture times in one transaction. Files that vanished meanwhile are skipped.
-    pub fn set_captures(&mut self, batch: &[(i64, Capture)]) -> Result<()> {
+    /// Returns the ids of the files that already have searchable items: only those carry a
+    /// capture time in the search index, which the caller patches in memory (once per date
+    /// pass, see `indexer::patch_index_dates`). Their changed rows also move the epoch so the
+    /// on-disk cache is rewritten rather than reused with old dates.
+    pub fn set_captures(&mut self, batch: &[(i64, Capture)]) -> Result<Vec<i64>> {
         let tx = self.conn.transaction()?;
         {
             let mut upd = tx.prepare(
@@ -721,13 +729,12 @@ impl Db {
                 ])?;
             }
         }
-        // Embedded files carry their capture time in the search index (and its cache), which
-        // the caller patches in memory; moving the epoch makes sure the cache is rewritten.
-        if any_items_of(&tx, batch.iter().map(|b| b.0))? {
+        let embedded = embedded_files(&tx, batch.iter().map(|b| b.0))?;
+        if !embedded.is_empty() {
             bump_epoch(&tx)?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(embedded)
     }
 
     /// Capture times of files as the timeline shows them: the stored date, or the modification
@@ -739,10 +746,7 @@ impl Db {
             |r| {
                 let taken: Option<i64> = r.get(1)?;
                 let mtime: i64 = r.get(2)?;
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    taken.unwrap_or_else(|| local_wall_clock(mtime)),
-                ))
+                Ok((r.get::<_, i64>(0)?, effective_taken(taken, mtime)))
             },
         )?;
         Ok(rows.into_iter().collect())
@@ -773,10 +777,11 @@ impl Db {
                     let mtime: i64 = r.get(1)?;
                     Ok(FileDetails {
                         path: PathBuf::from(r.get::<_, String>(5)?),
-                        taken_at: taken.unwrap_or_else(|| local_wall_clock(mtime)),
+                        taken_at: effective_taken(taken, mtime),
                         date_source: DateSource::from_i64(r.get::<_, Option<i64>>(2)?.unwrap_or(0)),
                         camera: r.get(3)?,
                         favorite: r.get::<_, i64>(4)? != 0,
+                        size: None,
                     })
                 },
             )
@@ -796,6 +801,28 @@ impl Db {
             video: video as usize,
             file: file as usize,
         })
+    }
+
+    /// Years (newest first) in which any file was taken, over the whole library: no view or
+    /// type filter applies. Undated files count by their file time, like everywhere else.
+    pub fn years(&self) -> Result<Vec<i32>> {
+        use chrono::Datelike;
+        let year = |t: i64| chrono::DateTime::from_timestamp(t, 0).map(|d| d.year());
+        let mut years = std::collections::BTreeSet::new();
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT CAST(strftime('%Y', taken_at, 'unixepoch') AS INTEGER)
+             FROM files WHERE taken_at IS NOT NULL",
+        )?;
+        for y in st.query_map([], |r| r.get::<_, Option<i32>>(0))? {
+            years.extend(y?);
+        }
+        let mut st = self
+            .conn
+            .prepare("SELECT DISTINCT mtime FROM files WHERE taken_at IS NULL")?;
+        for m in st.query_map([], |r| r.get::<_, i64>(0))? {
+            years.extend(year(effective_taken(None, m?)));
+        }
+        Ok(years.into_iter().rev().collect())
     }
 
     /// All files matching `filter`, indexed or not, in display order. See
@@ -962,9 +989,7 @@ impl Db {
                 id: r.get(0)?,
                 file_id: r.get(1)?,
                 kind: MediaKind::from_i64(r.get(2)?),
-                taken_at: r
-                    .get::<_, Option<i64>>(4)?
-                    .unwrap_or_else(|| local_wall_clock(r.get(5).unwrap_or(0))),
+                taken_at: effective_taken(r.get(4)?, r.get(5)?),
                 embedding: blob_to_emb(r.get_ref(3)?.as_blob()?),
             });
         }
@@ -1020,9 +1045,7 @@ impl Db {
                     height: r.get(8)?,
                     duration: r.get(9)?,
                     favorite: r.get::<_, i64>(10)? != 0,
-                    taken_at: r
-                        .get::<_, Option<i64>>(11)?
-                        .unwrap_or_else(|| local_wall_clock(r.get(4).unwrap_or(0))),
+                    taken_at: effective_taken(r.get(11)?, r.get(4)?),
                 })
             },
         )?;
@@ -1105,6 +1128,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::metadata::local_wall_clock;
 
     fn sf(p: &str, size: u64, mtime: i64) -> ScannedFile {
         ScannedFile {
