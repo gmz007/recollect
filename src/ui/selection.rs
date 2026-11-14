@@ -2,7 +2,7 @@
 //!
 //! A [`Selection`] holds the selected files by id, so it survives reloads and re-sorting. The
 //! grid additionally keeps a *primary* item (by list index): the one last clicked or reached
-//! with the keyboard, which drives the detail panel and the viewer. The primary is always part of
+//! with the keyboard, which drives the viewer. The primary is always part of
 //! a non-empty selection; [`Selection::sync`] restores that after the grid changed the primary
 //! by itself.
 
@@ -60,6 +60,10 @@ pub(super) struct Selection {
 impl Selection {
     pub fn len(&self) -> usize {
         self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
     }
 
     pub fn contains(&self, id: i64) -> bool {

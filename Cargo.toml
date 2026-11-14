@@ -17,6 +17,7 @@ crossbeam-channel = "0.5.17"
 directories = "6"
 eframe = "0.37"
 egui = "0.37"
+egui_material_icons = { version = "0.9", features = ["outline"] }
 fast_image_resize = "6"
 ffmpeg-next = "9"
 hex = "0.4.3"

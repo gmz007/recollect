@@ -68,6 +68,35 @@ impl Paths {
     }
 }
 
+/// Which colour scheme the app uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    /// Follow the operating system's light or dark setting.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// How large text is drawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextSize {
+    #[default]
+    Normal,
+    /// 15 % larger.
+    Large,
+}
+
+impl TextSize {
+    /// The interface zoom factor for this size.
+    pub fn zoom(self) -> f32 {
+        match self {
+            Self::Normal => 1.0,
+            Self::Large => 1.15,
+        }
+    }
+}
+
 /// User-adjustable settings, stored as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -80,6 +109,10 @@ pub struct Settings {
     pub index_threads: Option<usize>,
     /// Upper bound for the thumbnail disk cache, in megabytes.
     pub thumb_cache_mb: u64,
+    /// Light, dark or follow the system.
+    pub theme: Theme,
+    /// Normal or large text.
+    pub text_size: TextSize,
 }
 
 impl Default for Settings {
@@ -89,6 +122,8 @@ impl Default for Settings {
             use_gpu: true,
             index_threads: None,
             thumb_cache_mb: 1024,
+            theme: Theme::System,
+            text_size: TextSize::Normal,
         }
     }
 }
@@ -138,6 +173,8 @@ mod tests {
             use_gpu: false,
             index_threads: Some(3),
             thumb_cache_mb: 10,
+            theme: Theme::Dark,
+            text_size: TextSize::Large,
         };
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap(), s);
@@ -146,6 +183,12 @@ mod tests {
         let l = Settings::load(&p).unwrap();
         assert!(!l.use_gpu);
         assert_eq!(l.thumb_cache_mb, 1024);
+        // Settings files from before the appearance options still load.
+        assert_eq!(l.theme, Theme::System);
+        assert_eq!(l.text_size, TextSize::Normal);
+        std::fs::write(&p, "theme = \"Light\"\ntext_size = \"Large\"\n").unwrap();
+        let l = Settings::load(&p).unwrap();
+        assert_eq!((l.theme, l.text_size), (Theme::Light, TextSize::Large));
     }
 
     #[test]

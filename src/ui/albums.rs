@@ -1,5 +1,5 @@
 //! Albums in the UI: the sidebar section, the name and confirmation dialogs, the
-//! "Add to album…" menu and the bar shown above a grid while several items are selected.
+//! "Add to album…" menu and the bar shown above a grid while items are selected.
 //!
 //! Album changes go to the library's write queue and come back as [`AlbumWrite`]s. The UI
 //! changes only once a write is confirmed (nothing is shown optimistically that could need
@@ -7,6 +7,7 @@
 //! album version moves or a job finishes.
 
 use super::App;
+use super::style::{self, Palette, icons};
 use super::timeline::{View, thousands};
 use crate::library::{AlbumOp, AlbumWrite};
 use crate::store::db::{self, AlbumInfo};
@@ -109,7 +110,7 @@ pub(super) fn items_text(n: usize) -> String {
 /// The "Add to album…" menu button: the albums, then "New album…".
 pub(super) fn album_menu(ui: &mut egui::Ui, albums: &[AlbumInfo]) -> Option<AlbumChoice> {
     let mut choice = None;
-    ui.menu_button("Add to album…", |ui| {
+    style::icon_menu_button(ui, icons::ICON_PLAYLIST_ADD, "Add to album…", |ui| {
         egui::ScrollArea::vertical()
             .max_height(280.0)
             .show(ui, |ui| {
@@ -153,35 +154,68 @@ pub(super) fn tile_menu(
     out
 }
 
-/// The bar above a grid while two or more items are selected.
+/// The accent bar that replaces the view header while items are selected.
 pub(super) fn selection_bar(
     ui: &mut egui::Ui,
     count: usize,
     albums: &[AlbumInfo],
     in_album: bool,
 ) -> Option<BulkAction> {
+    let pal = Palette::of(ui.ctx());
     let mut action = None;
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("{} selected", thousands(count))).strong());
-            if let Some(c) = album_menu(ui, albums) {
-                action = Some(BulkAction::AddToAlbum(c));
+    egui::Frame::new()
+        .fill(pal.accent)
+        .corner_radius(egui::CornerRadius::same(style::CARD_RADIUS))
+        .inner_margin(egui::Margin::symmetric(16, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Buttons on the accent colour: light text on a faint veil.
+            let v = ui.visuals_mut();
+            for w in [
+                &mut v.widgets.inactive,
+                &mut v.widgets.hovered,
+                &mut v.widgets.active,
+            ] {
+                w.fg_stroke.color = pal.on_accent;
+                w.weak_bg_fill = pal.on_accent.gamma_multiply(0.16);
+                w.bg_fill = w.weak_bg_fill;
             }
-            if ui.button("Favorite").clicked() {
-                action = Some(BulkAction::Favorite(true));
-            }
-            if ui.button("Unfavorite").clicked() {
-                action = Some(BulkAction::Favorite(false));
-            }
-            if in_album && ui.button("Remove from album").clicked() {
-                action = Some(BulkAction::RemoveFromAlbum);
-            }
-            if ui.button("Clear selection").clicked() {
-                action = Some(BulkAction::Clear);
-            }
+            v.widgets.hovered.weak_bg_fill = pal.on_accent.gamma_multiply(0.28);
+            v.widgets.open.fg_stroke.color = pal.on_accent;
+            v.widgets.open.weak_bg_fill = pal.on_accent.gamma_multiply(0.28);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    style::semibold(format!("{} selected", thousands(count)))
+                        .size(16.0)
+                        .color(pal.on_accent),
+                );
+                ui.add_space(8.0);
+                if let Some(c) = album_menu(ui, albums) {
+                    action = Some(BulkAction::AddToAlbum(c));
+                }
+                if style::icon_label_button(ui, icons::ICON_STAR, "Favorite").clicked() {
+                    action = Some(BulkAction::Favorite(true));
+                }
+                if style::icon_label_button(ui, icons::ICON_STAR.outlined(), "Unfavorite").clicked()
+                {
+                    action = Some(BulkAction::Favorite(false));
+                }
+                if in_album
+                    && style::icon_label_button(
+                        ui,
+                        icons::ICON_PLAYLIST_REMOVE,
+                        "Remove from album",
+                    )
+                    .clicked()
+                {
+                    action = Some(BulkAction::RemoveFromAlbum);
+                }
+                if style::icon_label_button(ui, icons::ICON_CLOSE, "Cancel").clicked() {
+                    action = Some(BulkAction::Clear);
+                }
+            });
         });
-    });
-    ui.add_space(4.0);
+    ui.add_space(8.0);
     action
 }
 
@@ -208,29 +242,41 @@ impl App {
             .map(|a| a.name.as_str())
     }
 
-    /// Sidebar: the albums, and "New album…" (an inline name field while one is being made).
+    /// Sidebar: the albums, and the "+" that makes a new one (an inline name field while one is
+    /// being made).
     pub(super) fn albums_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Albums").strong());
+        // While a window with items waiting for a name is open, a second one would drop them.
+        let free = self.new_album.is_none();
+        let r = super::sidebar::section_header(
+            ui,
+            "Albums",
+            &mut [(icons::ICON_ADD, "New album…", free)],
+        );
+        if r[0].clicked() {
+            self.new_album = Some(NewAlbum::default());
+        }
         let mut open = None;
         if self.albums.is_empty() {
             ui.label(RichText::new("No albums yet.").weak());
         }
         egui::ScrollArea::vertical()
             .id_salt("albums")
-            .max_height(120.0)
+            .max_height(180.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for a in &self.albums {
-                    let label = format!(
-                        "{} ({})",
-                        short_name(&a.name, SHORT_NAME_CHARS),
-                        thousands(a.count)
+                    let short = short_name(&a.name, SHORT_NAME_CHARS);
+                    let count = thousands(a.count);
+                    let (_, r) = super::sidebar::nav_row(
+                        ui,
+                        icons::ICON_PHOTO_ALBUM,
+                        &short,
+                        &format!("{short} ({count})"),
+                        Some(&count),
+                        self.tl.view == View::Album(a.id),
+                        0.0,
                     );
-                    if ui
-                        .selectable_label(self.tl.view == View::Album(a.id), label)
-                        .on_hover_text(&a.name)
-                        .clicked()
-                    {
+                    if r.on_hover_text(&a.name).clicked() {
                         open = Some(a.id);
                     }
                 }
@@ -241,7 +287,7 @@ impl App {
         let inline = self.new_album.as_ref().is_some_and(|n| n.add.is_empty());
         if inline {
             let mut na = self.new_album.take().unwrap_or_default();
-            let enter = name_field(ui, &mut na.name, &mut na.focused, 150.0);
+            let enter = name_field(ui, &mut na.name, &mut na.focused, ui.available_width());
             let (mut create, mut cancel) = (enter, false);
             ui.horizontal(|ui| {
                 create |= ui.button("Create").clicked();
@@ -250,16 +296,6 @@ impl App {
             self.new_album = (!cancel).then_some(na);
             if create {
                 self.submit_new_album();
-            }
-        } else {
-            // While a window with items waiting for a name is open, a second one would drop
-            // them.
-            let free = self.new_album.is_none();
-            if ui
-                .add_enabled(free, egui::Button::new("New album…"))
-                .clicked()
-            {
-                self.new_album = Some(NewAlbum::default());
             }
         }
     }
@@ -302,7 +338,12 @@ impl App {
     }
 
     pub(super) fn dialog_open(&self) -> bool {
-        self.new_album.is_some() || self.rename_album.is_some() || self.delete_album.is_some()
+        self.new_album.is_some()
+            || self.rename_album.is_some()
+            || self.delete_album.is_some()
+            || self.add_folder_dialog.is_some()
+            || self.stop_folder.is_some()
+            || self.help_open
     }
 
     /// True when keys must not reach the views: a text field has focus, Settings is open or an
@@ -316,6 +357,9 @@ impl App {
     pub(super) fn cancel_album_dialogs(&mut self) {
         self.new_album = None;
         self.rename_album = None;
+        self.add_folder_dialog = None;
+        self.stop_folder = None;
+        self.help_open = false;
         if self.delete_album.as_ref().is_some_and(|d| !d.pending) {
             self.delete_album = None;
         }
@@ -393,23 +437,19 @@ impl App {
         }
     }
 
-    /// Above an album's grid: its name, and renaming and deleting it.
-    pub(super) fn album_header(&mut self, ui: &mut egui::Ui, id: i64) {
+    /// Next to an album's title: renaming and deleting it.
+    pub(super) fn album_actions(&mut self, ui: &mut egui::Ui, id: i64) {
         let name = self.album_name(id).unwrap_or("Album").to_string();
-        ui.horizontal(|ui| {
-            ui.heading(short_name(&name, 60)).on_hover_text(&name);
-            if ui.button("Rename…").clicked() {
-                self.rename_album = Some(RenameAlbum {
-                    id,
-                    name: name.clone(),
-                    focused: false,
-                });
-            }
-            if ui.button("Delete album…").clicked() {
-                self.delete_album = Some(DeleteAlbum::new(id));
-            }
-        });
-        ui.add_space(4.0);
+        if style::icon_label_button(ui, icons::ICON_EDIT, "Rename…").clicked() {
+            self.rename_album = Some(RenameAlbum {
+                id,
+                name,
+                focused: false,
+            });
+        }
+        if style::icon_label_button(ui, icons::ICON_DELETE, "Delete album…").clicked() {
+            self.delete_album = Some(DeleteAlbum::new(id));
+        }
     }
 
     /// Per frame: outcomes of album writes, and what they changed.
@@ -558,21 +598,23 @@ impl App {
         }
     }
 
-    /// The selection bar (and its twin for search results): shown while 2+ items are selected.
-    pub(super) fn selection_bar_ui(&mut self, ui: &mut egui::Ui) {
+    /// The selection bar, in place of the view header while items are selected. Returns whether
+    /// it was shown.
+    pub(super) fn selection_bar_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let searching = self.searching();
         let count = if searching {
             self.result_sel.len()
         } else {
             self.tl.sel.len()
         };
-        if count < 2 {
-            return;
+        if count == 0 || !self.picking {
+            return false;
         }
         let in_album = !searching && matches!(self.tl.view, View::Album(_));
         if let Some(a) = selection_bar(ui, count, &self.albums, in_album) {
             self.bulk_action(a);
         }
+        true
     }
 
     pub(super) fn bulk_action(&mut self, action: BulkAction) {
@@ -623,29 +665,20 @@ impl App {
 
     /// Drops the selection of whatever grid is shown.
     pub(super) fn clear_selection(&mut self) {
+        self.picking = false;
         self.selected = None;
         self.result_sel.clear();
         self.tl.selected = None;
         self.tl.sel.clear();
     }
-
-    /// What the detail panel shows while several items are selected.
-    pub(super) fn selection_summary(&mut self, ui: &mut egui::Ui, count: usize) {
-        ui.add_space(6.0);
-        ui.heading(format!("{} selected", items_text(count)));
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(
-                "Use the buttons above the grid to add them to an album or mark them as \
-                 favorites. Esc clears the selection.",
-            )
-            .weak(),
-        );
-    }
 }
 
 /// A centred window without collapse and resize handles, used by the album dialogs.
-fn modal_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn modal_window(
+    ctx: &egui::Context,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     egui::Window::new(title)
         .collapsible(false)
         .resizable(false)

@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
@@ -31,7 +30,6 @@ pub struct SearchResponse {
     pub id: u64,
     pub query: Query,
     pub hits: Result<Vec<SearchHit>, String>,
-    pub elapsed: Duration,
 }
 
 /// Runs searches on a dedicated thread. Only the newest pending request is executed, so typing
@@ -54,7 +52,6 @@ impl SearchWorker {
                         req = newer;
                     }
                     let (id, query, opts) = req;
-                    let t = Instant::now();
                     // A bug in one search must not kill the worker for the rest of the session.
                     let run = std::panic::AssertUnwindSafe(|| match &query {
                         Query::Text(q) => lib.search(q, &opts),
@@ -64,15 +61,7 @@ impl SearchWorker {
                         Ok(r) => r.map_err(|e| format!("{e:#}")),
                         Err(_) => Err("search failed unexpectedly".to_string()),
                     };
-                    if resp_tx
-                        .send(SearchResponse {
-                            id,
-                            query,
-                            hits,
-                            elapsed: t.elapsed(),
-                        })
-                        .is_err()
-                    {
+                    if resp_tx.send(SearchResponse { id, query, hits }).is_err() {
                         break;
                     }
                     repaint();

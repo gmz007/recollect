@@ -110,8 +110,19 @@ non-empty, at most 100 characters and unique ignoring case, checked by one share
 library folder never touches files and never deletes an album.
 
 Grids keep a **selection by file id** plus a *primary* item (by list index) that drives the
-detail panel and the viewer; ids that vanish in a reload are dropped. Range selection runs in
+viewer; ids that vanish in a reload are dropped. Range selection runs in
 list order from an anchor, so it follows the grouping and sort order on screen.
+
+## Interface structure
+
+`ui/style.rs` holds the palettes, fonts (Inter and Material Symbols, with egui's fonts as
+fallbacks), text styles and spacing; it is applied once per egui context and again when the theme
+or text size setting changes. `ui/tiles.rs` draws a grid tile (center-cropped thumbnail, hover
+controls, duration pill) and decides what a click means: a plain click opens the viewer unless the
+user is already picking items, in which case it toggles; the selection circle, Ctrl/Cmd and Shift
+select. `ui/sidebar.rs` and `ui/chrome.rs` hold the sidebar, the top bar, the view headers, the
+toasts and the help window. Notices queue as before (an error outlives later plain messages) and
+are drawn as toasts rather than in a status bar.
 
 ## Incremental scanning and robustness
 

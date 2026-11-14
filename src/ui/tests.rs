@@ -37,23 +37,49 @@ fn harness(lib: Arc<Library>) -> Harness<'static> {
 }
 
 #[test]
-fn first_run_asks_before_downloading_the_model() {
+fn smart_search_is_explained_and_asked_for_before_downloading() {
     let d = tempfile::tempdir().unwrap();
-    let h = harness(library(d.path()));
-    h.get_by_label_contains("One-time setup");
-    h.get_by_label("Download model");
+    let app = album_app(d.path(), false);
+    let h = album_harness(&app);
+    h.get_by_label("Turn on smart search");
+    h.get_by_label_contains("Recollect can find photos when you describe them");
+    h.get_by_label_contains("one-time download of");
+    h.get_by_label_contains("Your photos never leave this computer");
+    h.get_by_label("Turn on");
     h.get_by_label("Not now");
+    // The technical details stay folded away until asked for.
+    h.get_by_label("Details");
+    assert!(h.query_by_label_contains("huggingface").is_none());
+    // The search field says what is missing instead of accepting text.
+    h.get_by_label("Turn on smart search to find photos by describing them");
 }
 
 #[test]
-fn declining_the_download_shows_a_hint() {
+fn declining_the_download_leaves_a_small_invitation() {
     let d = tempfile::tempdir().unwrap();
-    let mut h = harness(library(d.path()));
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
     h.get_by_label("Not now").click();
     h.run();
-    h.get_by_label("Search is off until the model is downloaded.");
-    h.get_by_label("Download model…");
-    assert!(h.query_by_label_contains("One-time setup").is_none());
+    h.get_by_label("Smart search is off");
+    assert!(h.query_by_label("Turn on smart search").is_none());
+    // "Turn on" brings the explanation back.
+    h.get_by_label("Turn on").click();
+    h.run();
+    h.get_by_label("Turn on smart search");
+    assert!(h.query_by_label("Smart search is off").is_none());
+}
+
+#[test]
+fn clicking_the_disabled_search_field_opens_settings() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    h.get_by_label("Turn on smart search to find photos by describing them")
+        .click();
+    h.run();
+    assert!(app.borrow().settings_open);
+    h.get_by_label("Appearance");
 }
 
 #[test]
@@ -61,24 +87,68 @@ fn empty_library_invites_adding_a_folder() {
     let d = tempfile::tempdir().unwrap();
     let lib = library(d.path());
     fake_install(&lib);
-    let h = harness(lib);
+    let mut h = harness(lib);
     h.get_by_label("Add a folder to get started");
-    h.get_by_label("Add folder…");
+    h.get_by_label("No folders yet.");
+    h.get_by_label("Add your first folder").click();
+    h.run();
+    h.get_by_label("or type a folder path");
+    h.get_by_label("Choose a folder…");
 }
 
 #[test]
-fn settings_window_lists_models() {
+fn settings_window_offers_appearance_and_smart_search() {
     let d = tempfile::tempdir().unwrap();
     let lib = library(d.path());
     fake_install(&lib);
     let mut h = harness(lib);
     h.get_by_label("Settings").click();
     h.run();
-    h.get_by_label("Search model");
-    for m in registry::MODELS {
-        h.get_by_label_contains(&format!("{}  (", m.name));
-    }
-    h.get_by_label("Use the GPU when available");
+    h.get_by_label("Appearance");
+    h.get_by_label("Smart search");
+    h.get_by_label_contains("Best quality  (");
+    h.get_by_label_contains("Faster  (");
+    h.get_by_label("Use the graphics card when available");
+    h.get_by_label("Advanced");
+}
+
+#[test]
+fn the_theme_and_text_size_settings_apply() {
+    use crate::config::{Settings, TextSize, Theme};
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    let mut h = harness(Arc::clone(&lib));
+    assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
+    let set = |theme, text_size| {
+        lib.apply_settings(Settings {
+            theme,
+            text_size,
+            ..lib.settings()
+        })
+        .unwrap();
+    };
+    set(Theme::Light, TextSize::Large);
+    h.run();
+    assert!(!h.ctx.global_style().visuals.dark_mode);
+    assert_eq!(
+        h.ctx.global_style().visuals.panel_fill,
+        egui::Color32::from_rgb(0xF7, 0xF7, 0xF9)
+    );
+    assert!((h.ctx.zoom_factor() - 1.15).abs() < 1e-6);
+    set(Theme::Dark, TextSize::Normal);
+    h.run();
+    assert!(h.ctx.global_style().visuals.dark_mode);
+    assert_eq!(
+        h.ctx.global_style().visuals.panel_fill,
+        egui::Color32::from_rgb(0x12, 0x12, 0x14)
+    );
+    assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
+    // The text styles follow the spec.
+    let style = h.ctx.global_style();
+    assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 14.5);
+    assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 22.0);
+    assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 12.5);
+    assert_eq!(style.text_styles[&super::style::section()].size, 17.0);
 }
 
 fn hit(path: &str, kind: crate::media::MediaKind, t: Option<f64>) -> crate::search::SearchHit {
@@ -110,75 +180,62 @@ fn hit(path: &str, kind: crate::media::MediaKind, t: Option<f64>) -> crate::sear
 }
 
 #[test]
-fn results_and_video_detail_panel() {
+fn results_show_a_plain_header_and_square_tiles() {
     use crate::media::MediaKind;
     let d = tempfile::tempdir().unwrap();
     let lib = library(d.path());
     fake_install(&lib);
     let mut app = App::new(&egui::Context::default(), lib);
     app.frame_stats = None;
-    // No real folder: adding one would start a background rescan that races the test.
+    // No real folder: adding one would start a background scan that races the test.
     app.snapshot.folders = vec![crate::store::db::Folder {
         id: 1,
         path: "/nowhere".into(),
     }];
     app.results = Arc::new(vec![
-        hit("/nowhere/clip.mp4", MediaKind::Video, Some(42.0)),
+        hit("/nowhere/movie.mp4", MediaKind::Video, Some(42.0)),
         hit("/nowhere/photo.jpg", MediaKind::Image, None),
     ]);
     app.current = Some(super::Query::Text("a dragon".into()));
     app.result_label = "a dragon".into();
-    app.selected = Some(0);
-    app.selected_t = Some(42.0);
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
         .build_ui(move |ui| app.show(ui));
     h.run();
-    h.get_by_label_contains("Best 2 matches for “a dragon”");
-    h.get_by_label("clip.mp4");
-    h.get_by_label("Play at 0:42");
-    h.get_by_label("Matching moments");
-    h.get_by_label_contains("1:40 – 1:44");
-    h.get_by_label("Find similar");
-    h.get_by_label("Show in folder");
+    h.get_by_label("Results for “a dragon”");
+    h.get_by_label("1 photo and 1 video");
+    h.get_by_label("Result movie.mp4");
+    h.get_by_label("Result photo.jpg");
+    h.get_by_label("Clear search");
+    assert!(h.query_by_label_contains("match").is_none());
+    assert!(h.query_by_label_contains(" ms").is_none());
+}
+
+/// Whether the tile labelled `label` is selected, as assistive technology sees it.
+fn is_selected(h: &Harness<'_>, label: &str) -> bool {
+    h.get_by_label(label)
+        .accesskit_node()
+        .toggled()
+        .is_some_and(|t| format!("{t:?}") == "True")
 }
 
 #[test]
 fn arrow_keys_move_the_selection() {
-    use crate::media::MediaKind;
     let d = tempfile::tempdir().unwrap();
-    let lib = library(d.path());
-    fake_install(&lib);
-    let mut app = App::new(&egui::Context::default(), lib);
-    app.frame_stats = None;
-    app.snapshot.folders = vec![crate::store::db::Folder {
-        id: 1,
-        path: "/nowhere".into(),
-    }];
-    app.results = Arc::new(
-        ["a.jpg", "b.jpg", "c.jpg"]
-            .iter()
-            .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
-            .collect(),
-    );
-    app.current = Some(super::Query::Text("a dragon".into()));
-    app.result_label = "a dragon".into();
-    let mut h = Harness::builder()
-        .with_size(egui::vec2(1200.0, 800.0))
-        .build_ui(move |ui| app.show(ui));
-    h.run();
-    assert!(h.query_by_label("c.jpg").is_none());
+    let mut h = grid_harness(grid_app(d.path()));
+    assert!(!is_selected(&h, "Result c.jpg"));
     h.key_press(egui::Key::ArrowRight);
     h.run();
-    h.get_by_label("a.jpg");
+    assert!(is_selected(&h, "Result a.jpg"));
     h.key_press(egui::Key::ArrowRight);
     h.run();
     h.key_press(egui::Key::ArrowRight);
     h.run();
-    h.get_by_label("c.jpg");
+    assert!(is_selected(&h, "Result c.jpg"));
     h.key_press(egui::Key::ArrowLeft);
     h.run();
-    h.get_by_label("b.jpg");
+    assert!(is_selected(&h, "Result b.jpg"));
+    assert!(!is_selected(&h, "Result c.jpg"));
 }
 
 /// Three image results, nothing selected, ready for keyboard tests.
@@ -203,7 +260,12 @@ fn grid_app_with(d: &std::path::Path, installed: bool) -> App {
     app.results = Arc::new(
         ["a.jpg", "b.jpg", "c.jpg"]
             .iter()
-            .map(|n| hit(&format!("/nowhere/{n}"), MediaKind::Image, None))
+            .enumerate()
+            .map(|(i, n)| {
+                let mut h = hit(&format!("/nowhere/{n}"), MediaKind::Image, None);
+                h.file_id = i as i64 + 1;
+                h
+            })
             .collect(),
     );
     app.current = Some(super::Query::Text("a dragon".into()));
@@ -231,12 +293,12 @@ fn typing_in_search_blocks_arrows_until_focus_leaves() {
     h.run();
     h.key_press(egui::Key::ArrowRight);
     h.run();
-    assert!(h.query_by_label("a.jpg").is_none());
+    assert!(!is_selected(&h, "Result a.jpg"));
     h.key_press(egui::Key::Escape);
     h.run();
     h.key_press(egui::Key::ArrowRight);
     h.run();
-    h.get_by_label("a.jpg");
+    assert!(is_selected(&h, "Result a.jpg"));
 }
 
 #[test]
@@ -245,10 +307,10 @@ fn modified_arrows_do_not_move_the_selection() {
     let mut h = grid_harness(grid_app(d.path()));
     h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowRight);
     h.run();
-    assert!(h.query_by_label("a.jpg").is_none());
+    assert!(!is_selected(&h, "Result a.jpg"));
     h.key_press(egui::Key::ArrowRight);
     h.run();
-    h.get_by_label("a.jpg");
+    assert!(is_selected(&h, "Result a.jpg"));
 }
 
 #[test]
@@ -257,21 +319,23 @@ fn arrows_are_ignored_while_settings_is_open() {
     let mut h = grid_harness(grid_app(d.path()));
     h.get_by_label("Settings").click();
     h.run();
-    h.get_by_label("Search model");
+    h.get_by_label("Appearance");
     h.key_press(egui::Key::ArrowRight);
     h.run();
-    assert!(h.query_by_label("a.jpg").is_none());
+    assert!(!is_selected(&h, "Result a.jpg"));
 }
 
 #[test]
 fn clicking_a_tile_keeps_arrows_working() {
     let d = tempfile::tempdir().unwrap();
     let mut h = grid_harness(grid_app(d.path()));
-    h.get_by_label("Result a.jpg").click();
+    h.get_by_label("Result a.jpg")
+        .click_modifiers(egui::Modifiers::COMMAND);
     h.run();
     h.key_press(egui::Key::ArrowRight);
     h.run();
-    h.get_by_label("b.jpg");
+    assert!(is_selected(&h, "Result b.jpg"));
+    assert!(!is_selected(&h, "Result a.jpg"));
 }
 
 // ---- Album views -------------------------------------------------------------------------
@@ -347,16 +411,26 @@ fn timeline_shows_month_headers_and_regroups() {
     let app = album_app(d.path(), true);
     let mut h = album_harness(&app);
     h.get_by_label("December 2019 · 1");
-    h.get_by_label("240 items");
-    h.get_by_label("Group by");
-    h.get_by_label("Tile size");
-    h.get_by_label("Year").click();
+    h.get_by_label("240 photos");
+    h.get_by_label("Thumbnail size");
+    h.get_by_label("Newest first");
+    // The "Months" menu regroups the timeline.
+    h.get_by_label("Months").click();
+    h.run();
+    h.get_by_label("Years").click();
     h.run();
     h.get_by_label("2019 · 12");
     assert!(h.query_by_label("December 2019 · 1").is_none());
-    h.get_by_label("Day").click();
+    h.get_by_label("Years").click();
+    h.run();
+    h.get_by_label("Days").click();
     h.run();
     h.get_by_label("Sunday 15 December 2019 · 1");
+    // The sort button flips the order.
+    h.get_by_label("Newest first").click();
+    h.run();
+    h.get_by_label("Oldest first");
+    assert!(!app.borrow().tl.newest_first);
 }
 
 #[test]
@@ -365,6 +439,10 @@ fn navigator_jumps_to_a_year() {
     let app = album_app(d.path(), true);
     let mut h = album_harness(&app);
     assert!(h.query_by_label("December 2005 · 1").is_none());
+    // The date list is folded away until asked for.
+    assert!(h.query_by_label("2005 (12)").is_none());
+    h.get_by_label("Jump to date").click();
+    h.run();
     // The sidebar's date list is short in a window this size: scroll the year into view.
     h.get_by_label("2005 (12)").scroll_to_me();
     h.run();
@@ -392,7 +470,7 @@ fn clicking_a_folder_opens_its_view() {
     h.run_steps(3);
     assert_eq!(app.borrow().tl.view, View::RecentlyAdded);
     // No grouping choice for the recently added list.
-    assert!(h.query_by_label("Group by").is_none());
+    assert!(h.query_by_label("Months").is_none());
 }
 
 #[test]
@@ -400,29 +478,55 @@ fn banner_shows_while_the_timeline_stays_visible() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), false);
     let h = album_harness(&app);
-    h.get_by_label_contains("One-time setup");
-    h.get_by_label("Download model");
+    h.get_by_label("Turn on smart search");
+    h.get_by_label("Turn on");
     h.get_by_label("Not now");
     h.get_by_label("December 2019 · 1");
     assert_eq!(app.borrow().tl.group, Group::Month);
 }
 
 #[test]
-fn selecting_a_timeline_item_shows_its_details() {
+fn clicking_a_tile_opens_the_viewer_with_the_details() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = album_harness(&app);
     h.get_by_label("Item img1.jpg").click();
-    h.run();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_some());
     h.get_by_label("img1.jpg");
     h.get_by_label_contains("Sunday 15 December 2019");
     h.get_by_label("Test Camera");
     h.get_by_label("4000×3000");
     h.get_by_label("Find similar");
-    h.get_by_label("Open");
-    h.key_press(egui::Key::ArrowRight);
-    h.run();
-    assert_eq!(app.borrow().tl.selected, Some(1));
+    h.get_by_label("Open with default app");
+}
+
+#[test]
+fn only_the_circle_and_modifier_keys_select_instead_of_opening() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = small_tiles_harness(&app);
+    h.get_by_label("Select img2.jpg").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    assert_eq!(app.borrow().selected_file_ids(), [2]);
+    h.get_by_label("1 selected");
+    h.get_by_label("Cancel");
+    // While picking, a plain click on another tile adds it instead of opening it.
+    h.get_by_label("Item img4.jpg").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    assert_eq!(app.borrow().selected_file_ids(), [2, 4]);
+    h.get_by_label("2 selected");
+    // Cancel leaves selection mode: the header comes back and a click opens again.
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(app.borrow().selected_file_ids().is_empty());
+    assert!(h.query_by_label("2 selected").is_none());
+    assert!(h.get_all_by_label("Photos").count() >= 1);
+    h.get_by_label("Item img4.jpg").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_some());
 }
 
 // ---- Viewer, favorites, search options, On this day ----------------------------------------
@@ -439,8 +543,7 @@ fn settle(h: &mut Harness<'_>, mut cond: impl FnMut() -> bool) {
     panic!("condition not reached in time");
 }
 
-/// Like `album_harness` with short frames, so two clicks a frame apart still count as a double
-/// click (egui allows 0.3 s between them).
+/// Like `album_harness` with short frames.
 fn quick_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
     let app = Rc::clone(app);
     let mut h = Harness::builder()
@@ -451,22 +554,9 @@ fn quick_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
     h
 }
 
-/// Two clicks on a tile, a frame apart, near its top left corner (the tile may move a little
-/// when the first click opens the detail panel).
-fn double_click(h: &mut Harness<'_>, label: &str) {
-    let pos = h.get_by_label(label).rect().min + egui::vec2(12.0, 12.0);
-    h.event(egui::Event::PointerMoved(pos));
-    for _ in 0..2 {
-        for pressed in [true, false] {
-            h.event(egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            });
-        }
-        h.step();
-    }
+/// Clicks a tile and checks that the viewer opened (so the tile is gone).
+fn open_tile(h: &mut Harness<'_>, label: &str) {
+    h.get_by_label(label).click();
     h.run_steps(3);
     assert!(
         h.query_by_label(label).is_none(),
@@ -479,7 +569,8 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = album_harness(&app);
-    h.get_by_label("Item img1.jpg").click();
+    // Any arrow picks the first item; Enter opens it.
+    h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
@@ -494,7 +585,7 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
         "nothing before the first item"
     );
     assert!(h.query_by_label("Item img1.jpg").is_none());
-    assert!(h.query_by_label("Timeline").is_none());
+    assert!(h.query_by_label("Recently added").is_none());
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
     h.get_by_label("img2.jpg");
@@ -516,15 +607,15 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
     assert!(app.borrow().viewer.is_none());
     assert_eq!(app.borrow().tl.selected, Some(1));
     h.get_by_label("Item img2.jpg");
-    h.get_by_label("Timeline");
+    h.get_by_label("Recently added");
 }
 
 #[test]
-fn double_click_opens_the_viewer_and_the_info_panel_toggles() {
+fn clicking_opens_the_viewer_and_the_info_panel_toggles() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
-    let mut h = quick_harness(&app);
-    double_click(&mut h, "Item img1.jpg");
+    let mut h = album_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
     h.run_steps(3);
     h.get_by_label("img1.jpg");
     h.get_by_label_contains("Sunday 15 December 2019");
@@ -631,18 +722,16 @@ fn favorites_app(d: &std::path::Path) -> (Arc<Library>, Rc<RefCell<App>>) {
 }
 
 #[test]
-fn f_marks_a_favorite_and_the_favorites_view_lists_it() {
+fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
     let d = tempfile::tempdir().unwrap();
     let (lib, app) = favorites_app(d.path());
     let mut h = album_harness(&app);
     settle(&mut h, || app.borrow().tl.items.len() == 3);
-    h.get_by_label("Item b.jpg").click();
+    // The star in the corner of a tile toggles its favorite mark without opening it.
+    h.get_by_label("Add b.jpg to favorites").click();
     h.run_steps(3);
-    h.get_by_label("Favorite");
-    h.key_press(egui::Key::F);
-    h.run_steps(3);
-    // The grid and the detail panel change at once...
-    h.get_by_label("Unfavorite");
+    assert!(app.borrow().viewer.is_none());
+    h.get_by_label("Remove b.jpg from favorites");
     assert!(app.borrow().tl.items.iter().any(|it| it.favorite));
     // ...and the mark is stored.
     let fav = crate::store::db::TimelineFilter {
@@ -655,14 +744,15 @@ fn f_marks_a_favorite_and_the_favorites_view_lists_it() {
         let a = app.borrow();
         a.tl.view == View::Favorites && a.tl.items.len() == 1
     });
+    h.get_by_label("1 photo");
     h.get_by_label("Item b.jpg");
     assert!(h.query_by_label("Item a.jpg").is_none());
-    // F again removes the mark; the item leaves the view right away.
-    h.get_by_label("Item b.jpg").click();
-    h.run_steps(3);
-    h.key_press(egui::Key::F);
+    // The star again removes the mark; the item leaves the view right away.
+    h.get_by_label("Remove b.jpg from favorites").click();
     h.run_steps(3);
     assert!(h.query_by_label("Item b.jpg").is_none());
+    settle(&mut h, || app.borrow().tl.awaiting.is_none());
+    h.run_steps(2);
     h.get_by_label("No favorites yet");
     assert_eq!(app.borrow().tl.selected, None);
     settle(&mut h, || lib.timeline(&fav).unwrap().is_empty());
@@ -672,11 +762,35 @@ fn f_marks_a_favorite_and_the_favorites_view_lists_it() {
 }
 
 #[test]
+fn f_marks_the_keyboard_selection_as_a_favorite() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = favorites_app(d.path());
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 3);
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(3);
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    assert!(
+        app.borrow()
+            .tl
+            .items
+            .iter()
+            .filter(|it| it.favorite)
+            .count()
+            == 1
+    );
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    assert!(app.borrow().tl.items.iter().all(|it| !it.favorite));
+}
+
+#[test]
 fn favorites_toggle_in_the_viewer() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = quick_harness(&app);
-    double_click(&mut h, "Item img1.jpg");
+    open_tile(&mut h, "Item img1.jpg");
     h.run_steps(3);
     h.get_by_label("Favorite").click();
     h.run_steps(3);
@@ -741,23 +855,6 @@ fn on_this_day_strip_opens_the_viewer_on_its_own_list() {
     h.get_by_label("Recently added").click();
     h.run_steps(3);
     assert!(h.query_by_label("On this day").is_none());
-}
-
-#[test]
-fn the_status_bar_does_not_blame_waiting_without_a_model() {
-    let r = crate::library::RunSummary::default();
-    let without = super::run_summary_text(&r, 168, false);
-    assert!(
-        without.starts_with("168 files will be searchable after the model download"),
-        "{without}"
-    );
-    assert!(!without.contains("waiting"));
-    assert!(super::run_summary_text(&r, 168, true).contains("168 files still waiting"));
-    assert!(super::run_summary_text(&r, 0, false).starts_with("Up to date"));
-    assert_eq!(
-        super::waiting_for_model_text(1),
-        "1 file will be searchable after the model download"
-    );
 }
 
 // ---- Favorites: pending marks, write failures ---------------------------------------------
@@ -855,7 +952,7 @@ fn a_failed_favorite_write_takes_the_mark_back() {
         app.borrow()
             .notices
             .current()
-            .is_some_and(|n| n.contains("Could not save"))
+            .is_some_and(|n| n.contains("Couldn't save your favorite"))
     });
     assert!(!shown(), "the flag is back to what the library has");
     settle(&mut h, || app.borrow().fav_marks.is_empty());
@@ -913,7 +1010,7 @@ fn notices_show_inside_the_viewer() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = quick_harness(&app);
-    double_click(&mut h, "Item img1.jpg");
+    open_tile(&mut h, "Item img1.jpg");
     h.run_steps(3);
     assert!(h.query_by_label("No video player found").is_none());
     app.borrow_mut().notify("No video player found");
@@ -926,7 +1023,7 @@ fn closing_the_viewer_frees_its_previews() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = quick_harness(&app);
-    double_click(&mut h, "Item img1.jpg");
+    open_tile(&mut h, "Item img1.jpg");
     h.run_steps(5);
     assert!(
         app.borrow().previews.cached() > 0,
@@ -943,7 +1040,7 @@ fn find_similar_from_the_viewer_closes_it_like_any_other_close() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = quick_harness(&app);
-    double_click(&mut h, "Item img1.jpg");
+    open_tile(&mut h, "Item img1.jpg");
     h.run_steps(5);
     assert!(app.borrow().previews.cached() > 0);
     h.get_by_label("Find similar").click();
@@ -1029,14 +1126,12 @@ fn ctrl_and_shift_click_arrows_select_all_and_escape() {
     let app = album_app(d.path(), true);
     let mut h = small_tiles_harness(&app);
     let (ctrl, shift) = (egui::Modifiers::COMMAND, egui::Modifiers::SHIFT);
-    h.get_by_label("Item img2.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item img2.jpg", ctrl);
     assert_eq!(tl_selection(&app), [2]);
-    h.get_by_label("img2.jpg");
+    h.get_by_label("1 selected");
     click_with(&mut h, "Item img4.jpg", ctrl);
     assert_eq!(tl_selection(&app), [2, 4]);
     h.get_by_label("2 selected");
-    h.get_by_label("2 items selected");
     // Shift+click selects from the anchor (img4) to the clicked item.
     click_with(&mut h, "Item img7.jpg", shift);
     assert_eq!(tl_selection(&app), [4, 5, 6, 7]);
@@ -1044,11 +1139,6 @@ fn ctrl_and_shift_click_arrows_select_all_and_escape() {
     // Ctrl+click toggles one item off again.
     click_with(&mut h, "Item img5.jpg", ctrl);
     assert_eq!(tl_selection(&app), [4, 6, 7]);
-    // Plain click collapses to one and shows its details.
-    h.get_by_label("Item img3.jpg").click();
-    h.run_steps(3);
-    assert_eq!(tl_selection(&app), [3]);
-    assert!(h.query_by_label("Clear selection").is_none());
     // Ctrl+A selects the whole list.
     h.key_press_modifiers(ctrl, egui::Key::A);
     h.run_steps(3);
@@ -1057,20 +1147,20 @@ fn ctrl_and_shift_click_arrows_select_all_and_escape() {
     // A plain arrow collapses to one selection, moved.
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
-    assert_eq!(tl_selection(&app), [4]);
+    assert_eq!(tl_selection(&app), [8]);
     // Shift+arrows extend it.
     h.key_press_modifiers(shift, egui::Key::ArrowRight);
     h.run_steps(3);
     h.key_press_modifiers(shift, egui::Key::ArrowRight);
     h.run_steps(3);
-    assert_eq!(tl_selection(&app), [4, 5, 6]);
+    assert_eq!(tl_selection(&app), [8, 9, 10]);
     h.get_by_label("3 selected");
     // Escape clears everything.
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(tl_selection(&app).is_empty());
     assert_eq!(app.borrow().tl.selected, None);
-    assert!(h.query_by_label("Clear selection").is_none());
+    assert!(h.query_by_label("3 selected").is_none());
 }
 
 #[test]
@@ -1078,8 +1168,7 @@ fn the_selection_survives_a_reload() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = small_tiles_harness(&app);
-    h.get_by_label("Item img1.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item img1.jpg", egui::Modifiers::COMMAND);
     click_with(&mut h, "Item img2.jpg", egui::Modifiers::COMMAND);
     click_with(&mut h, "Item img3.jpg", egui::Modifiers::COMMAND);
     assert_eq!(tl_selection(&app), [1, 2, 3]);
@@ -1094,7 +1183,7 @@ fn the_selection_survives_a_reload() {
 }
 
 #[test]
-fn clear_selection_button_and_search_results_multi_select() {
+fn cancel_button_and_search_results_multi_select() {
     use crate::media::MediaKind;
     let d = tempfile::tempdir().unwrap();
     let mut app = grid_app(d.path());
@@ -1109,17 +1198,15 @@ fn clear_selection_button_and_search_results_multi_select() {
     );
     let app = Rc::new(RefCell::new(app));
     let mut h = album_harness(&app);
-    h.get_by_label("Result r1.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Result r1.jpg", egui::Modifiers::COMMAND);
     click_with(&mut h, "Result r3.jpg", egui::Modifiers::SHIFT);
     assert_eq!(tl_selection(&app), [1, 2, 3]);
     h.get_by_label("3 selected");
-    h.get_by_label("3 items selected");
     h.get_by_label("Add to album…");
     h.get_by_label("Favorite");
     h.get_by_label("Unfavorite");
     assert!(h.query_by_label("Remove from album").is_none());
-    h.get_by_label("Clear selection").click();
+    h.get_by_label("Cancel").click();
     h.run_steps(3);
     assert!(tl_selection(&app).is_empty());
 }
@@ -1141,8 +1228,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("Trip (0)");
 
     // Add a multi-selection through the selection bar.
-    h.get_by_label("Item p4.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item p4.jpg", ctrl);
     click_with(&mut h, "Item p2.jpg", ctrl);
     click_with(&mut h, "Item p0.jpg", ctrl);
     h.get_by_label("3 selected");
@@ -1179,9 +1265,8 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("Rename…");
     h.get_by_label("Delete album…");
 
-    // Remove one from the album with the detail panel's button.
-    h.get_by_label("Item p2.jpg").click();
-    h.run_steps(3);
+    // Remove one from the album with the selection bar's button.
+    click_with(&mut h, "Item p2.jpg", ctrl);
     h.get_by_label("Remove from album").click();
     h.run_steps(3);
     // The grid drops the item once the library has confirmed the removal.
@@ -1191,8 +1276,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.run_steps(2);
     assert!(h.query_by_label("Item p2.jpg").is_none());
     // ...and two with the selection bar.
-    h.get_by_label("Item p4.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item p4.jpg", ctrl);
     click_with(&mut h, "Item p0.jpg", shift);
     h.get_by_label("Remove from album").click();
     settle(&mut h, || lib.albums().unwrap()[0].count == 0);
@@ -1226,7 +1310,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("Delete album…").click();
     h.run_steps(3);
     h.get_by_label("The photos and videos in it are not deleted.");
-    h.get_by_label("Cancel").click();
+    h.get_all_by_label("Cancel").last().unwrap().click();
     h.run_steps(3);
     assert_eq!(lib.albums().unwrap().len(), 1);
     h.get_by_label("Delete album…").click();
@@ -1249,9 +1333,8 @@ fn a_new_album_from_the_add_menu_gets_the_selection_and_names_must_be_unique() {
     lib.create_album("Existing", &[]).unwrap();
     app.borrow_mut().refresh_albums();
     settle(&mut h, || app.borrow().albums.len() == 1);
-    h.get_by_label("Item p3.jpg").click();
-    h.run_steps(3);
-    // Single item: detail panel menu; "New album…" creates an album holding the item.
+    click_with(&mut h, "Item p3.jpg", egui::Modifiers::COMMAND);
+    // One item picked: the bar's menu; "New album…" creates an album holding the item.
     h.get_by_label("Add to album…").click();
     h.run_steps(3);
     h.get_by_label("Existing");
@@ -1300,7 +1383,7 @@ fn the_viewer_offers_add_to_album() {
         a.tl.items.len() == 3 && a.albums.len() == 1
     });
     settle(&mut h, || !app.borrow().albums.is_empty());
-    double_click(&mut h, "Item p1.jpg");
+    open_tile(&mut h, "Item p1.jpg");
     h.run_steps(3);
     let target = file_id_of(&lib, "p1.jpg");
     h.get_by_label("Add to album…").click();
@@ -1358,7 +1441,7 @@ fn typing_in_the_viewers_new_album_field_changes_only_the_text() {
     let (_lib, app) = files_app(d.path(), 3);
     let mut h = quick_harness(&app);
     settle(&mut h, || app.borrow().tl.items.len() == 3);
-    double_click(&mut h, "Item p1.jpg");
+    open_tile(&mut h, "Item p1.jpg");
     h.run_steps(3);
     let shown = |app: &Rc<RefCell<App>>| app.borrow().viewer.as_ref().unwrap().current().file_id;
     let before = shown(&app);
@@ -1390,10 +1473,9 @@ fn typing_in_the_viewers_new_album_field_changes_only_the_text() {
 fn keys_do_not_reach_the_grid_behind_a_dialog_and_enter_never_deletes() {
     let d = tempfile::tempdir().unwrap();
     let (lib, app, mut h) = album_view(d.path(), 3, album_harness);
-    h.get_by_label("Item p1.jpg").click();
-    h.run_steps(3);
     h.get_by_label("Delete album…").click();
     h.run_steps(3);
+    click_with(&mut h, "Item p1.jpg", egui::Modifiers::COMMAND);
     h.get_by_label("The photos and videos in it are not deleted.");
     // Enter, F and arrows behind the dialog do nothing.
     for key in [egui::Key::Enter, egui::Key::F, egui::Key::ArrowRight] {
@@ -1420,8 +1502,7 @@ fn a_failing_remove_or_delete_changes_nothing_and_shows_an_error() {
     let (lib, app, mut h) = album_view(d.path(), 3, album_harness);
     lib.fail_albums
         .store(true, std::sync::atomic::Ordering::Release);
-    h.get_by_label("Item p1.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item p1.jpg", egui::Modifiers::COMMAND);
     h.get_by_label("Remove from album").click();
     settle(&mut h, || {
         app.borrow()
@@ -1433,6 +1514,8 @@ fn a_failing_remove_or_delete_changes_nothing_and_shows_an_error() {
     h.get_by_label("Item p1.jpg");
     assert_eq!(lib.albums().unwrap()[0].count, 3);
     // Deleting: the dialog stays, the view stays.
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
     h.get_by_label("Delete album…").click();
     h.run_steps(3);
     h.get_by_label("Delete").click();
@@ -1467,8 +1550,7 @@ fn a_failed_create_reopens_the_dialog_with_the_name_and_the_items() {
     settle(&mut h, || app.borrow().tl.items.len() == 3);
     lib.fail_albums
         .store(true, std::sync::atomic::Ordering::Release);
-    h.get_by_label("Item p2.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item p2.jpg", egui::Modifiers::COMMAND);
     h.get_by_label("Add to album…").click();
     h.run_steps(3);
     h.get_all_by_label("New album…").last().unwrap().click();
@@ -1531,13 +1613,11 @@ fn search_selection_counts_files_and_toggles_per_file() {
     );
     let app = Rc::new(RefCell::new(app));
     let mut h = album_harness(&app);
-    h.get_by_label("Result r1.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Result r1.jpg", egui::Modifiers::COMMAND);
     // A range over the visible hits r1..r3 covers two files.
     click_with(&mut h, "Result r3.jpg", egui::Modifiers::SHIFT);
     assert_eq!(tl_selection(&app), [1, 2]);
     h.get_by_label("2 selected");
-    h.get_by_label("2 items selected");
     click_with(&mut h, "Result r4.jpg", egui::Modifiers::COMMAND);
     assert_eq!(tl_selection(&app), [1, 2, 3]);
     h.get_by_label("3 selected");
@@ -1556,8 +1636,7 @@ fn a_bulk_favorite_failure_is_one_notice() {
     settle(&mut h, || app.borrow().tl.items.len() == 3);
     lib.fail_favorites
         .store(true, std::sync::atomic::Ordering::Release);
-    h.get_by_label("Item a.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item a.jpg", egui::Modifiers::COMMAND);
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     h.run_steps(3);
     h.get_by_label("Favorite").click();
@@ -1579,8 +1658,7 @@ fn right_clicking_inside_a_selection_acts_on_all_of_it() {
     settle(&mut h, || app.borrow().tl.items.len() == 4);
     let album = lib.create_album("A", &[]).unwrap();
     settle(&mut h, || app.borrow().albums.len() == 1);
-    h.get_by_label("Item p3.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item p3.jpg", egui::Modifiers::COMMAND);
     click_with(&mut h, "Item p1.jpg", egui::Modifiers::COMMAND);
     click_with(&mut h, "Item p0.jpg", egui::Modifiers::COMMAND);
     h.get_by_label("Item p1.jpg").click_secondary();
@@ -1603,8 +1681,7 @@ fn tiles_tell_assistive_tech_whether_they_are_selected() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = small_tiles_harness(&app);
-    h.get_by_label("Item img1.jpg").click();
-    h.run_steps(3);
+    click_with(&mut h, "Item img1.jpg", egui::Modifiers::COMMAND);
     click_with(&mut h, "Item img3.jpg", egui::Modifiers::COMMAND);
     let on = |h: &Harness<'_>, l: &str| {
         h.get_by_label(l)
@@ -1615,4 +1692,318 @@ fn tiles_tell_assistive_tech_whether_they_are_selected() {
     assert_eq!(on(&h, "Item img1.jpg").as_deref(), Some("True"));
     assert_eq!(on(&h, "Item img3.jpg").as_deref(), Some("True"));
     assert_eq!(on(&h, "Item img2.jpg").as_deref(), Some("False"));
+}
+
+// ---- Folders, activity, toasts, wording ---------------------------------------------------------
+
+#[test]
+fn adding_a_folder_from_the_dialog_by_path() {
+    let d = tempfile::tempdir().unwrap();
+    let photos = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    fake_install(&lib);
+    let mut h = harness(Arc::clone(&lib));
+    h.get_by_label("Add a folder").click();
+    h.run_steps(3);
+    h.get_by_label("Choose a folder…");
+    h.get_by_label("or type a folder path");
+    // A path that does not exist is refused with a plain message and the dialog stays.
+    h.get_by_label("Folder path").click();
+    h.run_steps(2);
+    h.get_by_label("Folder path")
+        .type_text("/definitely/not/here");
+    h.run_steps(2);
+    h.get_by_label("Add").click();
+    h.run_steps(3);
+    h.get_by_label_contains("couldn't be found");
+    h.get_by_label("or type a folder path");
+    // A real folder is added and the dialog closes.
+    h.get_by_label("Folder path").click();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(1);
+    h.get_by_label("Folder path")
+        .type_text(photos.path().to_str().unwrap());
+    h.run_steps(2);
+    h.get_by_label("Add").click();
+    settle(&mut h, || lib.folders().unwrap().len() == 1);
+    h.run_steps(3);
+    assert!(h.query_by_label("or type a folder path").is_none());
+}
+
+#[test]
+fn stopping_a_folder_asks_first_and_keeps_the_files() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 2);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 2);
+    h.get_by_label("Stop showing nowhere").click();
+    h.run_steps(3);
+    h.get_by_label("Stop showing “nowhere”?");
+    h.get_by_label("Your files stay where they are.");
+    assert_eq!(lib.folders().unwrap().len(), 1, "nothing happens yet");
+    h.get_all_by_label("Cancel").last().unwrap().click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Your files stay where they are.")
+            .is_none()
+    );
+    assert_eq!(lib.folders().unwrap().len(), 1);
+    h.get_by_label("Stop showing nowhere").click();
+    h.run_steps(3);
+    h.get_by_label("Stop showing").click();
+    settle(&mut h, || lib.folders().unwrap().is_empty());
+}
+
+#[test]
+fn the_activity_card_describes_what_is_happening() {
+    use crate::library::{Activity, IndexProgress};
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    let lib = Arc::clone(&app.borrow().lib);
+    assert!(h.query_by_label_contains("Looking for").is_none());
+    let show = |h: &mut Harness<'_>, a: Activity| {
+        lib.update_status(|s| s.activity = a);
+        h.run_steps(2);
+    };
+    show(
+        &mut h,
+        Activity::Scanning {
+            folder: "/x".into(),
+        },
+    );
+    h.get_by_label("Looking for new photos…");
+    h.get_by_label("Pause");
+    h.get_by_label("Cancel");
+    show(
+        &mut h,
+        Activity::ReadingDates {
+            done: 1234,
+            total: 5000,
+        },
+    );
+    h.get_by_label("Reading photo dates… 1,234 of 5,000");
+    show(
+        &mut h,
+        Activity::Indexing(IndexProgress {
+            done: 45,
+            total: 100,
+            ..Default::default()
+        }),
+    );
+    h.get_by_label("Getting your photos ready for search… 45 %");
+    show(
+        &mut h,
+        Activity::Downloading {
+            model: "m".into(),
+            done: 120_000_000,
+            total: 485_000_000,
+        },
+    );
+    h.get_by_label("Downloading smart search… 120 of 485 MB");
+    assert!(
+        h.query_by_label("Pause").is_none(),
+        "a download is only cancelled"
+    );
+    show(&mut h, Activity::Idle);
+    assert!(h.query_by_label_contains("Downloading").is_none());
+}
+
+#[test]
+fn notices_appear_as_toasts_and_errors_can_be_closed() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    app.borrow_mut().notify("Added 2 items to “Trip”");
+    h.run_steps(2);
+    h.get_by_label("Added 2 items to “Trip”");
+    assert!(
+        h.query_by_label("Dismiss").is_none(),
+        "info toasts fade by themselves"
+    );
+    app.borrow_mut()
+        .notify_error("That didn't work. Please try again.");
+    h.run_steps(2);
+    h.get_by_label("That didn't work. Please try again.");
+    h.get_by_label("Dismiss").click();
+    h.run_steps(2);
+    assert!(
+        h.query_by_label("That didn't work. Please try again.")
+            .is_none()
+    );
+}
+
+#[test]
+fn help_lists_shortcuts_and_explains_search() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    h.get_by_label("Help").click();
+    h.run_steps(3);
+    h.get_by_label("Keyboard shortcuts");
+    h.get_by_label("Finding photos");
+    h.get_by_label("Arrow keys");
+    h.get_by_label_contains("dog on the beach");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!app.borrow().help_open);
+}
+
+/// Words that must never appear in the everyday screens.
+const BANNED: &[&str] = &[
+    "model",
+    "index",
+    "indexed",
+    "indexing",
+    "vector",
+    "embedding",
+    "siglip",
+    "clip",
+    "onnx",
+    "rescan",
+    "threads",
+    "cache",
+    "ms",
+    "score",
+    "apache",
+    "huggingface",
+];
+
+/// Every label and value the accessibility tree exposes (what a person can read or hear).
+fn visible_text(h: &Harness<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in h.root().children_recursive() {
+        let n = node.accesskit_node();
+        out.extend(n.label());
+        out.extend(n.value());
+    }
+    out
+}
+
+fn banned_words_in(texts: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for t in texts {
+        for word in t
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+        {
+            if BANNED.contains(&word.to_lowercase().as_str()) {
+                found.push(format!("{word:?} in {t:?}"));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_banned_word_check_works() {
+    let t = vec!["Download the Model".to_string(), "500 ms".to_string()];
+    assert_eq!(banned_words_in(&t).len(), 2);
+    let ok = vec!["Months".to_string(), "Smart search is off".to_string()];
+    assert!(banned_words_in(&ok).is_empty());
+}
+
+#[test]
+fn the_main_screens_use_no_technical_words() {
+    use crate::library::Activity;
+    let d = tempfile::tempdir().unwrap();
+    let mut seen: Vec<String> = Vec::new();
+    let mut check = |name: &str, h: &Harness<'_>| {
+        let texts = visible_text(h);
+        assert!(!texts.is_empty(), "{name}: nothing to read");
+        let bad = banned_words_in(&texts);
+        assert!(bad.is_empty(), "{name}: {bad:?}");
+        seen.extend(texts);
+    };
+
+    // Empty library.
+    {
+        let d = tempfile::tempdir().unwrap();
+        let lib = library(d.path());
+        fake_install(&lib);
+        let h = harness(lib);
+        check("empty library", &h);
+    }
+    // Timeline with items, smart search off (banner, invitation), then on.
+    {
+        let app = album_app(d.path(), false);
+        let h = album_harness(&app);
+        check("timeline, smart search off", &h);
+    }
+    {
+        let d2 = tempfile::tempdir().unwrap();
+        let app = album_app(d2.path(), true);
+        let mut h = album_harness(&app);
+        check("timeline", &h);
+        // Activity card in each state.
+        let lib = Arc::clone(&app.borrow().lib);
+        for a in [
+            Activity::Scanning {
+                folder: "/x".into(),
+            },
+            Activity::ReadingDates { done: 1, total: 2 },
+            Activity::LoadingModel,
+            Activity::Indexing(crate::library::IndexProgress {
+                done: 1,
+                total: 2,
+                ..Default::default()
+            }),
+            Activity::Downloading {
+                model: "m".into(),
+                done: 1,
+                total: 2,
+            },
+        ] {
+            lib.update_status(|s| s.activity = a);
+            h.run_steps(2);
+            check("activity", &h);
+        }
+        lib.update_status(|s| s.activity = Activity::Idle);
+        h.run_steps(2);
+        // Selection mode.
+        h.get_by_label("Select img2.jpg").click();
+        h.run_steps(3);
+        h.get_by_label("1 selected");
+        check("selection mode", &h);
+        h.get_by_label("Cancel").click();
+        h.run_steps(3);
+        // Notices.
+        app.borrow_mut()
+            .notify_error("Couldn't save your favorite. Try again in a moment.");
+        h.run_steps(2);
+        check("error toast", &h);
+        // Help.
+        h.get_by_label("Help").click();
+        h.run_steps(3);
+        h.get_by_label("Keyboard shortcuts");
+        check("help", &h);
+    }
+    // Search results and an empty result.
+    {
+        let d3 = tempfile::tempdir().unwrap();
+        let mut app = grid_app(d3.path());
+        let results = Arc::make_mut(&mut app.results);
+        results[0] = hit("/nowhere/movie.mp4", MediaKind::Video, Some(42.0));
+        let app = Rc::new(RefCell::new(app));
+        let mut h = album_harness(&app);
+        check("search results", &h);
+        let mut a = app.borrow_mut();
+        a.results = Arc::default();
+        drop(a);
+        h.run_steps(2);
+        check("no results", &h);
+    }
+    // An album view.
+    {
+        let d4 = tempfile::tempdir().unwrap();
+        let (_lib, _app, h) = album_view(d4.path(), 3, album_harness);
+        check("album", &h);
+    }
+    // Something was actually read.
+    assert!(seen.iter().any(|t| t == "Recently added"));
+    assert!(
+        seen.iter()
+            .any(|t| t.starts_with("Getting your photos ready for search"))
+    );
 }

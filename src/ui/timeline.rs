@@ -6,25 +6,26 @@
 //! smooth.
 
 use super::selection::{self, ClickMods, Selection};
-use super::workers::ThumbCache;
-use super::{App, Nav, Query, albums, fmt_time, marked, platform, take_plain_key};
+use super::style::{self, icons};
+use super::tiles::{self, ClickPlan, Tile, TileEvent};
+use super::{App, Nav, albums, fmt_time, marked, take_plain_key};
 use crate::Library;
-use crate::library::{Activity, AlbumOp};
+use crate::library::Activity;
 use crate::media::MediaKind;
 use crate::media::metadata::DateSource;
 use crate::store::db::{TimelineFilter, TimelineItem, TimelineOrder};
 use crate::thumbs::ThumbKey;
 use chrono::{Datelike, NaiveDate};
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use egui::{Color32, RichText, Sense, Vec2};
+use egui::{RichText, Sense, Vec2};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const GAP: f32 = 8.0;
-const HEADER_H: f32 = 34.0;
-const SECTION_GAP: f32 = 10.0;
+const GAP: f32 = 4.0;
+const HEADER_H: f32 = 40.0;
+const SECTION_GAP: f32 = 12.0;
 /// Reload interval while a scan or indexing run keeps adding files.
 const LIVE_RELOAD: Duration = Duration::from_secs(10);
 /// Wait before loading the same view again after a failed load.
@@ -519,6 +520,9 @@ pub(super) struct TimelineState {
     groups: Vec<GroupSpan>,
     groups_key: Option<(u64, Group, bool)>,
     pub(super) dates: Vec<YearEntry>,
+    /// How many of the loaded items are photos and how many are videos.
+    pub(super) n_photos: usize,
+    pub(super) n_videos: usize,
     layout: Option<Layout>,
     /// "On this day" entries for the loaded items and the date they were computed for.
     otd: Option<(u64, NaiveDate, Vec<OnThisDay>)>,
@@ -530,7 +534,7 @@ pub(super) struct TimelineState {
     requested_at: Instant,
     /// The filter whose last load failed, and when; it is not retried right away.
     failed: Option<(TimelineFilter, Instant)>,
-    error: Option<String>,
+    pub(super) error: Option<String>,
     /// The primary selected item (last clicked); see [`Selection`].
     pub(super) selected: Option<usize>,
     pub(super) sel: Selection,
@@ -559,6 +563,8 @@ impl TimelineState {
             groups: Vec::new(),
             groups_key: None,
             dates: Vec::new(),
+            n_photos: 0,
+            n_videos: 0,
             layout: None,
             otd: None,
             layout_key: None,
@@ -581,7 +587,17 @@ impl TimelineState {
         }
     }
 
-    fn headers(&self) -> bool {
+    /// Recounts photos and videos after the items changed.
+    fn recount(&mut self) {
+        self.n_videos = self
+            .items
+            .iter()
+            .filter(|it| it.kind == MediaKind::Video)
+            .count();
+        self.n_photos = self.items.len() - self.n_videos;
+    }
+
+    pub(super) fn headers(&self) -> bool {
         self.view != View::RecentlyAdded
     }
 
@@ -629,6 +645,7 @@ impl TimelineState {
         self.items = Arc::new(items);
         self.generation += 1;
         self.dates = date_index(&self.items);
+        self.recount();
         self.selected = prev.and_then(|f| self.items.iter().position(|it| it.file_id == f));
         // Several selected items stay selected by file id; those that are gone are dropped.
         self.selected = self
@@ -670,13 +687,14 @@ impl TimelineState {
         self.sel.remove_all(ids);
         self.generation += 1;
         self.dates = date_index(&self.items);
+        self.recount();
         let len = self.items.len();
         self.selected = match (primary, sel_shift) {
             (Some(s), Some(shift)) => {
                 let moved = s - shift;
                 if !primary_removed {
                     Some(moved)
-                } else if self.sel.len() > 0 {
+                } else if !self.sel.is_empty() {
                     // Others stay selected: the first of them takes over.
                     self.items
                         .iter()
@@ -780,134 +798,6 @@ impl TimelineState {
 // ---------------------------------------------------------------------------------------------
 // Drawing helpers shared with the search results grid
 // ---------------------------------------------------------------------------------------------
-
-/// Play triangle and label in the bottom left corner of a tile.
-pub(super) fn paint_play_badge(painter: &egui::Painter, rect: egui::Rect, label: String) {
-    let galley = painter.layout_no_wrap(label, egui::FontId::proportional(13.0), Color32::WHITE);
-    let h = galley.size().y;
-    let size = Vec2::new(galley.size().x + h + 4.0, h);
-    let min = rect.left_bottom() + Vec2::new(6.0, -6.0 - h);
-    let bg = egui::Rect::from_min_size(min, size).expand(3.0);
-    painter.rect_filled(bg, 4.0, Color32::from_black_alpha(170));
-    let tri = [
-        min + Vec2::new(1.0, 2.0),
-        min + Vec2::new(1.0, h - 2.0),
-        min + Vec2::new(h - 3.0, h / 2.0),
-    ];
-    painter.add(egui::Shape::convex_polygon(
-        tri.to_vec(),
-        Color32::WHITE,
-        egui::Stroke::NONE,
-    ));
-    painter.galley(min + Vec2::new(h + 2.0, 0.0), galley, Color32::WHITE);
-}
-
-/// A five-pointed star centred on `c`, gold when `filled`, otherwise just an outline. (egui
-/// fills convex shapes only, so the star is drawn as a fan of triangles.)
-pub(super) fn paint_star(painter: &egui::Painter, c: egui::Pos2, radius: f32, filled: bool) {
-    let gold = Color32::from_rgb(255, 200, 40);
-    let pts: Vec<egui::Pos2> = (0..10)
-        .map(|i| {
-            let r = if i % 2 == 0 { radius } else { radius * 0.42 };
-            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            c + Vec2::new(a.cos(), a.sin()) * r
-        })
-        .collect();
-    if filled {
-        for i in 0..10 {
-            painter.add(egui::Shape::convex_polygon(
-                vec![c, pts[i], pts[(i + 1) % 10]],
-                gold,
-                egui::Stroke::NONE,
-            ));
-        }
-    }
-    let mut outline = pts.clone();
-    outline.push(pts[0]);
-    painter.add(egui::Shape::line(
-        outline,
-        egui::Stroke::new(
-            1.0,
-            if filled {
-                Color32::from_rgb(160, 110, 0)
-            } else {
-                gold
-            },
-        ),
-    ));
-}
-
-/// What is drawn on a tile besides its thumbnail.
-#[derive(Default)]
-pub(super) struct TileMarks {
-    /// Video badge text (a time).
-    pub badge: Option<String>,
-    pub favorite: bool,
-    pub selected: bool,
-    pub hovered: bool,
-}
-
-/// Thumbnail, optional video badge, favorite star and selection / hover outline.
-pub(super) fn paint_tile(
-    ui: &egui::Ui,
-    thumbs: &mut ThumbCache,
-    key: &ThumbKey,
-    rect: egui::Rect,
-    marks: TileMarks,
-) {
-    let TileMarks {
-        badge,
-        favorite,
-        selected,
-        hovered,
-    } = marks;
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
-    let failed = thumbs.failed(key);
-    if let Some(tex) = thumbs.get(key) {
-        let size = tex.size_vec2();
-        let scale = (rect.width() / size.x).min(rect.height() / size.y);
-        let r = egui::Rect::from_center_size(rect.center(), size * scale);
-        painter.image(
-            tex.id(),
-            r,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
-    } else if rect.width() > 110.0 {
-        let text = if failed { "preview unavailable" } else { "…" };
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            text,
-            egui::FontId::proportional(13.0),
-            ui.visuals().weak_text_color(),
-        );
-    }
-    if let Some(label) = badge {
-        paint_play_badge(&painter, rect, label);
-    }
-    if favorite && rect.width() > 60.0 {
-        let c = rect.right_top() + Vec2::new(-15.0, 15.0);
-        painter.circle_filled(c, 12.0, Color32::from_black_alpha(150));
-        paint_star(&painter, c, 8.0, true);
-    }
-    if selected {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            6.0,
-            egui::Stroke::new(3.0, ui.visuals().selection.bg_fill),
-            egui::StrokeKind::Inside,
-        );
-    } else if hovered {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            6.0,
-            egui::Stroke::new(1.5, ui.visuals().widgets.hovered.bg_stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
 
 fn file_name(item: &TimelineItem) -> String {
     item.path
@@ -1043,74 +933,50 @@ impl App {
         self.tl.set_items(items);
     }
 
-    /// Sidebar: the library views.
-    pub(super) fn view_selector(&mut self, ui: &mut egui::Ui) {
-        let mut pick = None;
-        if ui
-            .selectable_label(self.tl.view == View::Timeline, "Timeline")
-            .clicked()
-        {
-            pick = Some(View::Timeline);
-        }
-        if ui
-            .selectable_label(self.tl.view == View::RecentlyAdded, "Recently added")
-            .clicked()
-        {
-            pick = Some(View::RecentlyAdded);
-        }
-        if ui
-            .selectable_label(self.tl.view == View::Favorites, "Favorites")
-            .clicked()
-        {
-            pick = Some(View::Favorites);
-        }
-        if let Some(v) = pick {
-            self.set_view(v);
-        }
-    }
-
     /// Sidebar: years and months of the current view; clicking scrolls the grid there.
     pub(super) fn date_navigator(&mut self, ui: &mut egui::Ui) {
         if self.tl.view == View::RecentlyAdded || self.tl.dates.is_empty() {
             return;
         }
-        ui.separator();
-        ui.label(RichText::new("Dates").strong());
         let mut jump = None;
         let mut toggle = None;
-        egui::ScrollArea::vertical()
-            .id_salt("dates")
-            .max_height((ui.available_height() - 44.0).max(80.0))
+        egui::CollapsingHeader::new("Jump to date")
+            .id_salt("jump-to-date")
             .show(ui, |ui| {
-                for y in &self.tl.dates {
-                    let label = format!("{} ({})", y.year, thousands(y.count));
-                    if ui
-                        .selectable_label(self.tl.top_year == Some(y.year), label)
-                        .clicked()
-                    {
-                        jump = Some(y.first);
-                        toggle = Some(y.year);
-                    }
-                    if self.tl.expanded.contains(&y.year) {
-                        for m in &y.months {
-                            let name = chrono::Month::try_from(m.month as u8)
-                                .map(|m| m.name())
-                                .unwrap_or("");
-                            ui.horizontal(|ui| {
-                                ui.add_space(14.0);
-                                if ui
-                                    .selectable_label(
-                                        false,
-                                        format!("{name} ({})", thousands(m.count)),
-                                    )
-                                    .clicked()
-                                {
-                                    jump = Some(m.first);
+                egui::ScrollArea::vertical()
+                    .id_salt("dates")
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for y in &self.tl.dates {
+                            let label = format!("{} ({})", y.year, thousands(y.count));
+                            if ui
+                                .selectable_label(self.tl.top_year == Some(y.year), label)
+                                .clicked()
+                            {
+                                jump = Some(y.first);
+                                toggle = Some(y.year);
+                            }
+                            if self.tl.expanded.contains(&y.year) {
+                                for m in &y.months {
+                                    let name = chrono::Month::try_from(m.month as u8)
+                                        .map(|m| m.name())
+                                        .unwrap_or("");
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(14.0);
+                                        if ui
+                                            .selectable_label(
+                                                false,
+                                                format!("{name} ({})", thousands(m.count)),
+                                            )
+                                            .clicked()
+                                        {
+                                            jump = Some(m.first);
+                                        }
+                                    });
                                 }
-                            });
+                            }
                         }
-                    }
-                }
+                    });
             });
         if let Some(y) = toggle
             && !self.tl.expanded.remove(&y)
@@ -1120,39 +986,6 @@ impl App {
         if let Some(i) = jump {
             self.tl.pending = Some((i, true));
         }
-    }
-
-    fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            if self.tl.awaiting.is_some() {
-                ui.spinner();
-            }
-            if self.tl.headers() {
-                ui.label("Group by");
-                for (g, name) in [
-                    (Group::Day, "Day"),
-                    (Group::Month, "Month"),
-                    (Group::Year, "Year"),
-                ] {
-                    ui.selectable_value(&mut self.tl.group, g, name);
-                }
-                ui.separator();
-                ui.label("Sort");
-                ui.selectable_value(&mut self.tl.newest_first, true, "Newest first");
-                ui.selectable_value(&mut self.tl.newest_first, false, "Oldest first");
-                ui.separator();
-            }
-            ui.add(
-                egui::Slider::new(&mut self.tl.tile_size, 96.0..=320.0)
-                    .show_value(false)
-                    .text("Tile size"),
-            );
-            ui.label(RichText::new(format!("{} items", thousands(self.tl.items.len()))).weak());
-            if let Some(e) = &self.tl.error {
-                ui.colored_label(Color32::from_rgb(230, 120, 90), e);
-            }
-        });
-        ui.add_space(4.0);
     }
 
     /// The album grid for the current view.
@@ -1167,6 +1000,9 @@ impl App {
             });
             return;
         }
+        if !self.selection_bar_ui(ui) {
+            self.view_header(ui);
+        }
         if self.tl.view == View::Timeline {
             // "Today" changes at midnight, whether or not anything else happens by then.
             let now = chrono::Local::now().naive_local();
@@ -1174,30 +1010,28 @@ impl App {
                 .request_repaint_after(until_next_midnight(now) + Duration::from_secs(1));
             self.on_this_day_strip(ui);
         }
-        if let View::Album(id) = self.tl.view {
-            self.album_header(ui, id);
-        }
-        self.selection_bar_ui(ui);
-        self.timeline_toolbar(ui);
         if self.tl.items.is_empty() {
             if self.tl.awaiting.is_none() {
                 if matches!(self.tl.view, View::Album(_)) {
                     self.empty_state(
                         ui,
+                        icons::ICON_PHOTO_ALBUM,
                         "This album is empty",
-                        "Select photos or videos and use “Add to album…”.",
+                        "Pick photos or videos, then choose “Add to album…”.",
                     );
                 } else if self.tl.view == View::Favorites {
                     self.empty_state(
                         ui,
+                        icons::ICON_STAR,
                         "No favorites yet",
-                        "Select a photo or video and press F to add it here.",
+                        "Click the star on a photo to keep it here.",
                     );
                 } else {
                     self.empty_state(
                         ui,
+                        icons::ICON_PHOTO_LIBRARY,
                         "Nothing to show yet",
-                        "Photos and videos appear here as soon as a folder has been scanned.",
+                        "Photos and videos appear here as soon as Recollect has looked through your folders.",
                     );
                 }
             }
@@ -1219,7 +1053,8 @@ impl App {
         let layout = tl.layout.as_ref().expect("layout was just built");
         let albums = &self.albums;
         let in_album = matches!(tl.view, View::Album(_));
-        let mut clicked: Option<(usize, bool, ClickMods)> = None;
+        let picking = self.picking;
+        let mut clicked: Option<(usize, TileEvent, ClickMods)> = None;
         let mut right_clicked = None;
         let mut menu = None;
         let mut top_item = None;
@@ -1241,8 +1076,8 @@ impl App {
                             Vec2::new(width, HEADER_H),
                         );
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new(text).strong().size(16.0));
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(text).text_style(style::section()));
                         });
                     }
                     Row::Tiles { start, end } => {
@@ -1253,52 +1088,35 @@ impl App {
                                 Vec2::splat(layout.tile),
                             );
                             let item = &tl.items[i];
-                            let is_selected =
-                                tl.selected == Some(i) || tl.sel.contains(item.file_id);
-                            let resp = ui.interact(
-                                rect,
-                                ui.make_persistent_id(("tile", i)),
-                                Sense::click(),
-                            );
-                            if ui.is_rect_visible(rect) {
-                                let badge = (item.kind == MediaKind::Video)
-                                    .then(|| fmt_time(item.duration.unwrap_or(0.0)));
-                                paint_tile(
-                                    ui,
-                                    thumbs,
-                                    &thumb_key(item),
-                                    rect,
-                                    TileMarks {
-                                        badge,
-                                        favorite: marked(marks, item.file_id, item.favorite),
-                                        selected: is_selected,
-                                        hovered: resp.hovered(),
-                                    },
-                                );
-                            }
+                            let in_sel = tl.sel.contains(item.file_id);
+                            let checked = in_sel && (picking || tl.sel.is_multi());
                             let name = file_name(item);
-                            let label = format!("Item {name}");
-                            resp.widget_info(|| {
-                                egui::WidgetInfo::selected(
-                                    egui::Role::Button,
-                                    true,
-                                    is_selected,
-                                    &label,
-                                )
-                            });
-                            if resp.double_clicked() || resp.clicked() {
-                                let mods = ClickMods::of_click(ui.ctx());
-                                clicked = Some((i, resp.double_clicked() && mods.is_plain(), mods));
+                            let tile = Tile {
+                                key: &thumb_key(item),
+                                name: &name,
+                                role: "Item",
+                                badge: (item.kind == MediaKind::Video)
+                                    .then(|| fmt_time(item.duration.unwrap_or(0.0))),
+                                favorite: marked(marks, item.file_id, item.favorite),
+                                checked,
+                                focused: tl.selected == Some(i) && !checked,
+                                picking,
+                                selected: in_sel || tl.selected == Some(i),
+                                tip: format!("{name}\n{}", fmt_taken(item)),
+                            };
+                            let id = ui.make_persistent_id(("tile", i));
+                            let o = tiles::show(ui, thumbs, id, rect, &tile);
+                            if let Some((ev, mods)) = o.event {
+                                clicked = Some((i, ev, mods));
                             }
-                            if resp.secondary_clicked() {
+                            if o.resp.secondary_clicked() {
                                 right_clicked = Some(i);
                             }
-                            resp.context_menu(|ui| {
+                            o.resp.context_menu(|ui| {
                                 if let Some(m) = albums::tile_menu(ui, albums, in_album) {
                                     menu = Some((i, m));
                                 }
                             });
-                            resp.on_hover_text(format!("{name}\n{}", fmt_taken(item)));
                         }
                     }
                 }
@@ -1326,17 +1144,38 @@ impl App {
         if self.tl.pending.is_some() {
             ui.ctx().request_repaint();
         }
-        if let Some((i, open, mods)) = clicked {
+        if let Some((i, ev, mods)) = clicked {
             let items = Arc::clone(&self.tl.items);
-            self.tl.selected = self.tl.sel.click(
-                self.tl.selected,
-                items.len(),
-                &|k| items[k].file_id,
-                i,
-                mods,
-            );
-            if open {
-                self.open_timeline_item(i);
+            match tiles::click_plan(ev, mods, self.picking) {
+                ClickPlan::Favorite => {
+                    let it = &items[i];
+                    let fav = !marked(&self.fav_marks, it.file_id, it.favorite);
+                    self.set_favorite(it.file_id, fav);
+                }
+                ClickPlan::Select { mods, fresh } => {
+                    if fresh {
+                        self.tl.sel.clear();
+                        self.tl.selected = None;
+                    }
+                    self.tl.selected = self.tl.sel.click(
+                        self.tl.selected,
+                        items.len(),
+                        &|k| items[k].file_id,
+                        i,
+                        mods,
+                    );
+                    self.picking = !self.tl.sel.is_empty();
+                }
+                ClickPlan::Open => {
+                    self.tl.selected = self.tl.sel.click(
+                        self.tl.selected,
+                        items.len(),
+                        &|k| items[k].file_id,
+                        i,
+                        ClickMods::default(),
+                    );
+                    self.open_timeline_item(i);
+                }
             }
         }
         if let Some(i) = right_clicked {
@@ -1367,53 +1206,56 @@ impl App {
         if entries.is_empty() {
             return;
         }
-        ui.label(RichText::new("On this day").strong().size(16.0));
-        const SIZE: f32 = 88.0;
+        ui.label(RichText::new("On this day").text_style(style::section()));
+        ui.add_space(4.0);
+        const SIZE: f32 = 96.0;
         let mut open = None;
+        let mut star = None;
         egui::ScrollArea::horizontal()
             .id_salt("on-this-day")
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = GAP;
                     for (pos, e) in entries.iter().enumerate() {
                         let item = &self.tl.items[e.index];
                         ui.vertical(|ui| {
-                            let (rect, resp) =
-                                ui.allocate_exact_size(Vec2::splat(SIZE), Sense::click());
-                            if ui.is_rect_visible(rect) {
-                                let badge = (item.kind == MediaKind::Video)
-                                    .then(|| fmt_time(item.duration.unwrap_or(0.0)));
-                                paint_tile(
-                                    ui,
-                                    &mut self.thumbs,
-                                    &thumb_key(item),
-                                    rect,
-                                    TileMarks {
-                                        badge,
-                                        favorite: marked(
-                                            &self.fav_marks,
-                                            item.file_id,
-                                            item.favorite,
-                                        ),
-                                        hovered: resp.hovered(),
-                                        ..Default::default()
-                                    },
-                                );
-                            }
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(SIZE), Sense::hover());
                             let name = file_name(item);
-                            let label = format!("On this day {name}");
-                            resp.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
-                            });
-                            if resp.clicked() {
-                                open = Some(pos);
+                            let tile = Tile {
+                                key: &thumb_key(item),
+                                name: &name,
+                                role: "On this day",
+                                badge: (item.kind == MediaKind::Video)
+                                    .then(|| fmt_time(item.duration.unwrap_or(0.0))),
+                                favorite: marked(&self.fav_marks, item.file_id, item.favorite),
+                                checked: false,
+                                focused: false,
+                                picking: false,
+                                selected: false,
+                                tip: format!("{name}\n{}", fmt_taken(item)),
+                            };
+                            let id = ui.make_persistent_id(("otd", pos));
+                            let o = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
+                            match o.event {
+                                Some((TileEvent::Star, _)) => star = Some(e.index),
+                                Some(_) => open = Some(pos),
+                                None => {}
                             }
-                            resp.on_hover_text(format!("{name}\n{}", fmt_taken(item)));
                             ui.label(RichText::new(years_ago_text(e.years_ago)).small());
                         });
                     }
                 });
             });
+        if let Some(i) = star {
+            let it = &self.tl.items[i];
+            let (id, fav) = (
+                it.file_id,
+                !marked(&self.fav_marks, it.file_id, it.favorite),
+            );
+            self.set_favorite(id, fav);
+        }
         ui.add_space(6.0);
         if let Some(pos) = open {
             let idx: Vec<usize> = entries.iter().map(|e| e.index).collect();
@@ -1470,88 +1312,6 @@ impl App {
         {
             self.open_timeline_item(i);
         }
-    }
-
-    pub(super) fn timeline_detail(&mut self, ui: &mut egui::Ui, i: usize) {
-        let item = self.tl.items[i].clone();
-        ui.add_space(6.0);
-        let key = thumb_key(&item);
-        let w = ui.available_width();
-        if let Some(tex) = self.thumbs.get(&key) {
-            let size = tex.size_vec2();
-            let scale = (w / size.x).min(320.0 / size.y);
-            ui.add(egui::Image::new((tex.id(), size * scale)).corner_radius(6.0));
-        } else {
-            ui.allocate_exact_size(Vec2::new(w, 200.0), Sense::hover());
-        }
-        ui.add_space(6.0);
-        let name = file_name(&item);
-        ui.label(RichText::new(&name).strong());
-        ui.label(
-            RichText::new(
-                item.path
-                    .parent()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-            )
-            .small()
-            .weak(),
-        );
-        ui.add_space(4.0);
-        ui.label(fmt_taken(&item));
-        if let Some(c) = &item.camera {
-            ui.label(RichText::new(c).small());
-        }
-        let mut facts = Vec::new();
-        if let (Some(w), Some(h)) = (item.width, item.height) {
-            facts.push(format!("{w}×{h}"));
-        }
-        if let Some(d) = item.duration {
-            facts.push(format!("length {}", fmt_time(d)));
-        }
-        if !facts.is_empty() {
-            ui.label(RichText::new(facts.join(" · ")).small());
-        }
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Open").clicked()
-                && let Err(e) = platform::open(&item.path)
-            {
-                self.notify_error(format!("{e:#}"));
-            }
-            if ui.button("Show in folder").clicked()
-                && let Err(e) = platform::reveal(&item.path)
-            {
-                self.notify_error(format!("{e:#}"));
-            }
-            if let Some(item_id) = item.item_id.filter(|_| self.snapshot.model_installed)
-                && ui.button("Find similar").clicked()
-            {
-                self.tl.selected = None;
-                self.query.clear();
-                self.submit(Query::Similar {
-                    item_id,
-                    label: name.clone(),
-                });
-            }
-            let fav = marked(&self.fav_marks, item.file_id, item.favorite);
-            let label = if fav { "Unfavorite" } else { "Favorite" };
-            if ui.button(label).clicked() {
-                self.set_favorite(item.file_id, !fav);
-            }
-            if let Some(c) = albums::album_menu(ui, &self.albums) {
-                self.add_to_album_choice(vec![item.file_id], c);
-            }
-            if let View::Album(album) = self.tl.view
-                && ui.button("Remove from album").clicked()
-            {
-                // The grid drops it once the library confirms.
-                self.lib.queue_album(AlbumOp::Remove {
-                    album,
-                    files: vec![item.file_id],
-                });
-            }
-        });
     }
 }
 
@@ -1660,7 +1420,7 @@ mod tests {
 
     #[test]
     fn layout_offsets_and_visibility() {
-        // Two sections of 5 and 2 items; width fits 3 tiles of 100 (gap 8): 3*100 + 2*8 = 316.
+        // Two sections of 5 and 2 items; width fits 3 tiles of 100 plus two gaps.
         let groups = [
             GroupSpan {
                 key: 1,
@@ -1673,7 +1433,7 @@ mod tests {
                 end: 7,
             },
         ];
-        let l = Layout::build(&groups, 316.0, 100.0, true);
+        let l = Layout::build(&groups, 300.0 + 2.0 * GAP, 100.0, true);
         assert_eq!(l.cols, 3);
         assert!((l.tile - 100.0).abs() < 1e-3);
         assert_eq!(l.rows.len(), 5);
@@ -1711,7 +1471,7 @@ mod tests {
                 start: 0,
                 end: 7,
             }],
-            316.0,
+            300.0 + 2.0 * GAP,
             100.0,
             false,
         );
@@ -1754,7 +1514,7 @@ mod tests {
                 end: 7,
             },
         ];
-        let l = Layout::build(&groups, 316.0, 100.0, true);
+        let l = Layout::build(&groups, 300.0 + 2.0 * GAP, 100.0, true);
         (groups, l)
     }
 
@@ -1798,7 +1558,7 @@ mod tests {
                 end: 5,
             },
         ];
-        let l = Layout::build(&groups, 316.0, 100.0, true);
+        let l = Layout::build(&groups, 300.0 + 2.0 * GAP, 100.0, true);
         assert_eq!(l.step(2, 5, Nav::Down), 3);
         assert_eq!(l.step(3, 5, Nav::Down), 4);
         assert_eq!(l.step(4, 5, Nav::Up), 3);

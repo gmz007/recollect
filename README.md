@@ -13,26 +13,37 @@ computer.
 
 ## Features
 
-- **Album browsing:** a timeline of all your photos and videos grouped by day, month or year
-  (from the capture date in the file, falling back to the file date), newest or oldest first,
-  with an adjustable tile size. Browsing works before the search model is downloaded.
-- **Date navigator** in the sidebar: jump to any year or month.
-- **Folder view** (click a folder in the sidebar) and **Recently added**.
-- **Viewer:** double-click or press `Enter` on any photo or video frame to see it as large as the
-  window allows, with an info panel (`I`: date, camera, size, folder), `←`/`→` to step through the
+- **A calm, modern look:** square thumbnails with small gaps, large date headings, light and dark
+  colors that follow your system (or pick one in **Settings**), a **Large** text size option, and
+  plain wording throughout. Notices appear as small toasts at the bottom instead of a status bar.
+- **Photos** (the timeline): all your photos and videos grouped by day, month or year (the
+  **Months** menu above the grid), from the capture date in the file (falling back to the file
+  date), newest or oldest first (the sort button), with a thumbnail size slider. Browsing works
+  before smart search is turned on.
+- **Jump to date** in the sidebar: jump to any year or month.
+- **Folders** (click one in the sidebar; **+** opens *Add a folder* with your Pictures, Videos,
+  Desktop and Downloads folders as suggestions; hover a folder and click **×** to stop showing
+  it, your files are never touched) and **Recently added**.
+- **Viewer:** click any photo or video (or press `Enter` on the one you are on) to see it as large
+  as the window allows, with an info panel (`I`: date, camera, size, folder), `←`/`→` to step through the
   list you came from, `Home`/`End`, `Z` or a double-click for 100 % zoom (drag to pan; up to 4096 px
   per side, so very large photos are scaled down to that) and `Esc` to go back to the grid.
-- **Favorites:** press `F` on the selected item (or use the Favorite button) to star it; the
-  **Favorites** view in the sidebar lists them.
+- **Favorites:** click the star that appears in the corner of a tile when you point at it (or
+  press `F` on the item you are on) to mark it; the **Favorites** view in the sidebar lists them.
 - **Albums:** make your own albums (**New album…** in the sidebar, or from any **Add to album…**
   menu). An album opens like the timeline, grouped and sorted the same way; it has **Rename…** and
   **Delete album…** (deleting an album never deletes photos or videos). Albums only hold references:
   files stay where they are, and an album forgets files that leave the library.
-- **Multi-select** in every grid (timeline views, albums and search results): `Ctrl+click`
-  (`Cmd+click` on macOS) toggles an item, `Shift+click` selects a range, `Ctrl+A` (`Cmd+A`)
-  selects everything in the list, `Shift+←/→/↑/↓` extends the selection and `Esc` clears it. A bar
-  above the grid offers **Add to album…**, **Favorite**, **Unfavorite** and, inside an album,
-  **Remove from album**.
+- **Multi-select** in every grid (timeline views, albums and search results): click the circle in
+  a tile's corner, or `Ctrl+click` (`Cmd+click` on macOS) to toggle an item, `Shift+click` to
+  select a range, `Ctrl+A` (`Cmd+A`) to select everything in the list, `Shift+←/→/↑/↓` to extend
+  the selection; `Esc` or **Cancel** clears it. While items are selected a colored bar replaces
+  the heading with "3 selected", **Add to album…**, **Favorite**, **Unfavorite** and, inside an
+  album, **Remove from album**.
+- **Activity card** at the bottom of the sidebar, only while something is happening ("Looking for
+  new photos…", "Reading photo dates… 1,234 of 5,000", "Getting your photos ready for search…
+  45 %", "Downloading smart search… 120 of 485 MB"), with pause and cancel.
+- **Help** (the **?** button): how search works and the keyboard shortcuts.
 - **On this day:** photos taken on today's date in earlier years, in a strip above the timeline
   (photos dated only by their file time are left out; 29 February shows on 28 February in years
   without one).
@@ -42,9 +53,11 @@ computer.
 - **Search by date and sort:** while searching, **When** limits results to a year or a range of
   years, and **Sort** orders them by relevance, newest or oldest.
 - **Find similar** to any result.
-- All / Images / Videos filter (applies to the album views too).
-- Background indexing with pause, resume and cancel; you can search while it runs.
-- Incremental rescans: new, changed and deleted files are picked up; unchanged files are skipped.
+- All / Photos / Videos filter next to the search box (applies to the album views too).
+- Background preparation of your photos for search with pause, resume and cancel; you can search
+  while it runs.
+- Incremental scans (**Check for new photos** next to **Folders**): new, changed and deleted files
+  are picked up; unchanged files are skipped.
 - Keyboard: `Ctrl+F` (`Cmd+F` on macOS) focuses the search box, the arrow keys move the selection
   (`Shift` + arrows extends it, `Ctrl+A` / `Cmd+A` selects all), `Enter` opens the selected item
   in the viewer, `F` toggles favorite (for every selected item when several are), `Esc` clears the
@@ -91,11 +104,12 @@ own directory, so **keep them together** with the executable when you copy the a
 
 ## First run
 
-1. Start Recollect and add a folder with photos or videos.
-2. Recollect asks before downloading a model from huggingface.co. Nothing is downloaded without
-   your consent. Until the model is installed you can already browse your library in the
-   timeline; only search needs the model.
-3. Indexing runs in the background; you can search right away while it works.
+1. Start Recollect and add a folder with photos or videos (**Add a folder**).
+2. Recollect offers to **Turn on smart search**: a one-time download that you confirm (details are
+   behind **Details**; the model comes from huggingface.co). Nothing is downloaded without your
+   consent. Until smart search is on you can already browse your library; only searching needs it.
+3. Your photos are prepared for search in the background; you can search right away while it
+   works.
 
 ### Models
 
@@ -200,6 +214,13 @@ Your numbers will vary with hardware, photo size and codecs.
 - [docs/packaging.md](docs/packaging.md): packaging notes
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute
 - [CHANGELOG.md](CHANGELOG.md): release notes
+
+## Credits
+
+- The interface text is set in [Inter](https://rsms.me/inter/) (SIL Open Font License 1.1, see
+  `assets/fonts/Inter-OFL.txt`).
+- Icons are [Material Symbols](https://fonts.google.com/icons) (Apache License 2.0), via the
+  `egui_material_icons` crate.
 
 ## License
 

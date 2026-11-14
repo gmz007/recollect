@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- A new visual system: Inter text, Material Symbols icons, light and dark colors that follow the
+  system by default, and a **Large** text size. `theme` (`System`, `Light`, `Dark`) and
+  `text_size` (`Normal`, `Large`) are new settings; older settings files load unchanged.
+- Top bar with a centered search field ("Search your photos — try “dog on the beach”"), a compact
+  All / Photos / Videos filter, a **Help** window (how search works, keyboard shortcuts) and a
+  settings button.
+- Sidebar with Photos, Recently added, Favorites, Albums (+) and Folders (+). **Add a folder**
+  dialog with a folder picker, suggestions from Pictures, Videos, Desktop and Downloads, and a
+  path field. A confirmation before a folder stops being shown ("Your files stay where they
+  are."). **Jump to date** is collapsible.
+- An activity card in the sidebar that appears only while something runs, in plain words, with
+  pause and cancel; a small "Smart search is off" card with **Turn on**.
+- Hover controls on tiles: a selection circle and a favorite star; a duration pill on videos.
+- A selection bar ("3 selected" with Add to album…, Favorite, Unfavorite, Remove from album,
+  Cancel) that replaces the heading while items are selected.
+- Toast notifications (errors have a close button and stay longer).
+
+### Changed
+
+- Thumbnails are square, center-cropped and 4 px apart, without grey boxes. A single click opens
+  the viewer; the selection circle and Ctrl/Cmd/Shift-click select. The right-hand detail panel
+  is gone (the viewer's info panel shows the details).
+- Each view has a large title with a count ("1,204 photos and 37 videos") and compact controls:
+  a Days / Months / Years menu, a sort button and a thumbnail size slider.
+- The status bar is gone; messages are toasts. Raw counters and the model name left the sidebar.
+- Plain wording everywhere: "smart search" instead of "model", "getting your photos ready for
+  search" instead of "indexing", "Check for new photos" instead of "Rescan", no scores or timings.
+  Settings keeps technical options under **Advanced**.
+- Error and info toasts last 10 and 5 seconds (was 8 and 6).
+
 ## [0.4.0] - 2026-11-14
 
 ### Added

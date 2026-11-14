@@ -11,7 +11,8 @@
 
 use super::albums::{AlbumChoice, album_menu};
 use super::preview::{self, Preview, PreviewKey, Previews};
-use super::timeline::{fmt_taken_at, paint_star};
+use super::style::{self, icons};
+use super::timeline::fmt_taken_at;
 use super::workers::ThumbCache;
 use super::{App, Query, consume_plain_key, fmt_time, platform};
 use crate::media::MediaKind;
@@ -221,7 +222,6 @@ pub(super) struct Viewer {
 pub struct ViewerEnv<'a> {
     pub can_find_similar: bool,
     pub albums: &'a [AlbumInfo],
-    pub notice: Option<&'a str>,
     /// False while a text field or a dialog has the keyboard.
     pub keys: bool,
 }
@@ -358,7 +358,6 @@ impl Viewer {
         let ViewerEnv {
             can_find_similar,
             albums,
-            notice,
             keys,
         } = env;
         let ctx = ui.ctx().clone();
@@ -372,14 +371,6 @@ impl Viewer {
             self.top_bar(ui, albums, &mut actions);
             ui.add_space(6.0);
         });
-        if let Some(text) = notice {
-            // Messages such as "no video player found" must not stay hidden behind the viewer.
-            egui::Panel::bottom("viewer_notice").show(ui, |ui| {
-                ui.add_space(3.0);
-                ui.label(text);
-                ui.add_space(3.0);
-            });
-        }
         if self.info {
             egui::Panel::right("viewer_info")
                 .resizable(true)
@@ -463,8 +454,10 @@ impl Viewer {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(e.name()).strong());
             if e.favorite {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                paint_star(ui.painter(), r.center(), 7.0, true);
+                ui.label(
+                    style::icon_text(icons::ICON_STAR, 16.0)
+                        .color(style::Palette::of(ui.ctx()).favorite),
+                );
             }
         });
         ui.label(
@@ -530,11 +523,7 @@ impl Viewer {
             ui.horizontal_wrapped(|ui| {
                 for m in &e.moments {
                     let label = format!("{} – {}", fmt_time(m.t_start), fmt_time(m.t_end));
-                    if ui
-                        .selectable_label(e.t == Some(m.t_start), label)
-                        .on_hover_text(format!("match {:.3}", m.score))
-                        .clicked()
-                    {
+                    if ui.selectable_label(e.t == Some(m.t_start), label).clicked() {
                         self.moments.insert(self.index, m.t_start);
                         self.current.t = Some(m.t_start);
                     }
@@ -777,7 +766,6 @@ impl App {
             ViewerEnv {
                 can_find_similar: can_similar,
                 albums: &self.albums,
-                notice: self.notices.current(),
                 keys,
             },
         );
