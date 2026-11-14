@@ -5,7 +5,10 @@
 //! `--root`. `source: "coco-category"` marks queries with many correct images.
 //!
 //! - caption queries (one expected image): Recall@1/5/10 and MRR
-//! - category queries (many expected images): precision@10
+//! - category queries (many expected images): "P@10", the correct images among the top 10
+//!   divided by `min(expected, 10)`. With fewer than 10 expected images this measures against
+//!   the best achievable result, not against 10 slots; it is kept as is so earlier
+//!   measurements stay comparable
 //! - video queries (expected time ranges): Hit@1/5/10 — a result counts if it is the right
 //!   video and its best moment overlaps an expected range (±2 s tolerance)
 
@@ -68,6 +71,9 @@ pub struct Report {
     pub caption_r10: f64,
     pub caption_mrr: f64,
     pub categories: usize,
+    /// Mean over category queries of (correct results in the top 10) / `min(expected, 10)`:
+    /// precision at 10 measured against the best achievable when fewer than 10 images are
+    /// expected.
     pub category_p10: f64,
     pub videos: usize,
     pub video_hit1: f64,

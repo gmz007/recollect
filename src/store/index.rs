@@ -429,7 +429,7 @@ impl VectorIndex {
         let heaps: Vec<BinaryHeap<Entry>> = blocks
             .par_iter()
             .map(|&b| {
-                let mut heap = BinaryHeap::with_capacity(k + 1);
+                let mut heap = BinaryHeap::with_capacity(k.min(BLOCK) + 1);
                 let end = ((b + 1) * BLOCK).min(n);
                 for r in b * BLOCK..end {
                     if kind.is_some_and(|kd| self.kinds[r] != kd)

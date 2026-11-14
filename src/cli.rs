@@ -381,8 +381,13 @@ fn index(lib: &Arc<Library>) -> Result<()> {
         bail!(e);
     }
     if let Some(r) = st.last_run {
+        let left = if r.deferred > 0 {
+            format!(", {} left for the next run", r.deferred)
+        } else {
+            String::new()
+        };
         eprintln!(
-            "finished in {:.1}s: {} files processed, {} errors; {} new, {} changed, {} removed",
+            "finished in {:.1}s: {} files processed, {} errors; {} new, {} changed, {} removed{left}",
             r.seconds, r.files, r.errors, r.added, r.changed, r.removed
         );
     }

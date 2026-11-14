@@ -318,6 +318,24 @@ fn index_cache_is_written_and_reused() {
 }
 
 #[test]
+fn the_index_cache_is_saved_when_a_running_job_ends_not_while_it_runs() {
+    let d = tempfile::tempdir().unwrap();
+    seed(&open(d.path()));
+    let lib = open(d.path());
+    let cache = index_cache_path(lib.paths(), lib.model());
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    lib.spawn(move || {
+        let _ = hold.recv();
+    })
+    .unwrap();
+    lib.save_index_cache();
+    assert!(!cache.exists(), "no save while a job is running");
+    release.send(()).unwrap();
+    lib.wait();
+    assert!(cache.exists(), "the job saves when it ends");
+}
+
+#[test]
 fn unchanged_index_is_not_rewritten_and_stale_temp_files_are_removed() {
     let d = tempfile::tempdir().unwrap();
     seed(&open(d.path()));

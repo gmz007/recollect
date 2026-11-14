@@ -16,8 +16,13 @@ impl Library {
     }
 
     /// Writes the in-memory index to disk so the next start can skip decoding every vector.
-    /// Does nothing if a save is already running or the cache is already current.
+    /// Does nothing if a save is already running, the cache is already current, or a job is
+    /// running: the save holds the index read lock for the whole write, which would stall the
+    /// job's next index write and, behind it, searches. A running job saves when it ends.
     pub fn save_index_cache(&self) {
+        if self.is_busy() {
+            return;
+        }
         let Some(_saving) = self.save_lock.try_lock() else {
             return;
         };
@@ -49,8 +54,9 @@ impl Library {
         }
         let path = index_cache_path(&self.paths, spec);
         // The read lock is held for the whole write: the file must describe exactly this index,
-        // so writers (new items, date patches) wait until it is on disk. Searches are not
-        // blocked, and the write is skipped when the cache is already current.
+        // so writers (new items, date patches) wait until it is on disk, and
+        // searches queue behind a waiting writer. That is why a save never starts while a job
+        // runs; the write is also skipped when the cache is already current.
         match index.save(&path, spec.id, &library_id, epoch) {
             Ok(()) => *self.saved.lock() = Some((spec.id, epoch)),
             Err(e) => tracing::warn!("could not write index cache {}: {e}", path.display()),

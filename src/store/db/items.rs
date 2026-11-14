@@ -131,18 +131,18 @@ impl Db {
         Ok(all)
     }
 
+    /// Marks a file as failed and drops its items, in one transaction so a crash cannot leave
+    /// items deleted without the epoch moving.
     pub fn set_error(&self, file_id: i64, error: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE files SET status = 2, error = ?2, indexed_at = ?3 WHERE id = ?1",
             params![file_id, error, now()],
         )?;
-        if self
-            .conn
-            .execute("DELETE FROM items WHERE file_id = ?1", [file_id])?
-            > 0
-        {
-            bump_epoch(&self.conn)?;
+        if tx.execute("DELETE FROM items WHERE file_id = ?1", [file_id])? > 0 {
+            bump_epoch(&tx)?;
         }
+        tx.commit()?;
         Ok(())
     }
 

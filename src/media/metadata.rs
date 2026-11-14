@@ -97,7 +97,7 @@ pub fn read_capture(path: &Path, kind: MediaKind, mtime: i64) -> Option<Capture>
         duration,
     };
     match kind {
-        MediaKind::Image => match read_exif(path) {
+        MediaKind::Image => match read_exif(path, mtime) {
             Ok(found) => Some(found.unwrap_or_else(|| fallback(None))),
             Err(e) => {
                 tracing::warn!("{}: {e}; reading its date again next time", path.display());
@@ -110,7 +110,7 @@ pub fn read_capture(path: &Path, kind: MediaKind, mtime: i64) -> Option<Capture>
                 tracing::warn!("{}: {e}; reading its date again next time", path.display());
                 return None;
             }
-            let (found, duration) = read_video(path);
+            let (found, duration) = read_video(path, mtime);
             Some(found.unwrap_or_else(|| fallback(duration)))
         }
     }
@@ -128,7 +128,7 @@ fn ascii(field: &exif::Field) -> Option<String> {
 }
 
 /// `Err` only for I/O trouble; a file without usable EXIF is `Ok(None)`.
-fn read_exif(path: &Path) -> std::io::Result<Option<Capture>> {
+fn read_exif(path: &Path, mtime: i64) -> std::io::Result<Option<Capture>> {
     use std::io::{Read, Seek, SeekFrom};
     let file = File::open(path)?;
     let len = file.metadata()?.len();
@@ -163,12 +163,40 @@ fn read_exif(path: &Path) -> std::io::Result<Option<Capture>> {
     .filter_map(|s| NaiveDateTime::parse_from_str(&s, "%Y:%m:%d %H:%M:%S").ok())
     .map(|n| n.and_utc().timestamp())
     .find(|&t| plausible(t));
-    Ok(taken_at.map(|taken_at| Capture {
+    Ok(with_camera_fallback(
         taken_at,
-        source: DateSource::Exif,
+        DateSource::Exif,
         camera,
-        duration: None,
-    }))
+        None,
+        mtime,
+    ))
+}
+
+/// The capture for a file whose tags gave `taken_at` (from `source`) and/or a camera. Without
+/// a plausible date but with a camera (a phone with a zeroed clock), the camera is kept and
+/// the date falls back to the modification time. `None` when the tags gave neither.
+fn with_camera_fallback(
+    taken_at: Option<i64>,
+    source: DateSource,
+    camera: Option<String>,
+    duration: Option<f64>,
+    mtime: i64,
+) -> Option<Capture> {
+    match taken_at {
+        Some(taken_at) => Some(Capture {
+            taken_at,
+            source,
+            camera,
+            duration,
+        }),
+        None if camera.is_some() => Some(Capture {
+            taken_at: effective_taken(None, mtime),
+            source: DateSource::File,
+            camera,
+            duration,
+        }),
+        None => None,
+    }
 }
 
 /// Longest make or model kept, in characters: camera strings come from untrusted tags and end
@@ -221,7 +249,7 @@ fn tag(tags: &Tags, name: &str) -> Option<String> {
 }
 
 /// The capture time found in a video's tags (if any) and its duration (if known).
-fn read_video(path: &Path) -> (Option<Capture>, Option<f64>) {
+fn read_video(path: &Path, mtime: i64) -> (Option<Capture>, Option<f64>) {
     let Ok(ictx) = video::open_input(path) else {
         return (None, None);
     };
@@ -249,24 +277,16 @@ fn read_video(path: &Path) -> (Option<Capture>, Option<f64>) {
         tag(&fmt, "creation_time"),
         tag(&stream, "creation_time"),
     ];
-    let Some(taken_at) = candidates
+    let taken_at = candidates
         .iter()
         .flatten()
-        .find_map(|s| parse_video_time(s))
-    else {
-        return (None, duration);
-    };
+        .find_map(|s| parse_video_time(s));
     let camera = camera_name(
         tag(&fmt, "com.apple.quicktime.make").as_deref(),
         tag(&fmt, "com.apple.quicktime.model").as_deref(),
     );
     (
-        Some(Capture {
-            taken_at,
-            source: DateSource::Video,
-            camera,
-            duration,
-        }),
+        with_camera_fallback(taken_at, DateSource::Video, camera, duration, mtime),
         duration,
     )
 }
@@ -412,6 +432,29 @@ mod tests {
         assert_eq!(c.source, DateSource::File);
         let future = jpeg_with_exif(&[], &[(0x9003, "2999:01:01 00:00:00")]);
         assert_eq!(capture_of(&future, 7).source, DateSource::File);
+    }
+
+    #[test]
+    fn a_camera_is_kept_when_the_clock_was_zeroed() {
+        let jpg = jpeg_with_exif(
+            &[(0x010F, "Acme"), (0x0110, "Phone 2")],
+            &[(0x9003, "0000:00:00 00:00:00")],
+        );
+        let c = capture_of(&jpg, 1_500_000_000);
+        assert_eq!(c.source, DateSource::File);
+        assert_eq!(c.taken_at, local_wall_clock(1_500_000_000));
+        assert_eq!(c.camera.as_deref(), Some("Acme Phone 2"));
+    }
+
+    #[test]
+    fn no_date_and_no_camera_gives_no_capture() {
+        assert_eq!(
+            with_camera_fallback(None, DateSource::Video, None, Some(3.0), 9),
+            None
+        );
+        let c =
+            with_camera_fallback(None, DateSource::Video, Some("X".into()), Some(3.0), 0).unwrap();
+        assert_eq!((c.source, c.duration), (DateSource::File, Some(3.0)));
     }
 
     #[test]

@@ -42,6 +42,8 @@ pub struct IndexProgress {
 pub struct RunSummary {
     pub files: usize,
     pub errors: usize,
+    /// Files left for the next run because their drive or file was unreachable.
+    pub deferred: usize,
     pub added: usize,
     pub changed: usize,
     pub removed: usize,

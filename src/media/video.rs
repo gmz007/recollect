@@ -249,11 +249,8 @@ impl Converter {
             } else {
                 1.0
             };
-            let (dw, dh) = ((f64::from(w) * sar).max(1.0), f64::from(h));
-            self.display = (to_u32(dw), h);
-            let scale = (f64::from(self.min_side) / dw.min(dh)).min(1.0);
-            let ow = to_u32(dw * scale).max(2) & !1;
-            let oh = to_u32(dh * scale).max(2) & !1;
+            let (display, (ow, oh)) = frame_sizes(w, h, sar, self.min_side);
+            self.display = display;
             let ctx = ff::software::scaling::Context::get(
                 fmt,
                 w,
@@ -283,6 +280,26 @@ impl Converter {
         };
         rotate(rgb, self.rotation)
     }
+}
+
+/// Largest sample aspect ratio (and its inverse) taken at face value. Real anamorphic video
+/// stays within about 0.5 to 2.7; anything beyond is a damaged or hostile header and would
+/// ask the scaler for an enormous frame.
+const MAX_SAMPLE_ASPECT: f64 = 4.0;
+
+/// Display size (sample aspect ratio applied) and even output size whose shorter side is at
+/// most `min_side`, for a `w`x`h` frame. An implausible ratio is treated as square pixels.
+fn frame_sizes(w: u32, h: u32, sar: f64, min_side: u32) -> ((u32, u32), (u32, u32)) {
+    let sar = if sar.is_finite() && (1.0 / MAX_SAMPLE_ASPECT..=MAX_SAMPLE_ASPECT).contains(&sar) {
+        sar
+    } else {
+        1.0
+    };
+    let (dw, dh) = ((f64::from(w) * sar).max(1.0), f64::from(h));
+    let scale = (f64::from(min_side) / dw.min(dh)).min(1.0);
+    let ow = to_u32(dw * scale).max(2) & !1;
+    let oh = to_u32(dh * scale).max(2) & !1;
+    ((to_u32(dw), h), (ow, oh))
 }
 
 /// Clockwise rotation (0/90/180/270) needed to display the frame upright, from the
@@ -447,8 +464,9 @@ pub fn sample(
         let pkt = match s.next_packet() {
             Ok(Some(p)) => p,
             Ok(None) => break,
-            Err(e) if st.emitted > 0 => {
+            Err(e) if st.emitted > 0 && !chain_is_io_failure(&e) => {
                 // A damaged region late in a long file shouldn't discard everything before it.
+                // A vanished drive is different: fail the file so it is retried in full.
                 tracing::warn!("{}: stopping at a read error: {e:#}", path.display());
                 break;
             }
@@ -501,6 +519,37 @@ pub fn sample(
 
 fn is_retryable(e: ff::Error) -> bool {
     matches!(e, ff::Error::Other { errno } if errno == ff::ffi::EAGAIN)
+}
+
+/// True when the error means the storage or network went away (as opposed to damaged data),
+/// so the file should be retried later instead of being kept as it was read so far.
+pub(crate) fn is_io_failure(e: ff::Error) -> bool {
+    use ff::error::{
+        ECONNABORTED, ECONNRESET, EHOSTUNREACH, EIO, ENETDOWN, ENETUNREACH, ENODEV, ENOENT,
+        ENOTCONN, ENXIO, EPIPE, ETIMEDOUT,
+    };
+    const GONE: [i32; 12] = [
+        EIO,
+        ENOENT,
+        ENODEV,
+        ENXIO,
+        ETIMEDOUT,
+        ECONNRESET,
+        ECONNABORTED,
+        ENETDOWN,
+        ENETUNREACH,
+        EHOSTUNREACH,
+        ENOTCONN,
+        EPIPE,
+    ];
+    matches!(e, ff::Error::Other { errno } if GONE.contains(&errno))
+}
+
+/// Like [`is_io_failure`], looking through the context layers of an `anyhow` error.
+pub(crate) fn chain_is_io_failure(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<ff::Error>())
+        .any(|e| is_io_failure(*e))
 }
 
 struct SampleState {
@@ -709,6 +758,44 @@ pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::process::Command;
+
+    #[test]
+    fn square_pixels_scale_the_shorter_side_down_to_the_limit() {
+        let (display, out) = frame_sizes(1920, 1080, 1.0, 270);
+        assert_eq!(display, (1920, 1080));
+        assert_eq!(out, (480, 270));
+    }
+
+    #[test]
+    fn anamorphic_pixels_widen_the_display_size() {
+        let (display, out) = frame_sizes(720, 576, 64.0 / 45.0, 288);
+        assert_eq!(display, (1024, 576));
+        assert_eq!(out, (512, 288));
+    }
+
+    #[test]
+    fn an_absurd_pixel_aspect_ratio_falls_back_to_square_pixels() {
+        for sar in [100_000.0, 1.0 / 100_000.0, f64::NAN, f64::INFINITY] {
+            let (display, out) = frame_sizes(1920, 1080, sar, 270);
+            assert_eq!(display, (1920, 1080), "sar {sar}");
+            assert_eq!(out, (480, 270), "sar {sar}");
+        }
+    }
+
+    #[test]
+    fn a_vanished_drive_counts_as_an_io_failure_but_damaged_data_does_not() {
+        let io = ff::Error::Other {
+            errno: ff::error::EIO,
+        };
+        let wrapped = anyhow::Error::new(io).context("reading packet");
+        assert!(is_io_failure(io));
+        assert!(chain_is_io_failure(&wrapped));
+        assert!(!is_io_failure(ff::Error::InvalidData));
+        assert!(!chain_is_io_failure(&anyhow::Error::new(
+            ff::Error::InvalidData
+        )));
+        assert!(!chain_is_io_failure(&anyhow!("plain")));
+    }
 
     /// Generates a test clip with ffmpeg. Left half red / right half blue with a moving bar,
     /// `secs` long at 10 fps, keyframe every `gop` frames. Extra args go before the output.

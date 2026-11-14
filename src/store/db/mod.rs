@@ -174,9 +174,11 @@ impl Db {
         if needs_work {
             db.create_or_migrate()?;
         }
-        if db.meta("library_id")?.is_none() {
-            db.set_meta("library_id", &new_library_id())?;
-        }
+        // One statement, so two processes opening a new database end up with the same id.
+        db.conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES ('library_id', ?1)",
+            [new_library_id()],
+        )?;
         Ok(db)
     }
 

@@ -158,7 +158,12 @@ fn items_round_trip_and_errors() {
     assert_eq!(info[0].t_start, Some(1.0));
     assert_eq!(info[0].width, Some(640));
     assert_eq!(db.embeddings(&ids[1]).unwrap()[&ids[1][0]], v.embedding);
+    let epoch_before = db.items_epoch().unwrap();
     db.set_error(p[0].id, "boom").unwrap();
+    assert!(
+        db.items_epoch().unwrap() > epoch_before,
+        "dropping items moves the epoch"
+    );
     assert_eq!(
         db.errors(10).unwrap(),
         vec![(PathBuf::from("/lib/a.jpg"), "boom".to_string())]

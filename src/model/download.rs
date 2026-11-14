@@ -70,6 +70,8 @@ fn remove_stale_files(dir: &Path, spec: &ModelSpec) {
     }
 }
 
+/// Downloads one file to `dest` through a `.part` file, which is removed again on every
+/// failure (cancel, network or disk error, wrong content).
 fn fetch_file(
     url: &str,
     f: &ModelFile,
@@ -78,6 +80,23 @@ fn fetch_file(
     progress: &mut dyn FnMut(u64),
 ) -> Result<()> {
     let part = dest.with_extension("part");
+    let result = fetch_to_part(url, f, &part, cancel, progress).and_then(|()| {
+        std::fs::rename(&part, dest).with_context(|| format!("installing {}", dest.display()))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+/// Downloads and verifies `url` into `part`; the caller removes `part` when this fails.
+fn fetch_to_part(
+    url: &str,
+    f: &ModelFile,
+    part: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(60)))
@@ -95,14 +114,12 @@ fn fetch_file(
         .with_context(|| format!("downloading {url}"))?;
     let mut reader = resp.into_body().into_reader();
     let mut out =
-        std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?;
+        std::fs::File::create(part).with_context(|| format!("creating {}", part.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     let mut n = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) {
-            drop(out);
-            let _ = std::fs::remove_file(&part);
             bail!("download cancelled");
         }
         let k = reader
@@ -116,8 +133,6 @@ fn fetch_file(
             .with_context(|| format!("writing {}", part.display()))?;
         n += k as u64;
         if n > f.size {
-            drop(out);
-            let _ = std::fs::remove_file(&part);
             bail!("{}: server sent more data than expected", f.remote);
         }
         progress(n);
@@ -125,9 +140,7 @@ fn fetch_file(
     out.sync_all()
         .with_context(|| format!("writing {}", part.display()))?;
     drop(out);
-    verify(&part, f, n, &hex::encode(hasher.finalize()))?;
-    std::fs::rename(&part, dest).with_context(|| format!("installing {}", dest.display()))?;
-    Ok(())
+    verify(part, f, n, &hex::encode(hasher.finalize()))
 }
 
 fn verify(part: &Path, f: &ModelFile, size: u64, sha: &str) -> Result<()> {

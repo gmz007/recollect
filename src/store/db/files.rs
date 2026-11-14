@@ -139,7 +139,11 @@ impl Db {
 
     /// Removes a folder and everything indexed under it; returns the removed file ids.
     pub fn remove_folder(&mut self, folder_id: i64) -> Result<Vec<i64>> {
-        let tx = self.conn.transaction()?;
+        // Immediate: this reads and then writes; a deferred transaction fails at once when
+        // another process wrote in between, because the busy timeout does not apply there.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let ids: Vec<i64> = {
             let mut st = tx.prepare("SELECT id FROM files WHERE folder_id = ?1")?;
             st.query_map([folder_id], |r| r.get(0))?
@@ -163,7 +167,10 @@ impl Db {
         scanned: &[ScannedFile],
         protected: &[PathBuf],
     ) -> Result<SyncStats> {
-        let tx = self.conn.transaction()?;
+        // Immediate for the same reason as in `remove_folder`.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // The folder may have been removed (or absorbed by a parent) since the scan started.
         let present: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM folders WHERE id = ?1)",

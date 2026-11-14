@@ -1,7 +1,7 @@
 //! Video indexing: sample frames, embed them, merge similar consecutive frames into
 //! segments, store one vector per segment.
 
-use crate::indexer::{Embedded, Progress, contain, fit_for, write_items};
+use crate::indexer::{Embedded, Outcome, Progress, contain, fail_file, fit_for, write_items};
 use crate::library::Library;
 use crate::media::image as img;
 use crate::media::video::{self, SamplerConfig, VideoInfo};
@@ -20,9 +20,14 @@ pub const DEFAULT_SEGMENT_TAU: f32 = 0.90;
 pub const MAX_SEGMENT_S: f64 = 60.0;
 
 fn segment_tau() -> f32 {
-    std::env::var("RECOLLECT_SEGMENT_TAU")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    parse_segment_tau(std::env::var("RECOLLECT_SEGMENT_TAU").ok().as_deref())
+}
+
+/// The override when it is a finite similarity in `0.0..=1.0`, else the default.
+fn parse_segment_tau(value: Option<&str>) -> f32 {
+    value
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|t| t.is_finite() && (0.0..=1.0).contains(t))
         .unwrap_or(DEFAULT_SEGMENT_TAU)
 }
 
@@ -194,14 +199,11 @@ fn finalize_ready(
                         items,
                     }],
                 )?;
-                prog.file_done(lib, f, 0, false); // frames were counted as they were embedded
+                prog.file_done(lib, f, 0, Outcome::Indexed); // frames were counted as they were embedded
             }
             // Cancelled: the file stays pending for the next run.
             Err(_) if lib.control.is_cancelled() => {}
-            Err(e) => {
-                let failure = crate::indexer::file_failed(lib, f, &e)?;
-                prog.file_done(lib, f, 0, failure.is_error());
-            }
+            Err(e) => fail_file(lib, prog, f, &e),
         }
     }
     Ok(())
@@ -313,6 +315,16 @@ mod tests {
         let mut x = vec![a.cos(), a.sin()];
         normalize(&mut x);
         x
+    }
+
+    #[test]
+    fn the_segment_threshold_override_must_be_a_similarity() {
+        assert_eq!(parse_segment_tau(Some("0.8")), 0.8);
+        assert_eq!(parse_segment_tau(Some("0")), 0.0);
+        for bad in ["NaN", "2", "-0.1", "abc", "inf", ""] {
+            assert_eq!(parse_segment_tau(Some(bad)), DEFAULT_SEGMENT_TAU, "{bad}");
+        }
+        assert_eq!(parse_segment_tau(None), DEFAULT_SEGMENT_TAU);
     }
 
     #[test]

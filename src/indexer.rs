@@ -156,8 +156,9 @@ fn index_pending(lib: &Library, summary: &mut RunSummary) -> Result<()> {
     let mut prog = Progress::new(total, enc.device());
     index_images(lib, &mut enc, &images, settings.decode_threads(), &mut prog)?;
     crate::video_index::index_videos(lib, &mut enc, &videos, &mut prog)?;
-    summary.files += prog.p.done - prog.p.errors;
+    summary.files += prog.p.done - prog.p.errors - prog.deferred;
     summary.errors += prog.p.errors;
+    summary.deferred += prog.deferred;
     Ok(())
 }
 
@@ -180,6 +181,17 @@ pub(crate) fn check_count(what: &str, embeddings: usize, inputs: usize) -> Resul
     Ok(())
 }
 
+/// How a file ended in the progress count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// Embedded and stored.
+    Indexed,
+    /// Left pending for the next run (its drive or file was unreachable).
+    Deferred,
+    /// Failed; the error was recorded on the file.
+    Failed,
+}
+
 /// What happened to a file that failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Failure {
@@ -191,6 +203,7 @@ pub(crate) enum Failure {
 
 impl Failure {
     /// Whether the failure counts as an error in the run summary.
+    #[cfg(test)]
     pub(crate) fn is_error(self) -> bool {
         self == Self::Recorded
     }
@@ -200,15 +213,7 @@ impl Failure {
 /// I/O errors) leave the file pending so the next run retries it; decode failures are
 /// recorded as errors.
 pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Result<Failure> {
-    let transient = !f.path.exists()
-        || e.chain().any(|c| {
-            c.downcast_ref::<std::io::Error>().is_some_and(|io| {
-                !matches!(
-                    io.kind(),
-                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
-                )
-            })
-        });
+    let transient = is_transient(f.path.exists(), e);
     if transient {
         tracing::warn!("{}: {e:#} (will retry on the next scan)", f.path.display());
     } else {
@@ -219,6 +224,35 @@ pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Resu
     } else {
         Failure::Recorded
     })
+}
+
+/// Whether a failure looks temporary: the file is gone, or the error chain holds an I/O error
+/// (from the standard library or from the video decoder) that is not about the data itself.
+fn is_transient(path_exists: bool, e: &anyhow::Error) -> bool {
+    !path_exists
+        || e.chain().any(|c| {
+            c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                !matches!(
+                    io.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+                )
+            })
+        })
+        || crate::media::video::chain_is_io_failure(e)
+}
+
+/// Records a failed file and counts it in the progress. If the failure cannot be recorded
+/// (a database error) the file stays pending and is retried next run.
+pub(crate) fn fail_file(lib: &Library, prog: &mut Progress, f: &FileRow, e: &anyhow::Error) {
+    let failure = file_failed(lib, f, e).unwrap_or_else(|db_err| {
+        tracing::warn!("{}: could not record failure: {db_err:#}", f.path.display());
+        Failure::Retry
+    });
+    let outcome = match failure {
+        Failure::Retry => Outcome::Deferred,
+        Failure::Recorded => Outcome::Failed,
+    };
+    prog.file_done(lib, f, 0, outcome);
 }
 
 /// Scans every folder and reconciles the files table. Folders whose root is unreachable (e.g.
@@ -281,6 +315,8 @@ pub(crate) struct Progress {
     started: Instant,
     items: usize,
     last_update: Instant,
+    /// Files left for the next run; they are part of `p.done` so the bar reaches its end.
+    pub deferred: usize,
 }
 
 impl Progress {
@@ -294,12 +330,14 @@ impl Progress {
             started: Instant::now(),
             items: 0,
             last_update: Instant::now(),
+            deferred: 0,
         }
     }
 
-    pub fn file_done(&mut self, lib: &Library, f: &FileRow, items: usize, error: bool) {
+    pub fn file_done(&mut self, lib: &Library, f: &FileRow, items: usize, outcome: Outcome) {
         self.p.done += 1;
-        self.p.errors += usize::from(error);
+        self.p.errors += usize::from(outcome == Outcome::Failed);
+        self.deferred += usize::from(outcome == Outcome::Deferred);
         self.items += items;
         self.p.current = Some(f.path.clone());
         if self.last_update.elapsed().as_millis() >= 100 || self.p.done == self.p.total {
@@ -393,15 +431,7 @@ fn index_images(
             match r {
                 Ok((px, meta)) => ready.push((f, px, meta)),
                 Err(e) => {
-                    let failure = file_failed(lib, &f, &e).unwrap_or_else(|db_err| {
-                        // Not recorded: the file stays pending and is retried next run.
-                        tracing::warn!(
-                            "{}: could not record failure: {db_err:#}",
-                            f.path.display()
-                        );
-                        Failure::Retry
-                    });
-                    prog.file_done(lib, &f, 0, failure.is_error());
+                    fail_file(lib, prog, &f, &e);
                 }
             }
             if ready.len() >= batch {
@@ -438,7 +468,7 @@ fn embed_ready(
     let embs = enc.embed(&pixels)?;
     check_count("images", embs.len(), ready.len())?;
     for ((f, _, meta), e) in ready.drain(..).zip(embs) {
-        prog.file_done(lib, &f, 1, false);
+        prog.file_done(lib, &f, 1, Outcome::Indexed);
         out.push(Embedded {
             file: f,
             meta,
@@ -511,6 +541,19 @@ mod tests {
         assert!(err.contains("2 embeddings for 3 frames"), "{err}");
         assert!(check_count("images", 4, 3).is_err());
         assert!(check_count("images", 0, 0).is_ok());
+    }
+
+    #[test]
+    fn an_ffmpeg_io_failure_is_temporary_but_invalid_data_is_not() {
+        use ffmpeg_next as ff;
+        let io = anyhow::Error::new(ff::Error::Other {
+            errno: ff::error::EIO,
+        })
+        .context("reading packet");
+        assert!(is_transient(true, &io));
+        let bad = anyhow::Error::new(ff::Error::InvalidData).context("reading packet");
+        assert!(!is_transient(true, &bad));
+        assert!(is_transient(false, &bad), "a vanished file is temporary");
     }
 
     #[test]

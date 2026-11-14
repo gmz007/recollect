@@ -127,20 +127,25 @@ impl Db {
     /// Renames an album (same rules as [`Self::create_album`]; keeping its own name in another
     /// case is allowed).
     pub fn rename_album(&mut self, id: i64, name: &str) -> Result<()> {
+        // Immediate: the name check and the update must see the same albums.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let name = check_album_name(
             name,
-            Self::existing_album_names(&self.conn)?
+            Self::existing_album_names(&tx)?
                 .iter()
                 .map(|(i, n)| (*i, n.as_str())),
             Some(id),
         )?;
-        let n = self.conn.execute(
+        let n = tx.execute(
             "UPDATE albums SET name = ?2 WHERE id = ?1",
             params![id, name],
         )?;
         if n == 0 {
             return Err(AlbumError::Gone.into());
         }
+        tx.commit()?;
         Ok(())
     }
 
