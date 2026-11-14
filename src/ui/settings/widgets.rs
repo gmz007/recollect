@@ -184,6 +184,13 @@ pub(in crate::ui) fn choice_card(
         .clicked()
 }
 
+/// Whether a slider draft written in frame `written` still belongs to a drag that is going on
+/// in frame `now`. A drag writes its draft every frame, so an older one is left over from a
+/// window that was closed while the button was held, and must not be applied later.
+fn draft_is_live(written: u64, now: u64) -> bool {
+    now.saturating_sub(written) <= 1
+}
+
 /// A slider whose value is applied when the user lets go (or types a value or uses the
 /// keyboard), not on every step of a drag. `current` is the saved value.
 pub(super) fn committed_slider(
@@ -195,7 +202,15 @@ pub(super) fn committed_slider(
     format: fn(f64) -> String,
 ) -> Option<u64> {
     let key = egui::Id::unique(("settings-slider", name));
-    let mut v = ui.data(|d| d.get_temp::<u64>(key)).unwrap_or(current) as f64;
+    let now = ui.ctx().cumulative_frame_nr();
+    let kept = ui
+        .data(|d| d.get_temp::<(u64, u64)>(key))
+        .filter(|&(_, written)| draft_is_live(written, now))
+        .map(|(value, _)| value);
+    if kept.is_none() {
+        ui.data_mut(|d| d.remove_temp::<(u64, u64)>(key));
+    }
+    let mut v = kept.unwrap_or(current) as f64;
     let slider = egui::Slider::new(&mut v, *range.start() as f64..=*range.end() as f64)
         .step_by(step)
         .custom_formatter(move |n, _| format(n))
@@ -204,14 +219,30 @@ pub(super) fn committed_slider(
     let r = ui.add(slider);
     r.widget_info(|| egui::WidgetInfo::slider(true, v, name));
     if r.changed() {
-        ui.data_mut(|d| d.insert_temp(key, v as u64));
+        ui.data_mut(|d| d.insert_temp(key, (v as u64, now)));
+    } else if let Some(value) = kept.filter(|_| r.dragged()) {
+        // Held still: the draft stays current.
+        ui.data_mut(|d| d.insert_temp(key, (value, now)));
     }
-    let draft = ui.data(|d| d.get_temp::<u64>(key));
+    let draft = ui.data(|d| d.get_temp::<(u64, u64)>(key));
     match draft {
-        Some(d) if !r.dragged() => {
-            ui.data_mut(|data| data.remove_temp::<u64>(key));
-            Some(d)
+        Some((value, _)) if !r.dragged() => {
+            ui.data_mut(|data| data.remove_temp::<(u64, u64)>(key));
+            Some(value)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::draft_is_live;
+
+    #[test]
+    fn a_draft_from_the_previous_frame_is_live_but_an_older_one_is_not() {
+        assert!(draft_is_live(10, 10));
+        assert!(draft_is_live(10, 11));
+        assert!(!draft_is_live(10, 12));
+        assert!(!draft_is_live(10, 500));
     }
 }

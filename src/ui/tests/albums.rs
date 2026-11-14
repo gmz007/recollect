@@ -474,3 +474,21 @@ fn tiles_tell_assistive_tech_whether_they_are_selected() {
     assert_eq!(on(&h, "Item img3.jpg").as_deref(), Some("True"));
     assert_eq!(on(&h, "Item img2.jpg").as_deref(), Some("False"));
 }
+
+#[test]
+fn a_refused_album_name_leaves_the_field_ready_for_typing() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = files_app(d.path(), 2);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 2);
+    h.get_by_label("New album…").click();
+    h.run_steps(3);
+    type_name(&mut h, &"x".repeat(101));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(4);
+    h.get_by_label_contains("at most 100");
+    assert!(
+        h.ctx.text_edit_focused(),
+        "the name field takes focus again"
+    );
+}

@@ -346,3 +346,26 @@ fn the_info_panel_names_the_folder_and_the_date_source() {
     assert!(h.query_by_label("/nowhere").is_none());
     h.get_by_label("Find similar photos");
 }
+
+#[test]
+fn escape_closes_an_open_viewer_menu_but_not_the_viewer() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_by_label("New album…");
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    h.get_by_label("1 of 240");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_some(), "the viewer stayed open");
+    assert!(h.query_by_label("New album…").is_none(), "the menu closed");
+    // With the menu gone, Escape leaves the viewer as before.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+}

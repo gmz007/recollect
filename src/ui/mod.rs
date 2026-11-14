@@ -144,6 +144,13 @@ pub struct App {
     today_override: Option<chrono::NaiveDate>,
 }
 
+/// Whether the timed refresh of the results should start a new search: the last one was
+/// asked for a while ago and its answer has arrived. Refreshing while an answer is still
+/// awaited would drop that answer every time, so a slow search would never show anything.
+fn results_refresh_due(last_search_at: Option<Instant>, awaiting: Option<u64>) -> bool {
+    awaiting.is_none() && last_search_at.is_some_and(|t| t.elapsed() > RESULTS_REFRESH)
+}
+
 impl App {
     pub fn new(ctx: &egui::Context, lib: Arc<Library>) -> Self {
         let c = ctx.clone();
@@ -276,10 +283,7 @@ impl App {
             ctx.request_repaint_after(BUSY_POLL);
             // Results grow while indexing: refresh them every few seconds.
             if matches!(self.status.activity, Activity::Indexing(_))
-                && self
-                    .res
-                    .last_search_at
-                    .is_some_and(|t| t.elapsed() > RESULTS_REFRESH)
+                && results_refresh_due(self.res.last_search_at, self.res.awaiting)
             {
                 self.rerun();
             }

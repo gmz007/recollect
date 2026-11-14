@@ -191,8 +191,8 @@ fn getting_started(ui: &mut egui::Ui) {
         ui,
         2,
         "Turn on smart search",
-        "Click the Turn on button at the top of the left panel (or open Settings and choose \
-         Smart search, then Download and turn on). It is a one-time download, and afterwards \
+        "Click Turn on when Recollect offers it (or open Settings and choose Smart search, \
+         then Download and turn on). It is a one-time download, and afterwards \
          search works without the internet.",
     );
     step(

@@ -60,6 +60,17 @@ pub(super) fn folder_suggestions(
         .collect()
 }
 
+/// Shown when a typed folder path is not an existing folder given in full.
+pub(super) const BAD_FOLDER_PATH: &str = "That folder couldn't be found. Type the full path \
+     of the folder, or use the folder picker instead.";
+
+/// The folder named by typed text: it must be a full (absolute) path to an existing folder, so
+/// that what gets added never depends on where the program happens to be running.
+pub(super) fn typed_folder(text: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(text.trim());
+    (path.is_absolute() && path.is_dir()).then_some(path)
+}
+
 /// `paths` without repeats and without those inside another of them (the parent already
 /// covers them), in order.
 pub(super) fn without_nested(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -324,7 +335,8 @@ impl App {
             let x = ui.interact(x_rect, resp.id.with("stop"), Sense::click());
             let label = format!("Stop showing {name}");
             x.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-            if ui.rect_contains_pointer(rect) {
+            // Also while it has keyboard focus, or Tab would land on an invisible button.
+            if ui.rect_contains_pointer(rect) || x.has_focus() {
                 ui.painter().text(
                     x_rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -560,12 +572,8 @@ impl App {
                     if (ui.add_enabled(can_add, egui::Button::new("Add")).clicked() || enter)
                         && can_add
                     {
-                        let p = PathBuf::from(dlg.typed.trim());
-                        if p.is_dir() {
-                            chosen = Some(p);
-                        } else {
-                            bad_path = true;
-                        }
+                        chosen = typed_folder(&dlg.typed);
+                        bad_path = chosen.is_none();
                     }
                     if ui.button("Cancel").clicked() {
                         close = true;
@@ -573,10 +581,7 @@ impl App {
                 });
             });
             if bad_path {
-                self.notify_error(
-                    "That folder couldn't be found. Check the spelling of the path, or use \
-                     “Choose a folder…” to pick it.",
-                );
+                self.notify_error(BAD_FOLDER_PATH);
             }
             if let Some(p) = chosen {
                 self.add_folder(p);
@@ -614,6 +619,17 @@ impl App {
 mod tests {
     use super::*;
     use crate::library::IndexProgress;
+
+    #[test]
+    fn a_typed_folder_must_be_a_full_path_to_an_existing_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = dir.path().to_str().unwrap();
+        assert_eq!(typed_folder(&format!("  {full} ")), Some(dir.path().into()));
+        assert_eq!(typed_folder("."), None);
+        assert_eq!(typed_folder("Pictures"), None);
+        assert_eq!(typed_folder(&format!("{full}/missing")), None);
+        assert_eq!(typed_folder(""), None);
+    }
 
     #[test]
     fn suggestions_skip_folders_that_are_already_in_the_library() {

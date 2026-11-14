@@ -221,11 +221,15 @@ pub(super) struct NavInput {
     pub select_all: bool,
 }
 
-/// Reads (and consumes) this frame's arrows, Shift+arrows, Enter and Ctrl/Cmd+A. A focused
+/// Reads (and consumes) this frame's arrows, Shift+arrows, Enter (unless a widget has focus)
+/// and Ctrl/Cmd+A. A focused
 /// button would otherwise move with the arrows, so focus is dropped when one was used.
 pub(super) fn read_nav_keys(ctx: &egui::Context) -> NavInput {
     use egui::Key;
     let mut out = NavInput::default();
+    // Enter belongs to whatever widget has keyboard focus (a button, a filter chip, a tile);
+    // it opens the selected item only when nothing is focused.
+    let nothing_focused = ctx.memory(egui::Memory::focused).is_none();
     ctx.input_mut(|i| {
         i.events.retain(|e| {
             let egui::Event::Key {
@@ -253,7 +257,7 @@ pub(super) fn read_nav_keys(ctx: &egui::Context) -> NavInput {
                     out.shift.push(n);
                     return false;
                 }
-            } else if *key == Key::Enter && !modifiers.any() {
+            } else if *key == Key::Enter && !modifiers.any() && nothing_focused {
                 out.enter = true;
                 return false;
             } else if *key == Key::A && modifiers.command && !modifiers.shift && !modifiers.alt {

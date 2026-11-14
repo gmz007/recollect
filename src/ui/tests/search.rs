@@ -1,6 +1,7 @@
 //! Search results, search options and the search field.
 
 use super::*;
+use std::time::{Duration, Instant};
 
 #[test]
 fn results_show_a_plain_header_and_square_tiles() {
@@ -555,4 +556,69 @@ fn a_lost_background_answer_does_not_stall_the_snapshot_or_the_year_list() {
         !app.years_read.is_pending(),
         "the failed lookup is forgotten"
     );
+}
+
+#[test]
+fn the_timed_refresh_waits_for_the_answer_to_the_last_search() {
+    let long_ago = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+    assert!(crate::ui::results_refresh_due(Some(long_ago), None));
+    assert!(!crate::ui::results_refresh_due(Some(long_ago), Some(4)));
+    assert!(!crate::ui::results_refresh_due(Some(Instant::now()), None));
+    assert!(!crate::ui::results_refresh_due(None, None));
+}
+
+#[test]
+fn emptying_the_field_before_the_answer_arrives_leaves_no_results() {
+    let d = tempfile::tempdir().unwrap();
+    let app = searchable_app(d.path());
+    let mut app = app.borrow_mut();
+    let ctx = egui::Context::default();
+    let paused = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+    app.query = "dog".into();
+    app.query_changed_at = Some(paused);
+    app.poll_debounce(&ctx);
+    assert!(app.res.awaiting.is_some());
+    app.query.clear();
+    app.query_changed_at = Some(paused);
+    app.poll_debounce(&ctx);
+    // The answer to the old search arrives late and is ignored.
+    for _ in 0..50 {
+        app.poll_search();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(app.res.awaiting.is_none());
+    assert!(app.res.hits.is_empty());
+    assert!(app.res.label.is_empty());
+    assert!(app.res.error.is_none());
+    assert!(!app.searching());
+}
+
+#[test]
+fn clicking_a_tile_and_pressing_enter_opens_it() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = grid_harness(grid_app(d.path()));
+    h.get_by_label("Result b.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    h.get_by_label("Back");
+    h.get_by_label("b.jpg");
+}
+
+#[test]
+fn enter_activates_a_focused_button_instead_of_opening_the_viewer() {
+    let d = tempfile::tempdir().unwrap();
+    let app = Rc::new(RefCell::new(grid_app(d.path())));
+    let mut h = album_harness(&app);
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    h.get_by_label("Clear search").focus();
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Back").is_none(),
+        "the viewer stayed closed"
+    );
+    assert!(!app.borrow().searching(), "the search was cleared");
 }

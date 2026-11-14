@@ -176,6 +176,7 @@ impl Previews {
 
     fn request(&mut self, key: &PreviewKey, urgent: bool) -> Preview<'_> {
         let frame = self.loader.frame;
+        self.loader.requeue_if_due(key);
         let shared = &self.loader.shared;
         let entry = match self.loader.states.entry(key.clone()) {
             Entry::Vacant(v) => {
@@ -194,7 +195,7 @@ impl Previews {
         match &entry.0 {
             Slot::Ready(t) => Preview::Ready(t),
             Slot::Loading => Preview::Loading,
-            Slot::Failed => Preview::Failed,
+            Slot::Failed(_) => Preview::Failed,
         }
     }
 
@@ -258,6 +259,7 @@ impl Previews {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn fit_side_follows_the_window_in_steps() {
@@ -325,7 +327,7 @@ mod tests {
         p.loader.shared.queue.lock().push(key("queued", false));
         p.loader
             .states
-            .insert(key("failed", false), (Slot::Failed, 1));
+            .insert(key("failed", false), (Slot::Failed(Instant::now()), 1));
         p.details.insert(7, None);
         p.clear();
         assert!(p.loader.shared.queue.lock().is_empty());
@@ -340,9 +342,11 @@ mod tests {
         for (i, n) in ["a", "b", "c", "d"].iter().enumerate() {
             p.loader
                 .states
-                .insert(key(n, true), (Slot::Failed, 10 + i as u64));
+                .insert(key(n, true), (Slot::Failed(Instant::now()), 10 + i as u64));
         }
-        p.loader.states.insert(key("fit", false), (Slot::Failed, 1));
+        p.loader
+            .states
+            .insert(key("fit", false), (Slot::Failed(Instant::now()), 1));
         p.evict_zoom_textures();
         let mut left: Vec<_> = p
             .loader

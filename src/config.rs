@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Environment variable that relocates all application data under one directory.
@@ -191,11 +192,20 @@ impl Settings {
 
     pub fn decode_threads(&self) -> usize {
         self.index_threads
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1))
-            })
+            .unwrap_or_else(|| available_threads().map_or(1, |n| n.saturating_sub(1)))
             .max(1)
     }
+}
+
+/// How many threads the machine can run at once, if it says. Asked once: the answer is read
+/// again and again by screens that redraw every frame.
+pub fn available_threads() -> Option<usize> {
+    static THREADS: OnceLock<Option<usize>> = OnceLock::new();
+    *THREADS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZero::get)
+    })
 }
 
 #[cfg(test)]

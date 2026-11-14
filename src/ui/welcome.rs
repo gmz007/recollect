@@ -3,7 +3,7 @@
 
 use super::App;
 use super::settings::{choice_card, quality_blurb, quality_name};
-use super::sidebar::{standard_folders, without_nested};
+use super::sidebar::{BAD_FOLDER_PATH, standard_folders, typed_folder, without_nested};
 use super::style::{self, Palette, icons};
 use super::timeline::View;
 use crate::model::registry;
@@ -484,17 +484,13 @@ impl App {
                         && can;
                 });
                 if add_typed {
-                    let p = PathBuf::from(w.typed.trim());
-                    if p.is_dir() {
+                    if let Some(p) = typed_folder(&w.typed) {
                         if !w.added.contains(&p) {
                             w.added.push(p);
                         }
                         w.typed.clear();
                     } else {
-                        self.notify_error(
-                            "That folder couldn't be found. Check the spelling of the path, \
-                             or use “Add another folder…” to pick it.",
-                        );
+                        self.notify_error(BAD_FOLDER_PATH);
                     }
                 }
             });

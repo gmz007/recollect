@@ -200,7 +200,8 @@ impl Viewer {
         } = *env;
         let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
-        // While a text field has focus or a dialog is open, keys belong to them.
+        // While a text field has focus, a dialog is open or one of the viewer's menus is open,
+        // keys belong to them (Escape closes the menu, not the viewer).
         if keys {
             self.handle_keys(&ctx, &mut actions);
         }
@@ -290,7 +291,7 @@ impl App {
         // Details (file size, camera) are re-read once the library has changed under them.
         self.previews
             .sync_details((self.tl.generation, self.lib.jobs_finished()));
-        let keys = !self.keys_blocked(ui.ctx());
+        let keys = !self.keys_blocked(ui.ctx()) && !egui::Popup::is_any_open(ui.ctx());
         let actions = viewer.show(
             ui,
             &mut self.previews,

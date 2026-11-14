@@ -72,6 +72,8 @@ impl App {
         self.res.selected_t = None;
         self.res.grid.sel.clear();
         self.res.grid.picking = false;
+        self.res.grid.scroll_to = None;
+        self.res.grid.keyboard_moved = false;
     }
 
     pub(super) fn submit(&mut self, q: Query) {
@@ -143,9 +145,7 @@ impl App {
             self.query_changed_at = None;
             let q = self.query.trim().to_string();
             if q.is_empty() {
-                self.res.current = None;
-                self.res.hits = Arc::default();
-                self.res.grid.selected = None;
+                self.clear_search();
             } else {
                 // A search the person asked for (Enter, or a pause in typing): worth
                 // remembering. Leaving the field or pressing Escape never gets here.

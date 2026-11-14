@@ -158,8 +158,7 @@ impl App {
             .id_salt("settings-advanced")
             .show(ui, |ui| {
                 let s = self.settings.clone();
-                let max =
-                    std::thread::available_parallelism().map_or(4, std::num::NonZero::get) as u64;
+                let max = crate::config::available_threads().unwrap_or(4) as u64;
                 ui.label("Indexing threads (decoding workers while photos are indexed)");
                 if let Some(n) = committed_slider(
                     ui,

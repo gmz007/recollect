@@ -205,16 +205,20 @@ pub(super) fn show(
     let circle_zone = Rect::from_min_size(rect.min, Vec2::splat(ZONE));
     let star_zone =
         Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - ZONE), Vec2::splat(ZONE));
-    let circle = ui.interact(
-        circle_zone,
-        id.with("select"),
-        if tile.selectable {
-            Sense::click()
-        } else {
-            Sense::hover()
-        },
-    );
-    let star = ui.interact(star_zone, id.with("favorite"), Sense::click());
+    // The circle and the star are not drawn on small tiles, so their zones must not take
+    // clicks there either: the click then goes to the tile itself.
+    let circle_sense = if tile.selectable && !small {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let circle = ui.interact(circle_zone, id.with("select"), circle_sense);
+    let star_sense = if small {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
+    let star = ui.interact(star_zone, id.with("favorite"), star_sense);
     if tile.selectable {
         circle.widget_info(|| {
             let verb = if tile.checked() { "Deselect" } else { "Select" };
@@ -539,5 +543,61 @@ mod tests {
         assert_eq!((tall.min.x, tall.max.x), (0.0, 1.0));
         let square = square_uv(Vec2::new(100.0, 100.0));
         assert_eq!((square.min.x, square.max.x), (0.0, 1.0));
+    }
+
+    /// Clicks the bottom-left corner of a tile of `side` points and returns what it reported.
+    fn corner_click(side: f32) -> Option<TileEvent> {
+        use egui_kittest::Harness;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let dir = tempfile::tempdir().unwrap();
+        let mut thumbs = ThumbCache::new(&egui::Context::default(), dir.path(), 1);
+        let key = ThumbKey {
+            path: "/nowhere/a.jpg".into(),
+            mtime: 1,
+            t_ms: None,
+        };
+        let seen = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&seen);
+        let rect = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::splat(side));
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(300.0, 300.0))
+            .build_ui(move |ui| {
+                let name = || "a.jpg".to_string();
+                let tile = Tile::new(&key, "Item", &name).selectable(TileMark::None, false);
+                let out = show(ui, &mut thumbs, ui.scope_id().with("tile"), rect, &tile);
+                if let Some((event, _)) = out.event {
+                    *sink.borrow_mut() = Some(event);
+                }
+            });
+        style::apply(
+            &h.ctx,
+            crate::config::Theme::default(),
+            crate::config::TextSize::default(),
+        );
+        h.run();
+        let pos = Pos2::new(rect.min.x + 6.0, rect.max.y - 6.0);
+        h.hover_at(pos);
+        h.run_steps(2);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run_steps(2);
+        }
+        *seen.borrow()
+    }
+
+    #[test]
+    fn the_corner_of_a_small_tile_clicks_the_tile_not_the_hidden_star() {
+        assert_eq!(corner_click(60.0), Some(TileEvent::Click));
+    }
+
+    #[test]
+    fn the_corner_of_a_large_tile_still_clicks_the_star() {
+        assert_eq!(corner_click(120.0), Some(TileEvent::Star));
     }
 }

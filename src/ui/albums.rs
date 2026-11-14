@@ -357,13 +357,15 @@ impl App {
     /// Creates the album being named (keeping the dialog open if the name is no good). The
     /// dialog reopens if the library refuses the name or fails to write.
     fn submit_new_album(&mut self) {
-        let Some(na) = self.dialogs.new_album.take() else {
+        let Some(mut na) = self.dialogs.new_album.take() else {
             return;
         };
         let name = na.name.trim().to_string();
         if let Err(e) = self.check_album_name(&name, None) {
             let (text, details) = super::guide::album_problem(Some(&e), &e.to_string());
             self.notify_problem(text, details.unwrap_or_default(), None);
+            // Enter took focus out of the field: ask for it again so typing carries on.
+            na.focused = false;
             self.dialogs.new_album = Some(na);
             return;
         }
@@ -446,6 +448,7 @@ impl App {
                     Err(e) => {
                         let (text, details) = super::guide::album_problem(Some(&e), &e.to_string());
                         self.notify_problem(text, details.unwrap_or_default(), None);
+                        r.focused = false;
                         self.dialogs.rename_album = Some(r);
                     }
                 }
