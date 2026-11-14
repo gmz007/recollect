@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-15
+
+### Fixed
+
+- A photo or video that makes a decoder crash is marked as unreadable instead of stopping the
+  whole run; crafted video timestamps and time bases no longer overflow or stop sampling.
+- Lists that stopped refreshing after a failed background read recover; stale selections can't
+  point past the end of a list; worker threads always shut down.
+- Error messages keep the file they are about; settings and thumbnails are written through
+  unique temporary files.
+
+### Changed
+
+- Stricter lint configuration (clippy pedantic, documented `unsafe`, reasons on every
+  suppression) and internal restructuring of the interface code. Unknown values in the library
+  database are reported instead of being silently reinterpreted.
+- `parking_lot` now uses the same version as the windowing libraries.
+
 ## [0.6.0] - 2026-11-14
 
 ### Added
