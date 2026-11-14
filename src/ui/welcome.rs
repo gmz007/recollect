@@ -118,14 +118,14 @@ impl Welcome {
 }
 
 /// What a screen's buttons asked for.
-#[derive(Default)]
-struct Nav {
-    back: bool,
-    next: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WelcomeAction {
+    Back,
+    Next,
     /// "Not now" on the smart-search screen.
-    skip: bool,
-    finish: bool,
-    skip_setup: bool,
+    SkipSearch,
+    Finish,
+    SkipSetup,
 }
 
 /// What the last screen says will happen after Start.
@@ -181,6 +181,45 @@ fn progress_dots(ui: &mut egui::Ui, step: Step) {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
 }
 
+/// The folders the user picked or typed so far, each with a button to take it back.
+fn welcome_added_folders(ui: &mut egui::Ui, w: &mut Welcome) {
+    if w.added.is_empty() {
+        return;
+    }
+    let pal = Palette::of(ui.ctx());
+    ui.add_space(10.0);
+    ui.label(style::semibold("Folders you added").size(14.0));
+    let mut remove = None;
+    for (i, p) in w.added.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(style::icon_text(icons::ICON_FOLDER, 18.0).color(pal.text_secondary));
+            ui.vertical(|ui| {
+                let name = p.file_name().map_or_else(
+                    || p.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                ui.add(egui::Label::new(name).truncate());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(p.display().to_string())
+                            .small()
+                            .color(pal.text_secondary),
+                    )
+                    .truncate(),
+                );
+            });
+            if style::icon_button(ui, icons::ICON_CLOSE, &format!("Remove {}", p.display()))
+                .clicked()
+            {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        w.added.remove(i);
+    }
+}
+
 impl App {
     /// True while the welcome screens replace the whole window.
     pub(super) fn welcome_active(&self) -> bool {
@@ -193,7 +232,7 @@ impl App {
             return;
         };
         let pal = Palette::of(ui.ctx());
-        let mut nav = Nav::default();
+        let mut action = None;
         let width = (ui.available_width() - 48.0).clamp(300.0, 560.0);
         egui::Panel::bottom("welcome-footer")
             .show_separator_line(false)
@@ -209,7 +248,7 @@ impl App {
                     ui.allocate_ui_with_layout(
                         Vec2::new(width, 40.0),
                         egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| Self::welcome_buttons(ui, &mut w, &mut nav),
+                        |ui| Self::welcome_buttons(ui, &mut w, &mut action),
                     );
                 });
             });
@@ -233,62 +272,66 @@ impl App {
                         });
                     });
             });
-        self.apply_welcome_nav(w, &nav);
+        self.apply_welcome_action(w, action);
     }
 
-    fn apply_welcome_nav(&mut self, mut w: Welcome, nav: &Nav) {
-        if nav.skip_setup {
-            self.change_settings(|s| s.welcome_done = true);
-            return;
-        }
-        if nav.finish {
-            self.finish_welcome(w);
-            return;
-        }
-        if nav.back {
-            w.step = match w.step {
-                Step::Intro | Step::Folders => Step::Intro,
-                Step::Search => Step::Folders,
-                Step::Done => Step::Search,
-            };
-        }
-        if nav.next || nav.skip {
-            w.step = match w.step {
-                Step::Intro => Step::Folders,
-                Step::Folders => Step::Search,
-                Step::Search | Step::Done => Step::Done,
-            };
-            if w.step == Step::Done {
-                w.download = nav.next;
+    fn apply_welcome_action(&mut self, mut w: Welcome, action: Option<WelcomeAction>) {
+        match action {
+            Some(WelcomeAction::SkipSetup) => {
+                self.change_settings(|s| s.welcome_done = true);
+                return;
             }
+            Some(WelcomeAction::Finish) => {
+                self.finish_welcome(w);
+                return;
+            }
+            Some(WelcomeAction::Back) => {
+                w.step = match w.step {
+                    Step::Intro | Step::Folders => Step::Intro,
+                    Step::Search => Step::Folders,
+                    Step::Done => Step::Search,
+                };
+            }
+            Some(action @ (WelcomeAction::Next | WelcomeAction::SkipSearch)) => {
+                w.step = match w.step {
+                    Step::Intro => Step::Folders,
+                    Step::Folders => Step::Search,
+                    Step::Search | Step::Done => Step::Done,
+                };
+                if w.step == Step::Done {
+                    w.download = action == WelcomeAction::Next;
+                }
+            }
+            None => {}
         }
         self.welcome = Some(w);
     }
 
     /// Back, the secondary choice and the primary button of the current screen.
-    fn welcome_buttons(ui: &mut egui::Ui, w: &mut Welcome, nav: &mut Nav) {
+    fn welcome_buttons(ui: &mut egui::Ui, w: &mut Welcome, out: &mut Option<WelcomeAction>) {
         if w.step == Step::Intro {
-            nav.skip_setup = ui.button("I'll set it up myself").clicked();
+            if ui.button("I'll set it up myself").clicked() {
+                *out = Some(WelcomeAction::SkipSetup);
+            }
         } else if ui.button("Back").clicked() {
-            nav.back = true;
+            *out = Some(WelcomeAction::Back);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            match w.step {
-                Step::Intro => nav.next = style::primary_button(ui, "Get started").clicked(),
-                Step::Folders => {
-                    let label = if w.folders().is_empty() {
-                        "Continue without folders"
-                    } else {
-                        "Continue"
-                    };
-                    nav.next = style::primary_button(ui, label).clicked();
+            let (primary, action) = match w.step {
+                Step::Intro => ("Get started", WelcomeAction::Next),
+                Step::Folders if w.folders().is_empty() => {
+                    ("Continue without folders", WelcomeAction::Next)
                 }
-                Step::Search => {
-                    nav.next = style::primary_button(ui, "Download and turn on").clicked();
-                    nav.skip = ui.button("Not now").clicked();
-                }
-                Step::Done => nav.finish = style::primary_button(ui, "Start").clicked(),
+                Step::Folders => ("Continue", WelcomeAction::Next),
+                Step::Search => ("Download and turn on", WelcomeAction::Next),
+                Step::Done => ("Start", WelcomeAction::Finish),
+            };
+            if style::primary_button(ui, primary).clicked() {
+                *out = Some(action);
+            }
+            if w.step == Step::Search && ui.button("Not now").clicked() {
+                *out = Some(WelcomeAction::SkipSearch);
             }
         });
     }
@@ -398,41 +441,22 @@ impl App {
         {
             w.added.push(dir);
         }
-        if !w.added.is_empty() {
-            ui.add_space(10.0);
-            ui.label(style::semibold("Folders you added").size(14.0));
-            let mut remove = None;
-            for (i, p) in w.added.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(style::icon_text(icons::ICON_FOLDER, 18.0).color(pal.text_secondary));
-                    ui.vertical(|ui| {
-                        let name = p.file_name().map_or_else(
-                            || p.display().to_string(),
-                            |n| n.to_string_lossy().into_owned(),
-                        );
-                        ui.add(egui::Label::new(name).truncate());
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(p.display().to_string())
-                                    .small()
-                                    .color(pal.text_secondary),
-                            )
-                            .truncate(),
-                        );
-                    });
-                    if style::icon_button(ui, icons::ICON_CLOSE, &format!("Remove {}", p.display()))
-                        .clicked()
-                    {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                w.added.remove(i);
-            }
-        }
+        welcome_added_folders(ui, w);
         ui.add_space(8.0);
-        // For computers where the folder picker is missing or awkward.
+        self.welcome_typed_path(ui, w);
+        if w.folders().is_empty() {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("You can add folders later from the sidebar.")
+                    .small()
+                    .color(pal.text_secondary),
+            );
+        }
+    }
+
+    /// A text field for computers where the folder picker is missing or awkward.
+    fn welcome_typed_path(&mut self, ui: &mut egui::Ui, w: &mut Welcome) {
+        let pal = Palette::of(ui.ctx());
         egui::CollapsingHeader::new("More options")
             .id_salt("welcome-more-options")
             .show(ui, |ui| {
@@ -474,14 +498,6 @@ impl App {
                     }
                 }
             });
-        if w.folders().is_empty() {
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new("You can add folders later from the sidebar.")
-                    .small()
-                    .color(pal.text_secondary),
-            );
-        }
     }
 
     fn welcome_search(ui: &mut egui::Ui, w: &mut Welcome) {
@@ -538,8 +554,13 @@ impl App {
             self.welcome = Some(w);
             return;
         }
-        self.lib.start_add_folders(w.folders(), w.download);
-        self.snapshot_again = true;
+        let then = if w.download {
+            crate::library::AfterAdd::DownloadModel
+        } else {
+            crate::library::AfterAdd::Nothing
+        };
+        self.lib.start_add_folders(w.folders(), then);
+        self.snapshot_read.mark_again();
         self.change_settings(|s| s.welcome_done = true);
         self.set_view(View::Timeline);
         self.welcome = None;

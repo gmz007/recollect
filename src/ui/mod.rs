@@ -7,6 +7,7 @@
 )]
 
 mod albums;
+mod bg;
 mod chrome;
 mod frame_stats;
 mod guide;
@@ -17,6 +18,7 @@ mod selection;
 mod settings;
 mod sidebar;
 mod style;
+mod texture_loader;
 mod tiles;
 mod timeline;
 mod viewer;
@@ -31,6 +33,7 @@ use crate::media::MediaKind;
 use crate::search::{SearchHit, SearchOptions, SearchSort};
 use crate::store::db::{AlbumInfo, Folder, Stats};
 use crate::thumbs::ThumbKey;
+use bg::BgRead;
 use egui::{RichText, Vec2};
 use frame_stats::FrameStats;
 use preview::Previews;
@@ -39,16 +42,26 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tiles::Tile;
+use style::{GAP, PANEL_MARGIN, TILE};
+use tiles::{Tile, TileMark};
 use timeline::{TimelineState, View};
 use viewer::Viewer;
 use when::DateFilter;
 pub use workers::Query;
 use workers::{SearchWorker, ThumbCache};
 
-const TILE: f32 = 180.0;
-const GAP: f32 = 4.0;
+/// How long typing must pause before a search starts.
 const DEBOUNCE: Duration = Duration::from_millis(250);
+/// How old the cached library facts may get before a non-urgent refresh replaces them.
+const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(500);
+/// How often to look at the library while it is busy.
+const BUSY_POLL: Duration = Duration::from_millis(500);
+/// How old the results may get while files are being indexed before they are refreshed.
+const RESULTS_REFRESH: Duration = Duration::from_secs(3);
+/// How often old thumbnails are pruned.
+const PRUNE_EVERY: Duration = Duration::from_secs(600);
+/// Files asked for by one search.
+const SEARCH_LIMIT: usize = 300;
 
 pub fn run(lib: Arc<Library>) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
@@ -209,6 +222,171 @@ impl Snapshot {
     }
 }
 
+/// The dialogs and sheets that can be open on top of the main window.
+#[derive(Default)]
+struct Dialogs {
+    /// A name being typed for a new album, a rename and a pending deletion.
+    new_album: Option<albums::NewAlbum>,
+    rename_album: Option<albums::RenameAlbum>,
+    delete_album: Option<albums::DeleteAlbum>,
+    add_folder_dialog: Option<sidebar::AddFolder>,
+    stop_folder: Option<sidebar::StopFolder>,
+    help_open: bool,
+    help_topic: help::HelpTopic,
+    settings_open: bool,
+    settings_section: settings::Section,
+    /// A smart-search choice waiting for the user to confirm the switch.
+    model_confirm: Option<&'static str>,
+}
+
+impl Dialogs {
+    /// Whether a question or the help sheet is open (the Settings sheet is not counted: it
+    /// closes after them).
+    fn any_open(&self) -> bool {
+        self.new_album.is_some()
+            || self.rename_album.is_some()
+            || self.delete_album.is_some()
+            || self.add_folder_dialog.is_some()
+            || self.stop_folder.is_some()
+            || self.help_open
+            || self.model_confirm.is_some()
+    }
+
+    /// Esc: closes the questions and the help sheet (a deletion already sent to the library
+    /// stays up until it is answered).
+    fn cancel(&mut self) {
+        self.new_album = None;
+        self.rename_album = None;
+        self.add_folder_dialog = None;
+        self.stop_folder = None;
+        self.help_open = false;
+        self.model_confirm = None;
+        if self.delete_album.as_ref().is_some_and(|d| !d.pending) {
+            self.delete_album = None;
+        }
+    }
+}
+
+/// What a grid of files (the timeline or the search results) remembers about the user's
+/// selection and scrolling.
+#[derive(Default)]
+struct GridState {
+    /// The primary selected item (last clicked); see [`Selection`].
+    selected: Option<usize>,
+    /// All selected items (by file id); `selected` is the primary one.
+    sel: Selection,
+    /// Selection mode: the user picked items with a circle or a modifier key, so plain clicks
+    /// toggle items instead of opening them and the selection bar is shown.
+    picking: bool,
+    /// Whether the keyboard moved the selection since the last frame.
+    keyboard_moved: bool,
+    /// Scroll offset to apply on the next frame so the keyboard selection stays visible.
+    scroll_to: Option<f32>,
+    /// Set when the grid was drawn; read (and cleared) at the start of the next frame.
+    shown: bool,
+}
+
+impl GridState {
+    /// Keeps the selection consistent with its primary item (nothing is selected without a
+    /// primary; the primary is always selected) and follows it into or out of selection mode.
+    fn sync(&mut self, primary: Option<i64>) {
+        self.sel.sync(primary);
+        if self.sel.is_multi() {
+            self.picking = true;
+        } else if self.sel.is_empty() {
+            self.picking = false;
+        }
+    }
+
+    /// Drops the selection and leaves selection mode.
+    fn clear(&mut self) {
+        self.picking = false;
+        self.selected = None;
+        self.sel.clear();
+    }
+}
+
+/// What the user did to the tiles of a grid during one frame.
+#[derive(Default)]
+struct GridEvents {
+    clicked: Option<(usize, tiles::TileEvent, ClickMods)>,
+    right_clicked: Option<usize>,
+    menu: Option<(usize, albums::TileMenu)>,
+    /// The first item of the first visible row.
+    top_item: Option<usize>,
+}
+
+/// What a click on a tile left to do after the selection was updated.
+enum ClickOutcome {
+    Favorite,
+    Selected,
+    Open,
+}
+
+impl GridState {
+    /// Applies a click on item `i` of a list of `len` items (`id_at` gives their file ids) to
+    /// the selection.
+    fn apply_click(
+        &mut self,
+        i: usize,
+        ev: tiles::TileEvent,
+        mods: ClickMods,
+        len: usize,
+        id_at: &dyn Fn(usize) -> i64,
+    ) -> ClickOutcome {
+        match tiles::click_plan(ev, mods, self.picking) {
+            tiles::ClickPlan::Favorite => ClickOutcome::Favorite,
+            tiles::ClickPlan::Select { mods, fresh } => {
+                if fresh {
+                    self.sel.clear();
+                    self.selected = None;
+                }
+                self.selected = self.sel.click(self.selected, len, id_at, i, mods);
+                self.picking = !self.sel.is_empty();
+                ClickOutcome::Selected
+            }
+            tiles::ClickPlan::Open => {
+                self.selected = self
+                    .sel
+                    .click(self.selected, len, id_at, i, ClickMods::default());
+                ClickOutcome::Open
+            }
+        }
+    }
+}
+
+/// The current search and what it found.
+struct ResultsState {
+    grid: GridState,
+    current: Option<Query>,
+    awaiting: Option<u64>,
+    /// Shared with the viewer while it is open.
+    hits: Arc<Vec<SearchHit>>,
+    label: String,
+    error: Option<guide::SearchProblem>,
+    last_search_at: Option<Instant>,
+    /// Selected moment (seconds) for the selected video.
+    selected_t: Option<f64>,
+    /// Columns in the results grid as of the last layout (for up/down navigation).
+    cols: usize,
+}
+
+impl Default for ResultsState {
+    fn default() -> Self {
+        Self {
+            grid: GridState::default(),
+            current: None,
+            awaiting: None,
+            hits: Arc::default(),
+            label: String::new(),
+            error: None,
+            last_search_at: None,
+            selected_t: None,
+            cols: 1,
+        }
+    }
+}
+
 pub struct App {
     lib: Arc<Library>,
     search: SearchWorker,
@@ -229,7 +407,7 @@ pub struct App {
     /// Years that have files in the library, newest first (feeds the "When" selector); read in
     /// the background and refreshed when a job finishes.
     known_years: Vec<i32>,
-    years_rx: Option<crossbeam_channel::Receiver<Vec<i32>>>,
+    years_read: BgRead<Vec<i32>>,
     /// `jobs_finished` as of the last years request.
     years_seen: Option<u64>,
     /// Favorite marks waiting for the writer or for lists to catch up.
@@ -239,41 +417,11 @@ pub struct App {
     /// The albums with counts and covers; read in the background when the library's album
     /// version moves or a job finishes (not part of the periodic snapshot).
     albums: Vec<AlbumInfo>,
-    albums_rx: Option<crossbeam_channel::Receiver<anyhow::Result<Vec<AlbumInfo>>>>,
-    albums_again: bool,
-    /// A name being typed for a new album, a rename and a pending deletion.
-    new_album: Option<albums::NewAlbum>,
-    rename_album: Option<albums::RenameAlbum>,
-    delete_album: Option<albums::DeleteAlbum>,
-    current: Option<Query>,
-    awaiting: Option<u64>,
-    /// Shared with the viewer while it is open.
-    results: Arc<Vec<SearchHit>>,
-    result_label: String,
-    result_error: Option<guide::SearchProblem>,
-    last_search_at: Option<Instant>,
-    selected: Option<usize>,
-    /// All selected results (by file id); `selected` is the primary one.
-    result_sel: Selection,
-    /// Selected moment (seconds) for the selected video.
-    selected_t: Option<f64>,
-    /// Columns in the results grid as of the last layout (for up/down navigation).
-    grid_cols: usize,
-    /// Scroll offset to apply on the next frame so the keyboard selection stays visible.
-    scroll_to: Option<f32>,
-    keyboard_moved: bool,
-    /// Set by `results_grid`; read (and cleared) at the start of the next frame.
-    grid_shown: bool,
+    albums_read: BgRead<anyhow::Result<Vec<AlbumInfo>>>,
+    /// The search and its results; shown instead of the timeline while a search is active.
+    res: ResultsState,
     frame_stats: Option<FrameStats>,
-    /// Selection mode: the user picked items with a circle or a modifier key, so plain clicks
-    /// toggle items instead of opening them and the selection bar is shown.
-    picking: bool,
-    /// Selection mode of the results grid (the timeline has its own, `picking`).
-    result_picking: bool,
-    add_folder_dialog: Option<sidebar::AddFolder>,
-    stop_folder: Option<sidebar::StopFolder>,
-    help_open: bool,
-    help_topic: help::HelpTopic,
+    dialogs: Dialogs,
     /// The first-run welcome flow, while it is still to be shown.
     welcome: Option<welcome::Welcome>,
     /// Search help (examples and recent searches) under the search field.
@@ -282,8 +430,7 @@ pub struct App {
     error_seq_seen: u64,
     notices: Notices,
     snapshot: Snapshot,
-    snapshot_rx: Option<crossbeam_channel::Receiver<Snapshot>>,
-    snapshot_again: bool,
+    snapshot_read: BgRead<Snapshot>,
     ctx: egui::Context,
     status: Status,
     was_busy: bool,
@@ -292,10 +439,6 @@ pub struct App {
     /// A copy of the library's settings, refreshed when they change.
     settings: Settings,
     settings_seen: u64,
-    settings_open: bool,
-    settings_section: settings::Section,
-    /// A smart-search choice waiting for the user to confirm the switch.
-    model_confirm: Option<&'static str>,
     /// Settings > Library lists the files that couldn't be opened.
     failed_open: bool,
     #[cfg(test)]
@@ -312,6 +455,18 @@ impl App {
         prune_thumbnails(&lib);
         let tl = TimelineState::new(Arc::clone(&lib), ctx);
         let previews = Previews::new(ctx, Arc::clone(&lib), 2);
+        let years_read = BgRead::new(ctx, "years", {
+            let lib = Arc::clone(&lib);
+            move || lib.years().ok()
+        });
+        let albums_read = BgRead::new(ctx, "albums", {
+            let lib = Arc::clone(&lib);
+            move || Some(lib.albums())
+        });
+        let snapshot_read = BgRead::new(ctx, "snapshot", {
+            let lib = Arc::clone(&lib);
+            move || Some(Snapshot::fetch(&lib))
+        });
         let mut app = Self {
             lib,
             search,
@@ -326,44 +481,22 @@ impl App {
             date: DateFilter::default(),
             sort: SearchSort::Relevance,
             known_years: Vec::new(),
-            years_rx: None,
+            years_read,
             years_seen: None,
             fav_marks: HashMap::new(),
             fav_version_seen: 0,
             albums_version_seen: 0,
             albums: Vec::new(),
-            albums_rx: None,
-            albums_again: false,
-            new_album: None,
-            rename_album: None,
-            delete_album: None,
-            current: None,
-            awaiting: None,
-            results: Arc::default(),
-            result_label: String::new(),
-            result_error: None,
-            last_search_at: None,
-            selected: None,
-            result_sel: Selection::default(),
-            selected_t: None,
-            grid_cols: 1,
-            scroll_to: None,
-            keyboard_moved: false,
-            grid_shown: false,
+            albums_read,
+            res: ResultsState::default(),
             frame_stats: FrameStats::from_env(),
-            picking: false,
-            result_picking: false,
-            add_folder_dialog: None,
-            stop_folder: None,
-            help_open: false,
-            help_topic: help::HelpTopic::default(),
+            dialogs: Dialogs::default(),
             welcome: None,
             search_help: guide::SearchHelp::default(),
             error_seq_seen: 0,
             notices: Notices::default(),
             snapshot: Snapshot::default(),
-            snapshot_rx: None,
-            snapshot_again: false,
+            snapshot_read,
             ctx: ctx.clone(),
             status: Status::default(),
             was_busy: false,
@@ -371,9 +504,6 @@ impl App {
             last_prune: Instant::now(),
             settings: Settings::default(),
             settings_seen: 0,
-            settings_open: false,
-            settings_section: settings::Section::default(),
-            model_confirm: None,
             failed_open: false,
             #[cfg(test)]
             today_override: None,
@@ -448,43 +578,26 @@ impl App {
 
     /// Requests fresh library facts from a background thread (never blocks the UI).
     fn refresh_snapshot(&mut self, force: bool) {
-        if self.snapshot_rx.is_some() {
-            self.snapshot_again |= force;
+        if self.snapshot_read.is_pending() {
+            if force {
+                self.snapshot_read.mark_again();
+            }
             return;
         }
         if !force
             && self
                 .snapshot
                 .taken
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+                .is_some_and(|t| t.elapsed() < SNAPSHOT_MAX_AGE)
         {
             return;
         }
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let lib = Arc::clone(&self.lib);
-        let ctx = self.ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Snapshot::fetch(&lib));
-            ctx.request_repaint();
-        });
-        self.snapshot_rx = Some(rx);
+        self.snapshot_read.request();
     }
 
     fn poll_snapshot(&mut self) {
-        let Some(rx) = &self.snapshot_rx else {
-            return;
-        };
-        match rx.try_recv() {
-            Ok(s) => {
-                self.snapshot = s;
-                self.snapshot_rx = None;
-            }
-            // The fetching thread died without an answer: ask again next time.
-            Err(crossbeam_channel::TryRecvError::Disconnected) => self.snapshot_rx = None,
-            Err(crossbeam_channel::TryRecvError::Empty) => return,
-        }
-        if std::mem::take(&mut self.snapshot_again) {
-            self.refresh_snapshot(true);
+        if let Some(s) = self.snapshot_read.poll() {
+            self.snapshot = s;
         }
     }
 
@@ -504,24 +617,24 @@ impl App {
 
     fn submit(&mut self, q: Query) {
         let opts = SearchOptions {
-            limit: 300,
+            limit: SEARCH_LIMIT,
             kind: self.kind,
             taken_range: self.date.range(chrono::Datelike::year(&self.today())),
             sort: self.sort,
         };
-        if self.current.is_none() {
+        if self.res.current.is_none() {
             // Starting a search leaves the timeline's selection behind.
-            self.tl.sel.clear();
-            self.tl.selected = None;
-            self.picking = false;
+            self.tl.grid.sel.clear();
+            self.tl.grid.selected = None;
+            self.tl.grid.picking = false;
         }
-        self.awaiting = Some(self.search.submit(q.clone(), opts));
-        self.current = Some(q);
-        self.last_search_at = Some(Instant::now());
+        self.res.awaiting = Some(self.search.submit(q.clone(), opts));
+        self.res.current = Some(q);
+        self.res.last_search_at = Some(Instant::now());
     }
 
     fn rerun(&mut self) {
-        if let Some(q) = self.current.clone() {
+        if let Some(q) = self.res.current.clone() {
             self.submit(q);
         }
     }
@@ -532,43 +645,66 @@ impl App {
         self.previews.begin_frame(ctx);
         self.poll_snapshot();
         self.status = self.lib.status();
-        if let Some(r) = self.search.poll()
-            && Some(r.id) == self.awaiting
-        {
-            self.awaiting = None;
-            self.result_label = r.query.label();
-            let prev = self
-                .selected
-                .and_then(|i| self.results.get(i))
-                .map(|h| h.path.clone());
-            match r.hits {
-                Ok(h) => {
-                    self.results = Arc::new(h);
-                    self.result_error = None;
-                }
-                Err(e) => {
-                    tracing::warn!("search failed: {}", e.detail);
-                    self.result_error = Some(guide::search_problem(e.kind));
-                }
+        self.poll_search();
+        self.poll_debounce(ctx);
+        let (jobs, run_ended) = self.poll_library(ctx);
+        self.report_status_and_notices(ctx, run_ended);
+        self.poll_favorites();
+        self.poll_albums();
+        self.update_timeline();
+        self.poll_years(jobs);
+        self.settle_favorites();
+        self.sync_selection();
+    }
+
+    /// Takes in the answer of the search worker, if it is the one waited for.
+    fn poll_search(&mut self) {
+        let Some(r) = self.search.poll() else {
+            return;
+        };
+        if Some(r.id) != self.res.awaiting {
+            return;
+        }
+        self.res.awaiting = None;
+        self.res.label = r.query.label();
+        let prev = self
+            .res
+            .grid
+            .selected
+            .and_then(|i| self.res.hits.get(i))
+            .map(|h| h.path.clone());
+        match r.hits {
+            Ok(h) => {
+                self.res.hits = Arc::new(h);
+                self.res.error = None;
             }
-            // Keep the selection on the same file across refreshes.
-            self.selected = prev.and_then(|p| self.results.iter().position(|h| h.path == p));
-            self.selected = self
-                .result_sel
-                .rebase(self.results.iter().map(|h| h.file_id), self.selected);
-            if self.selected.is_none() {
-                self.selected_t = None;
+            Err(e) => {
+                tracing::warn!("search failed: {}", e.detail);
+                self.res.error = Some(guide::search_problem(e.kind));
             }
         }
+        // Keep the selection on the same file across refreshes.
+        self.res.grid.selected = prev.and_then(|p| self.res.hits.iter().position(|h| h.path == p));
+        self.res.grid.selected = self.res.grid.sel.rebase(
+            self.res.hits.iter().map(|h| h.file_id),
+            self.res.grid.selected,
+        );
+        if self.res.grid.selected.is_none() {
+            self.res.selected_t = None;
+        }
+    }
+
+    /// Starts the search once typing has paused.
+    fn poll_debounce(&mut self, ctx: &egui::Context) {
         if let Some(t) = self.query_changed_at
             && t.elapsed() >= DEBOUNCE
         {
             self.query_changed_at = None;
             let q = self.query.trim().to_string();
             if q.is_empty() {
-                self.current = None;
-                self.results = Arc::default();
-                self.selected = None;
+                self.res.current = None;
+                self.res.hits = Arc::default();
+                self.res.grid.selected = None;
             } else {
                 // A search the person asked for (Enter, or a pause in typing): worth
                 // remembering. Leaving the field or pressing Escape never gets here.
@@ -579,15 +715,21 @@ impl App {
         if let Some(t) = self.query_changed_at {
             ctx.request_repaint_after(DEBOUNCE.saturating_sub(t.elapsed()));
         }
+    }
+
+    /// Follows what the library is doing: live refreshes while it works, and a full reload
+    /// when a job or run ends. Returns the number of jobs finished so far and whether a run ended just now.
+    fn poll_library(&mut self, ctx: &egui::Context) -> (u64, bool) {
         let busy = self.lib.is_busy();
         if busy {
             self.refresh_snapshot(false);
-            ctx.request_repaint_after(Duration::from_millis(500));
+            ctx.request_repaint_after(BUSY_POLL);
             // Results grow while indexing: refresh them every few seconds.
             if matches!(self.status.activity, Activity::Indexing(_))
                 && self
+                    .res
                     .last_search_at
-                    .is_some_and(|t| t.elapsed() > Duration::from_secs(3))
+                    .is_some_and(|t| t.elapsed() > RESULTS_REFRESH)
             {
                 self.rerun();
             }
@@ -601,22 +743,21 @@ impl App {
             self.refresh_albums();
             self.rerun();
         }
-        if self.last_prune.elapsed() > Duration::from_secs(600) {
+        if self.last_prune.elapsed() > PRUNE_EVERY {
             self.last_prune = Instant::now();
             prune_thumbnails(&self.lib);
         }
+        (jobs, run_ended)
+    }
+
+    /// Toasts for what the status says, and expiry of old ones.
+    fn report_status_and_notices(&mut self, ctx: &egui::Context, run_ended: bool) {
         self.report_status(run_ended);
         let now = Instant::now();
         self.notices.expire(now);
         if let Some(left) = self.notices.next_expiry(now) {
             ctx.request_repaint_after(left);
         }
-        self.poll_favorites();
-        self.poll_albums();
-        self.update_timeline();
-        self.poll_years(jobs);
-        self.settle_favorites();
-        self.sync_selection();
     }
 
     /// Turns what the library reports into toasts: each failure once (also when the same
@@ -643,47 +784,22 @@ impl App {
     /// Keeps each grid's selection consistent with its primary item (nothing is selected
     /// without a primary; the primary is always selected).
     fn sync_selection(&mut self) {
-        let primary = self.tl.selected.and_then(|i| self.tl.items.get(i));
-        self.tl.sel.sync(primary.map(|it| it.file_id));
-        let primary = self.selected.and_then(|i| self.results.get(i));
-        self.result_sel.sync(primary.map(|h| h.file_id));
-        if self.tl.sel.is_multi() {
-            self.picking = true;
-        } else if self.tl.sel.is_empty() {
-            self.picking = false;
-        }
-        if self.result_sel.is_multi() {
-            self.result_picking = true;
-        } else if self.result_sel.is_empty() {
-            self.result_picking = false;
-        }
+        let primary = self.tl.grid.selected.and_then(|i| self.tl.items.get(i));
+        self.tl.grid.sync(primary.map(|it| it.file_id));
+        let primary = self.res.grid.selected.and_then(|i| self.res.hits.get(i));
+        self.res.grid.sync(primary.map(|h| h.file_id));
     }
 
     /// Reads the list of years for the "When" selector in the background, again whenever a job
     /// has finished (files were added, removed or dated).
     fn poll_years(&mut self, jobs: u64) {
-        if let Some(rx) = &self.years_rx {
-            match rx.try_recv() {
-                Ok(years) => {
-                    self.known_years = years;
-                    self.years_rx = None;
-                }
-                // The lookup failed (its thread sent nothing): allow the next change to retry.
-                Err(crossbeam_channel::TryRecvError::Disconnected) => self.years_rx = None,
-                Err(crossbeam_channel::TryRecvError::Empty) => {}
-            }
+        if let Some(years) = self.years_read.poll() {
+            self.known_years = years;
         }
-        if self.years_rx.is_none() && self.years_seen != Some(jobs) {
+        // A failed lookup leaves nothing pending: the next change retries.
+        if !self.years_read.is_pending() && self.years_seen != Some(jobs) {
             self.years_seen = Some(jobs);
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            let (lib, ctx) = (Arc::clone(&self.lib), self.ctx.clone());
-            std::thread::spawn(move || {
-                if let Ok(years) = lib.years() {
-                    let _ = tx.send(years);
-                    ctx.request_repaint();
-                }
-            });
-            self.years_rx = Some(rx);
+            self.years_read.request();
         }
     }
 
@@ -691,27 +807,25 @@ impl App {
         if !self.selection_bar_ui(ui) {
             self.results_header(ui);
         }
-        if self.results.is_empty() {
+        if self.res.hits.is_empty() {
             self.results_empty_state(ui);
             return;
         }
-        let avail = ui.available_width() - 12.0; // leave room for the scroll bar
+        let avail = ui.available_width() - style::SCROLLBAR_ALLOWANCE;
         let cols = (((avail + GAP) / (TILE + GAP)).floor() as usize).max(1);
         let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(TILE * 0.6);
-        let rows = self.results.len().div_ceil(cols);
-        self.grid_cols = cols;
-        self.grid_shown = true;
+        let rows = self.res.hits.len().div_ceil(cols);
+        self.res.cols = cols;
+        self.res.grid.shown = true;
         let stride = tile + GAP;
         let mut area = egui::ScrollArea::vertical()
             .id_salt("results")
             .auto_shrink([false, false]);
-        if let Some(y) = self.scroll_to.take() {
+        if let Some(y) = self.res.grid.scroll_to.take() {
             area = area.vertical_scroll_offset(y);
         }
-        let results = Arc::clone(&self.results);
-        let mut event: Option<(usize, tiles::TileEvent, ClickMods)> = None;
-        let mut menu = None;
-        let mut right_clicked = None;
+        let results = Arc::clone(&self.res.hits);
+        let mut events = GridEvents::default();
         let out = area.show_viewport(ui, |ui, viewport| {
             let (origin, _) = ui
                 .allocate_exact_size(Vec2::new(avail, rows as f32 * stride), egui::Sense::hover());
@@ -719,98 +833,108 @@ impl App {
             let last = ((viewport.max.y / stride).ceil() as usize + 1).min(rows);
             for row in first..last {
                 for i in row * cols..((row + 1) * cols).min(results.len()) {
-                    let hit = &results[i];
                     let x = origin.min.x + (i - row * cols) as f32 * (tile + GAP);
                     let rect = egui::Rect::from_min_size(
                         egui::pos2(x, origin.min.y + row as f32 * stride),
                         Vec2::splat(tile),
                     );
-                    let key = Self::thumb_key(hit, None);
-                    let name = hit
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let in_sel = self.result_sel.contains(hit.file_id);
-                    let checked = in_sel && (self.result_picking || self.result_sel.is_multi());
-                    let t = Tile {
-                        key: &key,
-                        name: &name,
-                        role: "Result",
-                        badge: (hit.kind == MediaKind::Video)
-                            .then(|| format!("at {}", fmt_time(hit.t_start.unwrap_or(0.0)))),
-                        favorite: marked(&self.fav_marks, hit.file_id, hit.favorite),
-                        checked,
-                        focused: self.selected == Some(i) && !checked,
-                        picking: self.result_picking,
-                        selectable: true,
-                        selected: in_sel || self.selected == Some(i),
-                        tip: &|| name.clone(),
-                    };
-                    let id = ui.make_persistent_id(("result", i));
-                    let o = tiles::show(ui, &mut self.thumbs, id, rect, &t);
-                    if let Some((ev, mods)) = o.event {
-                        event = Some((i, ev, mods));
-                    }
-                    if o.resp.secondary_clicked() {
-                        right_clicked = Some(i);
-                    }
-                    o.resp.context_menu(|ui| {
-                        menu = albums::tile_menu(ui, &self.albums, false).map(|m| (i, m));
-                    });
+                    self.result_tile(ui, &results[i], i, rect, &mut events);
                 }
             }
         });
-        if let Some(i) = self.selected.filter(|_| self.keyboard_moved) {
+        if let Some(i) = self
+            .res
+            .grid
+            .selected
+            .filter(|_| self.res.grid.keyboard_moved)
+        {
             // Rows are virtualized, so the selected tile may not exist on screen yet:
             // scroll by row arithmetic instead of asking the tile to scroll itself.
-            self.keyboard_moved = false;
+            self.res.grid.keyboard_moved = false;
             let view = out.inner_rect.height();
             let offset = out.state.clamped_offset().y;
-            self.scroll_to = scroll_offset_for_row(i / cols, stride, tile, view, offset);
-            if self.scroll_to.is_some() {
+            self.res.grid.scroll_to = scroll_offset_for_row(i / cols, stride, tile, view, offset);
+            if self.res.grid.scroll_to.is_some() {
                 ui.ctx().request_repaint();
             }
         }
-        if let Some(i) = right_clicked {
+        if let Some(i) = events.right_clicked {
             self.select_for_menu(i);
         }
-        if let Some((i, m)) = menu {
+        if let Some((i, m)) = events.menu {
             self.apply_tile_menu(i, m);
         }
-        if let Some((i, ev, mods)) = event {
-            match tiles::click_plan(ev, mods, self.result_picking) {
-                tiles::ClickPlan::Favorite => {
-                    let h = &results[i];
-                    let fav = !marked(&self.fav_marks, h.file_id, h.favorite);
-                    self.set_favorite(h.file_id, fav);
-                }
-                tiles::ClickPlan::Select { mods, fresh } => {
-                    if fresh {
-                        self.result_sel.clear();
-                        self.selected = None;
-                    }
-                    self.selected = self.result_sel.click(
-                        self.selected,
-                        results.len(),
-                        &|k| results[k].file_id,
-                        i,
-                        mods,
-                    );
-                    self.result_picking = !self.result_sel.is_empty();
-                    self.selected_t = self.selected.and_then(|p| results[p].t_start);
-                }
-                tiles::ClickPlan::Open => {
-                    self.selected = self.result_sel.click(
-                        self.selected,
-                        results.len(),
-                        &|k| results[k].file_id,
-                        i,
-                        ClickMods::default(),
-                    );
-                    self.selected_t = results[i].t_start;
-                    self.open_viewer_results(i);
-                }
+        if let Some((i, ev, mods)) = events.clicked {
+            self.click_result(&results, i, ev, mods);
+        }
+    }
+
+    /// Draws one search result and records what the user did to it.
+    fn result_tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        hit: &SearchHit,
+        i: usize,
+        rect: egui::Rect,
+        events: &mut GridEvents,
+    ) {
+        let key = Self::thumb_key(hit, None);
+        let name = || {
+            hit.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let grid = &self.res.grid;
+        let mark = TileMark::of(
+            grid.sel.contains(hit.file_id),
+            grid.selected == Some(i),
+            grid.picking || grid.sel.is_multi(),
+        );
+        let t = Tile::new(&key, "Result", &name)
+            .badge(
+                (hit.kind == MediaKind::Video)
+                    .then(|| format!("at {}", fmt_time(hit.t_start.unwrap_or(0.0)))),
+            )
+            .favorite(marked(&self.fav_marks, hit.file_id, hit.favorite))
+            .selectable(mark, grid.picking);
+        let id = ui.make_persistent_id(("result", i));
+        let o = tiles::show(ui, &mut self.thumbs, id, rect, &t);
+        if let Some((ev, mods)) = o.event {
+            events.clicked = Some((i, ev, mods));
+        }
+        if o.resp.secondary_clicked() {
+            events.right_clicked = Some(i);
+        }
+        o.resp.context_menu(|ui| {
+            events.menu = albums::tile_menu(ui, &self.albums, false).map(|m| (i, m));
+        });
+    }
+
+    /// What a click on result `i` does: favorite it, change the selection or open it.
+    fn click_result(
+        &mut self,
+        results: &[SearchHit],
+        i: usize,
+        ev: tiles::TileEvent,
+        mods: ClickMods,
+    ) {
+        let outcome = self
+            .res
+            .grid
+            .apply_click(i, ev, mods, results.len(), &|k| results[k].file_id);
+        match outcome {
+            ClickOutcome::Favorite => {
+                let h = &results[i];
+                let fav = !marked(&self.fav_marks, h.file_id, h.favorite);
+                self.set_favorite(h.file_id, fav);
+            }
+            ClickOutcome::Selected => {
+                self.res.selected_t = self.res.grid.selected.and_then(|p| results[p].t_start);
+            }
+            ClickOutcome::Open => {
+                self.res.selected_t = results[i].t_start;
+                self.open_viewer_results(i);
             }
         }
     }
@@ -955,36 +1079,36 @@ impl App {
     /// Settings window and the album dialogs are closed and no text field has keyboard focus, so typing in the search
     /// box is never hijacked. Keys with other modifiers are ignored.
     fn handle_navigation_keys(&mut self, ctx: &egui::Context, grid_was_shown: bool) {
-        if !grid_was_shown || self.results.is_empty() || self.keys_blocked(ctx) {
+        if !grid_was_shown || self.res.hits.is_empty() || self.keys_blocked(ctx) {
             return;
         }
         let input = selection::read_nav_keys(ctx);
-        let results = Arc::clone(&self.results);
-        let (len, cols) = (results.len(), self.grid_cols);
-        let before = self.selected;
+        let results = Arc::clone(&self.res.hits);
+        let (len, cols) = (results.len(), self.res.cols);
+        let before = self.res.grid.selected;
         let next = selection::apply_keys(
             &input,
-            &mut self.result_sel,
+            &mut self.res.grid.sel,
             before,
             len,
             &|i| results[i].file_id,
             |sel, n| step(sel, len, cols, n),
         );
         if next != before {
-            self.selected = next;
-            self.selected_t = next.and_then(|i| results[i].t_start);
-            self.keyboard_moved = true;
+            self.res.grid.selected = next;
+            self.res.selected_t = next.and_then(|i| results[i].t_start);
+            self.res.grid.keyboard_moved = true;
         }
         if take_plain_key(ctx, egui::Key::F) {
-            if self.result_sel.is_multi() {
+            if self.res.grid.sel.is_multi() {
                 self.toggle_favorite_of_selection();
-            } else if let Some(h) = self.selected.and_then(|i| self.results.get(i)) {
+            } else if let Some(h) = self.res.grid.selected.and_then(|i| self.res.hits.get(i)) {
                 let (id, fav) = (h.file_id, !marked(&self.fav_marks, h.file_id, h.favorite));
                 self.set_favorite(id, fav);
             }
         }
         if input.enter
-            && let Some(i) = self.selected.filter(|&i| i < self.results.len())
+            && let Some(i) = self.res.grid.selected.filter(|&i| i < self.res.hits.len())
         {
             self.open_viewer_results(i);
         }
@@ -994,18 +1118,10 @@ impl App {
     /// already are.
     pub(super) fn toggle_favorite_of_selection(&mut self) {
         let ids = self.selected_file_ids();
-        let all_fav = if self.searching() {
-            self.results
-                .iter()
-                .filter(|h| self.result_sel.contains(h.file_id))
-                .all(|h| marked(&self.fav_marks, h.file_id, h.favorite))
-        } else {
-            self.tl
-                .items
-                .iter()
-                .filter(|it| self.tl.sel.contains(it.file_id))
-                .all(|it| marked(&self.fav_marks, it.file_id, it.favorite))
-        };
+        let all_fav = self
+            .listed()
+            .filter(|&(id, _)| self.grid().sel.contains(id))
+            .all(|(id, fav)| marked(&self.fav_marks, id, fav));
         self.set_favorites(&ids, !all_fav);
     }
 
@@ -1055,7 +1171,7 @@ impl App {
                 }
             }
         }
-        if let Some(hits) = Arc::get_mut(&mut self.results) {
+        if let Some(hits) = Arc::get_mut(&mut self.res.hits) {
             for h in hits.iter_mut() {
                 if let Some(m) = marks.get(&h.file_id) {
                     h.favorite = m.value;
@@ -1136,12 +1252,12 @@ impl App {
     fn settle_favorites(&mut self) {
         if !self.fav_marks.values().any(|m| m.confirmed)
             || self.tl.awaiting.is_some()
-            || self.awaiting.is_some()
+            || self.res.awaiting.is_some()
         {
             return;
         }
         self.patch_lists();
-        if Arc::strong_count(&self.tl.items) == 1 && Arc::strong_count(&self.results) == 1 {
+        if Arc::strong_count(&self.tl.items) == 1 && Arc::strong_count(&self.res.hits) == 1 {
             self.fav_marks.retain(|_, m| !m.confirmed);
         }
     }
@@ -1171,20 +1287,20 @@ impl App {
             ui.set_style(ctx.global_style());
         }
         self.update_state(&ctx);
-        if (self.dialog_open() || self.settings_open)
+        if (self.dialog_open() || self.dialogs.settings_open)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             // The topmost thing closes first: a question, otherwise the Settings sheet.
             if self.dialog_open() {
-                self.cancel_album_dialogs();
+                self.dialogs.cancel();
             } else {
-                self.settings_open = false;
+                self.dialogs.settings_open = false;
             }
         }
         if self.viewer_open() {
             // The viewer fills the window: no sidebar, top bar or grid while it is open.
-            self.grid_shown = false;
-            self.tl.shown = false;
+            self.res.grid.shown = false;
+            self.tl.grid.shown = false;
             self.show_viewer(ui);
             self.album_dialogs(&ctx);
             self.toasts(&ctx);
@@ -1195,8 +1311,8 @@ impl App {
             self.toasts(&ctx);
             return;
         }
-        let grid_was_shown = std::mem::take(&mut self.grid_shown);
-        let timeline_was_shown = std::mem::take(&mut self.tl.shown);
+        let grid_was_shown = std::mem::take(&mut self.res.grid.shown);
+        let timeline_was_shown = std::mem::take(&mut self.tl.grid.shown);
         self.handle_navigation_keys(&ctx, grid_was_shown);
         self.handle_timeline_keys(&ctx, timeline_was_shown);
         let pal = style::Palette::of(&ctx);
@@ -1213,7 +1329,7 @@ impl App {
             .frame(
                 egui::Frame::new()
                     .fill(pal.background)
-                    .inner_margin(egui::Margin::symmetric(16, 12)),
+                    .inner_margin(egui::Margin::symmetric(PANEL_MARGIN.0, PANEL_MARGIN.1)),
             )
             .show(ui, |ui| {
                 if has_folders {
@@ -1227,11 +1343,11 @@ impl App {
                     self.no_folders_state(ui);
                 }
             });
-        if self.settings_open {
+        if self.dialogs.settings_open {
             self.settings_sheet(&ctx);
         }
         self.model_confirm_dialog(&ctx);
-        if self.help_open {
+        if self.dialogs.help_open {
             self.help_sheet(&ctx);
         }
         self.search_help_dropdown(&ctx);

@@ -55,6 +55,15 @@ pub struct VectorIndex {
     taken: Vec<i64>,
 }
 
+impl std::fmt::Debug for VectorIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VectorIndex")
+            .field("dim", &self.dim)
+            .field("items", &self.item_ids.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Min-heap entry so the heap root is the weakest of the current top-k.
 #[derive(PartialEq, Eq)]
 struct Entry(i32, usize);
@@ -241,7 +250,7 @@ impl VectorIndex {
             .kinds
             .iter()
             .map(|k| {
-                u8::try_from(k.as_i64())
+                u8::try_from(i64::from(*k))
                     .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "media kind"))
             })
             .collect::<std::io::Result<Vec<u8>>>()?;
@@ -352,10 +361,11 @@ impl VectorIndex {
             item_ids,
             file_ids,
             taken,
+            // An unknown kind means the cache is not one of ours: rebuild from the database.
             kinds: kinds
                 .into_iter()
-                .map(|k| MediaKind::from_i64(i64::from(k)))
-                .collect(),
+                .map(|k| MediaKind::try_from(i64::from(k)).ok())
+                .collect::<Option<_>>()?,
         })
     }
 

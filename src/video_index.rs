@@ -1,7 +1,7 @@
 //! Video indexing: sample frames, embed them, merge similar consecutive frames into
 //! segments, store one vector per segment.
 
-use crate::indexer::{Progress, contain, fit_for, write_items};
+use crate::indexer::{Embedded, Progress, contain, fit_for, write_items};
 use crate::library::Library;
 use crate::media::image as img;
 use crate::media::video::{self, SamplerConfig, VideoInfo};
@@ -186,7 +186,14 @@ fn finalize_ready(
                     height: Some(info.height),
                     duration: Some(info.duration),
                 };
-                write_items(lib, &mut vec![(f.clone(), meta, items)])?;
+                write_items(
+                    lib,
+                    vec![Embedded {
+                        file: f.clone(),
+                        meta,
+                        items,
+                    }],
+                )?;
                 prog.file_done(lib, f, 0, false); // frames were counted as they were embedded
             }
             // Cancelled: the file stays pending for the next run.
@@ -207,10 +214,20 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// Online segment merger: a frame joins the current segment when it is similar enough to the
 /// segment's *first* frame (so slow drift still splits) and the segment is not too long. Each
 /// segment stores the normalized mean of its frames. Only the open segment is kept in memory.
+struct OpenSegment {
+    start: f64,
+    /// Time of the latest frame in the segment.
+    last: f64,
+    /// Embedding of the first frame (what later frames are compared with).
+    first: Vec<f32>,
+    /// Sum of the embeddings of all frames so far.
+    sum: Vec<f32>,
+}
+
 pub(crate) struct Merger {
     tau: f32,
     interval: f64,
-    open: Option<(f64, f64, Vec<f32>, Vec<f32>)>, // (start, last frame t, first emb, sum)
+    open: Option<OpenSegment>,
     done: Vec<NewItem>,
 }
 
@@ -225,20 +242,31 @@ impl Merger {
     }
 
     pub fn push(&mut self, t: f64, emb: Vec<f32>) {
-        if let Some((t0, last, first, sum)) = &mut self.open
-            && t - *t0 <= MAX_SEGMENT_S
-            && dot(&emb, first) >= self.tau
+        if let Some(seg) = &mut self.open
+            && t - seg.start <= MAX_SEGMENT_S
+            && dot(&emb, &seg.first) >= self.tau
         {
-            sum.iter_mut().zip(&emb).for_each(|(s, x)| *s += x);
-            *last = t;
+            seg.sum.iter_mut().zip(&emb).for_each(|(s, x)| *s += x);
+            seg.last = t;
             return;
         }
         self.close(Some(t));
-        self.open = Some((t, t, emb.clone(), emb));
+        self.open = Some(OpenSegment {
+            start: t,
+            last: t,
+            first: emb.clone(),
+            sum: emb,
+        });
     }
 
     fn close(&mut self, next_start: Option<f64>) {
-        if let Some((t0, last, _, mut sum)) = self.open.take() {
+        if let Some(OpenSegment {
+            start: t0,
+            last,
+            mut sum,
+            ..
+        }) = self.open.take()
+        {
             normalize(&mut sum);
             let end = next_start.unwrap_or(last + self.interval).max(last).max(t0);
             self.done.push(NewItem {

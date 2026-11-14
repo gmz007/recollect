@@ -6,14 +6,13 @@
 //! taking back). The sidebar's album list is fetched in the background whenever the library's
 //! album version moves or a job finishes.
 
-use super::App;
 use super::style::{self, Palette, icons};
 use super::timeline::{View, thousands};
+use super::{App, GridState};
 use crate::library::{AlbumOp, AlbumWrite};
 use crate::store::db::{self, AlbumInfo};
 use egui::RichText;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 /// Longest album name shown whole in the sidebar and menus; longer ones end in an ellipsis
 /// (the full name is in the hover text).
@@ -68,7 +67,7 @@ impl NewAlbum {
 pub(super) struct DeleteAlbum {
     pub id: i64,
     /// Queued: the buttons are disabled until the outcome arrives.
-    pending: bool,
+    pub(super) pending: bool,
 }
 
 impl DeleteAlbum {
@@ -297,14 +296,14 @@ impl App {
     /// being made).
     pub(super) fn albums_section(&mut self, ui: &mut egui::Ui) {
         // While a window with items waiting for a name is open, a second one would drop them.
-        let free = self.new_album.is_none();
+        let free = self.dialogs.new_album.is_none();
         let r = super::sidebar::section_header(
             ui,
             "Albums",
             &mut [(icons::ICON_ADD, "New album…", free)],
         );
         if r[0].clicked() {
-            self.new_album = Some(NewAlbum::default());
+            self.dialogs.new_album = Some(NewAlbum::default());
         }
         let mut open = None;
         if self.albums.is_empty() {
@@ -335,16 +334,20 @@ impl App {
         if let Some(id) = open {
             self.set_view(View::Album(id));
         }
-        let inline = self.new_album.as_ref().is_some_and(|n| n.add.is_empty());
+        let inline = self
+            .dialogs
+            .new_album
+            .as_ref()
+            .is_some_and(|n| n.add.is_empty());
         if inline {
-            let mut na = self.new_album.take().unwrap_or_default();
+            let mut na = self.dialogs.new_album.take().unwrap_or_default();
             let enter = name_field(ui, &mut na.name, &mut na.focused, ui.available_width());
             let (mut create, mut cancel) = (enter, false);
             ui.horizontal(|ui| {
                 create |= ui.button("Create").clicked();
                 cancel |= ui.button("Cancel").clicked();
             });
-            self.new_album = (!cancel).then_some(na);
+            self.dialogs.new_album = (!cancel).then_some(na);
             if create {
                 self.submit_new_album();
             }
@@ -354,14 +357,14 @@ impl App {
     /// Creates the album being named (keeping the dialog open if the name is no good). The
     /// dialog reopens if the library refuses the name or fails to write.
     fn submit_new_album(&mut self) {
-        let Some(na) = self.new_album.take() else {
+        let Some(na) = self.dialogs.new_album.take() else {
             return;
         };
         let name = na.name.trim().to_string();
         if let Err(e) = self.check_album_name(&name, None) {
             let (text, details) = super::guide::album_problem(Some(&e), &e.to_string());
             self.notify_problem(text, details.unwrap_or_default(), None);
-            self.new_album = Some(na);
+            self.dialogs.new_album = Some(na);
             return;
         }
         self.lib.queue_album(AlbumOp::Create { name, add: na.add });
@@ -384,48 +387,33 @@ impl App {
             AlbumChoice::Existing(album) => {
                 self.lib.queue_album(AlbumOp::Add { album, files });
             }
-            AlbumChoice::New => self.new_album = Some(NewAlbum::with_items(files)),
+            AlbumChoice::New => self.dialogs.new_album = Some(NewAlbum::with_items(files)),
         }
     }
 
     pub(super) fn dialog_open(&self) -> bool {
-        self.new_album.is_some()
-            || self.rename_album.is_some()
-            || self.delete_album.is_some()
-            || self.add_folder_dialog.is_some()
-            || self.stop_folder.is_some()
-            || self.help_open
-            || self.model_confirm.is_some()
+        self.dialogs.any_open()
     }
 
     /// True when keys must not reach the views: a text field has focus, Settings is open or an
     /// album dialog is.
     pub(super) fn keys_blocked(&self, ctx: &egui::Context) -> bool {
-        self.settings_open
+        self.dialogs.settings_open
             || self.dialog_open()
             || ctx.text_edit_focused()
             || self.search_help.inside
     }
 
-    /// Esc: closes the album dialogs (a deletion already sent to the library stays up until
-    /// it is answered).
-    pub(super) fn cancel_album_dialogs(&mut self) {
-        self.new_album = None;
-        self.rename_album = None;
-        self.add_folder_dialog = None;
-        self.stop_folder = None;
-        self.help_open = false;
-        self.model_confirm = None;
-        if self.delete_album.as_ref().is_some_and(|d| !d.pending) {
-            self.delete_album = None;
-        }
-    }
-
     /// The windows for naming a new album (when it starts with items), renaming and confirming
     /// a deletion. The inline field for an empty new album lives in the sidebar.
     pub(super) fn album_dialogs(&mut self, ctx: &egui::Context) {
-        if self.new_album.as_ref().is_some_and(|n| !n.add.is_empty()) {
-            let mut na = self.new_album.take().unwrap_or_default();
+        if self
+            .dialogs
+            .new_album
+            .as_ref()
+            .is_some_and(|n| !n.add.is_empty())
+        {
+            let mut na = self.dialogs.new_album.take().unwrap_or_default();
             let (mut create, mut cancel) = (false, false);
             modal_window(ctx, "New album", |ui| {
                 ui.label(format!("{} will be added to it.", items_text(na.add.len())));
@@ -435,12 +423,12 @@ impl App {
                     cancel |= ui.button("Cancel").clicked();
                 });
             });
-            self.new_album = (!cancel).then_some(na);
+            self.dialogs.new_album = (!cancel).then_some(na);
             if create {
                 self.submit_new_album();
             }
         }
-        if let Some(mut r) = self.rename_album.take() {
+        if let Some(mut r) = self.dialogs.rename_album.take() {
             let (mut apply, mut cancel) = (false, false);
             modal_window(ctx, "Rename album", |ui| {
                 apply |= name_field(ui, &mut r.name, &mut r.focused, 240.0);
@@ -458,14 +446,14 @@ impl App {
                     Err(e) => {
                         let (text, details) = super::guide::album_problem(Some(&e), &e.to_string());
                         self.notify_problem(text, details.unwrap_or_default(), None);
-                        self.rename_album = Some(r);
+                        self.dialogs.rename_album = Some(r);
                     }
                 }
             } else if !cancel {
-                self.rename_album = Some(r);
+                self.dialogs.rename_album = Some(r);
             }
         }
-        if let Some(d) = &self.delete_album {
+        if let Some(d) = &self.dialogs.delete_album {
             let (id, pending) = (d.id, d.pending);
             let name = short_name(self.album_name(id).unwrap_or("this album"), 60);
             let (mut delete, mut cancel) = (false, false);
@@ -484,12 +472,12 @@ impl App {
             });
             if delete {
                 // The view changes once the library has deleted it.
-                if let Some(d) = &mut self.delete_album {
+                if let Some(d) = &mut self.dialogs.delete_album {
                     d.pending = true;
                 }
                 self.lib.queue_album(AlbumOp::Delete { id });
             } else if cancel {
-                self.delete_album = None;
+                self.dialogs.delete_album = None;
             }
         }
     }
@@ -498,14 +486,14 @@ impl App {
     pub(super) fn album_actions(&mut self, ui: &mut egui::Ui, id: i64) {
         let name = self.album_name(id).unwrap_or("Album").to_string();
         if style::icon_label_button(ui, icons::ICON_EDIT, "Rename…").clicked() {
-            self.rename_album = Some(RenameAlbum {
+            self.dialogs.rename_album = Some(RenameAlbum {
                 id,
                 name,
                 focused: false,
             });
         }
         if style::icon_label_button(ui, icons::ICON_DELETE, "Delete album…").clicked() {
-            self.delete_album = Some(DeleteAlbum::new(id));
+            self.dialogs.delete_album = Some(DeleteAlbum::new(id));
         }
     }
 
@@ -523,20 +511,10 @@ impl App {
                 self.tl.requested = None;
             }
         }
-        if let Some(rx) = &self.albums_rx {
-            match rx.try_recv() {
-                Ok(list) => {
-                    self.albums_rx = None;
-                    match list {
-                        Ok(list) => self.albums = list,
-                        Err(e) => tracing::warn!("could not read the albums: {e:#}"),
-                    }
-                    if std::mem::take(&mut self.albums_again) {
-                        self.refresh_albums();
-                    }
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => self.albums_rx = None,
-                Err(crossbeam_channel::TryRecvError::Empty) => {}
+        if let Some(list) = self.albums_read.poll() {
+            match list {
+                Ok(list) => self.albums = list,
+                Err(e) => tracing::warn!("could not read the albums: {e:#}"),
             }
         }
     }
@@ -544,18 +522,7 @@ impl App {
     /// Reads the albums (with counts and covers) on a background thread; asking while a read
     /// is under way schedules one more afterwards.
     pub(super) fn refresh_albums(&mut self) {
-        if self.albums_rx.is_some() {
-            self.albums_again = true;
-            return;
-        }
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let lib = Arc::clone(&self.lib);
-        let ctx = self.ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(lib.albums());
-            ctx.request_repaint();
-        });
-        self.albums_rx = Some(rx);
+        self.albums_read.request();
     }
 
     fn report_album_write(&mut self, w: &AlbumWrite) {
@@ -564,18 +531,19 @@ impl App {
             self.notify_problem(text, details.unwrap_or_default(), None);
             // Nothing was changed: put back what the user was working on.
             match &w.op {
-                AlbumOp::Create { name, add } if self.new_album.is_none() => {
-                    self.new_album = Some(NewAlbum::with_name_and_items(name.clone(), add.clone()));
+                AlbumOp::Create { name, add } if self.dialogs.new_album.is_none() => {
+                    self.dialogs.new_album =
+                        Some(NewAlbum::with_name_and_items(name.clone(), add.clone()));
                 }
-                AlbumOp::Rename { id, name } if self.rename_album.is_none() => {
-                    self.rename_album = Some(RenameAlbum {
+                AlbumOp::Rename { id, name } if self.dialogs.rename_album.is_none() => {
+                    self.dialogs.rename_album = Some(RenameAlbum {
                         id: *id,
                         name: name.clone(),
                         focused: false,
                     });
                 }
                 AlbumOp::Delete { id } => {
-                    if let Some(d) = self.delete_album.as_mut().filter(|d| d.id == *id) {
+                    if let Some(d) = self.dialogs.delete_album.as_mut().filter(|d| d.id == *id) {
                         d.pending = false;
                     }
                 }
@@ -618,14 +586,19 @@ impl App {
                     let multi = gone.len() > 1;
                     self.tl.remove_files(&gone);
                     if multi {
-                        self.tl.selected = None;
-                        self.tl.sel.clear();
+                        self.tl.grid.selected = None;
+                        self.tl.grid.sel.clear();
                     }
                 }
             }
             AlbumOp::Delete { id } => {
-                if self.delete_album.as_ref().is_some_and(|d| d.id == *id) {
-                    self.delete_album = None;
+                if self
+                    .dialogs
+                    .delete_album
+                    .as_ref()
+                    .is_some_and(|d| d.id == *id)
+                {
+                    self.dialogs.delete_album = None;
                 }
                 self.refresh_albums();
                 if self.tl.view == View::Album(*id) {
@@ -640,40 +613,22 @@ impl App {
     /// more than once).
     pub(super) fn selected_file_ids(&self) -> Vec<i64> {
         let mut seen = HashSet::new();
-        if self.searching() {
-            self.results
-                .iter()
-                .map(|h| h.file_id)
-                .filter(|id| self.result_sel.contains(*id) && seen.insert(*id))
-                .collect()
-        } else {
-            self.tl
-                .items
-                .iter()
-                .map(|it| it.file_id)
-                .filter(|id| self.tl.sel.contains(*id) && seen.insert(*id))
-                .collect()
-        }
+        let sel = &self.grid().sel;
+        self.listed()
+            .map(|(id, _)| id)
+            .filter(|id| sel.contains(*id) && seen.insert(*id))
+            .collect()
     }
 
     /// The selection bar, in place of the view header while items are selected. Returns whether
     /// it was shown.
     pub(super) fn selection_bar_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        let searching = self.searching();
-        let count = if searching {
-            self.result_sel.len()
-        } else {
-            self.tl.sel.len()
-        };
-        let picking = if searching {
-            self.result_picking
-        } else {
-            self.picking
-        };
+        let grid = self.grid();
+        let (count, picking) = (grid.sel.len(), grid.picking);
         if count == 0 || !picking {
             return false;
         }
-        let in_album = !searching && matches!(self.tl.view, View::Album(_));
+        let in_album = !self.searching() && matches!(self.tl.view, View::Album(_));
         if let Some(a) = selection_bar(ui, count, &self.albums, in_album) {
             self.bulk_action(a);
         }
@@ -698,22 +653,13 @@ impl App {
     /// A right-click on tile `i` of the shown grid: a tile outside the selection becomes the
     /// selection; one inside it leaves the selection alone (the menu then acts on all of it).
     pub(super) fn select_for_menu(&mut self, i: usize) {
-        if self.searching() {
-            let Some(id) = self.results.get(i).map(|h| h.file_id) else {
-                return;
-            };
-            if !self.result_sel.contains(id) {
-                self.result_sel.only(id);
-                self.selected = Some(i);
-            }
-        } else {
-            let Some(id) = self.tl.items.get(i).map(|it| it.file_id) else {
-                return;
-            };
-            if !self.tl.sel.contains(id) {
-                self.tl.sel.only(id);
-                self.tl.selected = Some(i);
-            }
+        let Some(id) = self.file_id_at(i) else {
+            return;
+        };
+        let grid = self.active_grid();
+        if !grid.sel.contains(id) {
+            grid.sel.only(id);
+            grid.selected = Some(i);
         }
     }
 
@@ -728,12 +674,45 @@ impl App {
 
     /// Drops the selection of whatever grid is shown.
     pub(super) fn clear_selection(&mut self) {
-        self.picking = false;
-        self.result_picking = false;
-        self.selected = None;
-        self.result_sel.clear();
-        self.tl.selected = None;
-        self.tl.sel.clear();
+        self.tl.grid.clear();
+        self.res.grid.clear();
+    }
+
+    /// The grid that is shown: the search results while a search is active, else the timeline.
+    pub(super) fn active_grid(&mut self) -> &mut GridState {
+        if self.searching() {
+            &mut self.res.grid
+        } else {
+            &mut self.tl.grid
+        }
+    }
+
+    /// [`Self::active_grid`] for reading.
+    pub(super) fn grid(&self) -> &GridState {
+        if self.searching() {
+            &self.res.grid
+        } else {
+            &self.tl.grid
+        }
+    }
+
+    /// Every file of the shown list, in order, with its favorite flag as loaded (a search can
+    /// list a file more than once).
+    pub(super) fn listed(&self) -> Box<dyn Iterator<Item = (i64, bool)> + '_> {
+        if self.searching() {
+            Box::new(self.res.hits.iter().map(|h| (h.file_id, h.favorite)))
+        } else {
+            Box::new(self.tl.items.iter().map(|it| (it.file_id, it.favorite)))
+        }
+    }
+
+    /// The file id of item `i` of the shown list.
+    pub(super) fn file_id_at(&self, i: usize) -> Option<i64> {
+        if self.searching() {
+            self.res.hits.get(i).map(|h| h.file_id)
+        } else {
+            self.tl.items.get(i).map(|it| it.file_id)
+        }
     }
 }
 

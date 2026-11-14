@@ -3,7 +3,7 @@
 use crate::library::Library;
 use crate::media::MediaKind;
 use crate::store::db::ItemInfo;
-use crate::store::index::ScanFilter;
+use crate::store::index::{Candidate, ScanFilter};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -84,15 +84,16 @@ fn first_scan_size(limit: usize) -> usize {
     limit.saturating_mul(4).saturating_add(100).min(5000)
 }
 
-pub(crate) fn by_vector(
+/// Scans the index for candidates, widening the scan while long videos crowd out other files.
+/// Returns the candidates and the size of the scan that produced them.
+fn scan_candidates(
     lib: &Library,
     q: &[f32],
     opts: &SearchOptions,
     exclude_file: Option<i64>,
-) -> Result<Vec<SearchHit>> {
+) -> Result<(Vec<Candidate>, usize)> {
     // Over-fetch: videos contribute many items per file, so the best `limit` files need more than
     // `limit` candidates. If long videos crowd the candidates (few distinct files), widen the scan.
-    let t0 = std::time::Instant::now();
     let mut k = first_scan_size(opts.limit);
     let cands = loop {
         let cands = {
@@ -116,14 +117,15 @@ pub(crate) fn by_vector(
         }
         k = k.saturating_mul(4).min(MAX_CANDIDATES);
     };
-    let t_scan = t0.elapsed();
-    if cands.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Keep only what can appear: the best few items of the first `limit` + margin files.
+    Ok((cands, k))
+}
+
+/// Keeps only the candidates that can appear: the best few items of the first `limit` + margin
+/// files.
+fn limit_candidates(cands: Vec<Candidate>, limit: usize) -> Vec<Candidate> {
     let mut per_file: HashMap<i64, usize> = HashMap::new();
-    let max_files = opts.limit.saturating_add(FILE_MARGIN);
-    let cands: Vec<_> = cands
+    let max_files = limit.saturating_add(FILE_MARGIN);
+    cands
         .into_iter()
         .filter(|c| {
             let n = per_file.len();
@@ -134,7 +136,22 @@ pub(crate) fn by_vector(
             *e += 1;
             *e <= MAX_MOMENTS + 1
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn by_vector(
+    lib: &Library,
+    q: &[f32],
+    opts: &SearchOptions,
+    exclude_file: Option<i64>,
+) -> Result<Vec<SearchHit>> {
+    let t0 = std::time::Instant::now();
+    let (cands, k) = scan_candidates(lib, q, opts, exclude_file)?;
+    let t_scan = t0.elapsed();
+    if cands.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cands = limit_candidates(cands, opts.limit);
     // Ranking uses the i8 scores directly: re-scoring with the stored f32 vectors made no
     // measurable difference in retrieval quality but cost ~30 ms of random disk reads per
     // query at 1.2 M vectors.

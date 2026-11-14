@@ -5,25 +5,28 @@
 //! inside the scroll viewport are drawn, found by binary search, so very large libraries stay
 //! smooth.
 
-use super::selection::{self, ClickMods, Selection};
-use super::style;
-use super::tiles::{self, ClickPlan, Tile, TileEvent};
-use super::{App, Nav, albums, fmt_time, marked, take_plain_key};
+use super::bg::LatestWorker;
+use super::selection::{self, ClickMods};
+use super::style::{self, GAP, TILE};
+use super::tiles::{self, Tile, TileEvent, TileMark};
+use super::workers::ThumbCache;
+use super::{
+    App, ClickOutcome, FavMark, GridEvents, GridState, Nav, albums, fmt_time, marked,
+    take_plain_key,
+};
 use crate::Library;
 use crate::library::Activity;
 use crate::media::MediaKind;
 use crate::media::metadata::DateSource;
-use crate::store::db::{TimelineFilter, TimelineItem, TimelineOrder};
+use crate::store::db::{AlbumInfo, TimelineFilter, TimelineItem, TimelineOrder};
 use crate::thumbs::ThumbKey;
 use chrono::{Datelike, NaiveDate};
-use crossbeam_channel::{Receiver, Sender, unbounded};
 use egui::{RichText, Sense, Vec2};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const GAP: f32 = 4.0;
 const HEADER_H: f32 = 40.0;
 const SECTION_GAP: f32 = 12.0;
 /// Reload interval while a scan or indexing run keeps adding files.
@@ -455,67 +458,37 @@ pub(super) struct Loaded {
 }
 
 /// Loads timelines on a dedicated thread; only the newest pending request is executed.
-pub(super) struct TimelineWorker {
-    tx: Sender<(u64, TimelineFilter)>,
-    rx: Receiver<Loaded>,
-    next_id: u64,
-    /// Lets tests deliver a load result of their own making.
-    #[cfg(test)]
-    inject: Sender<Loaded>,
-}
+pub(super) struct TimelineWorker(LatestWorker<TimelineFilter, Loaded>);
 
 impl TimelineWorker {
     fn new(lib: Arc<Library>, repaint: impl Fn() + Send + 'static) -> Self {
-        let (tx, req_rx) = unbounded::<(u64, TimelineFilter)>();
-        let (resp_tx, rx) = unbounded();
-        #[cfg(test)]
-        let inject = resp_tx.clone();
-        std::thread::Builder::new()
-            .name("recollect-timeline".into())
-            .spawn(move || {
-                while let Ok(mut req) = req_rx.recv() {
-                    while let Ok(newer) = req_rx.try_recv() {
-                        req = newer;
-                    }
-                    let (id, filter) = req;
-                    let run = std::panic::AssertUnwindSafe(|| lib.timeline(&filter));
-                    let items = match std::panic::catch_unwind(run) {
-                        Ok(r) => r.map_err(|e| format!("{e:#}")),
-                        Err(_) => Err("loading the library failed unexpectedly".to_string()),
-                    };
-                    if resp_tx.send(Loaded { id, filter, items }).is_err() {
-                        break;
-                    }
-                    repaint();
-                }
-            })
-            .expect("spawning timeline thread");
-        Self {
-            tx,
-            rx,
-            next_id: 0,
-            #[cfg(test)]
-            inject,
-        }
+        Self(LatestWorker::spawn(
+            "timeline",
+            repaint,
+            move |filter| lib.timeline(filter),
+            |id, filter, outcome| Loaded {
+                id,
+                filter,
+                items: match outcome {
+                    Some(r) => r.map_err(|e| format!("{e:#}")),
+                    None => Err("loading the library failed unexpectedly".to_string()),
+                },
+            },
+        ))
     }
 
+    /// Lets tests deliver a load result of their own making.
     #[cfg(test)]
     pub(super) fn inject(&self, loaded: Loaded) {
-        let _ = self.inject.send(loaded);
+        self.0.inject(loaded);
     }
 
     fn submit(&mut self, filter: TimelineFilter) -> u64 {
-        self.next_id += 1;
-        let _ = self.tx.send((self.next_id, filter));
-        self.next_id
+        self.0.submit(filter)
     }
 
     fn poll(&self) -> Option<Loaded> {
-        let mut last = None;
-        while let Ok(r) = self.rx.try_recv() {
-            last = Some(r);
-        }
-        last
+        self.0.poll()
     }
 }
 
@@ -550,18 +523,12 @@ pub(super) struct TimelineState {
     /// The filter whose last load failed, and when; it is not retried right away.
     failed: Option<(TimelineFilter, Instant)>,
     pub(super) error: Option<String>,
-    /// The primary selected item (last clicked); see [`Selection`].
-    pub(super) selected: Option<usize>,
-    pub(super) sel: Selection,
+    pub(super) grid: GridState,
     expanded: HashSet<i32>,
     top_year: Option<i32>,
     top_item: Option<usize>,
-    scroll_to: Option<f32>,
     /// Item to scroll to once the layout is known; `true` aligns to its section header.
     pending: Option<(usize, bool)>,
-    pub(super) keyboard_moved: bool,
-    /// Set when the grid was drawn; read (and cleared) at the start of the next frame.
-    pub(super) shown: bool,
 }
 
 impl TimelineState {
@@ -572,7 +539,7 @@ impl TimelineState {
             view: View::Timeline,
             group: Group::Month,
             newest_first: true,
-            tile_size: 180.0,
+            tile_size: TILE,
             items: Arc::new(Vec::new()),
             generation: 0,
             groups: Vec::new(),
@@ -590,15 +557,11 @@ impl TimelineState {
             requested_at: Instant::now(),
             failed: None,
             error: None,
-            selected: None,
-            sel: Selection::default(),
+            grid: GridState::default(),
             expanded: HashSet::new(),
             top_year: None,
             top_item: None,
-            scroll_to: None,
             pending: None,
-            keyboard_moved: false,
-            shown: false,
         }
     }
 
@@ -654,6 +617,7 @@ impl TimelineState {
             return; // a reload that found nothing new: keep layout and scroll position
         }
         let prev = self
+            .grid
             .selected
             .and_then(|i| self.items.get(i))
             .map(|it| it.file_id);
@@ -661,11 +625,12 @@ impl TimelineState {
         self.generation += 1;
         self.dates = date_index(&self.items);
         self.recount();
-        self.selected = prev.and_then(|f| self.items.iter().position(|it| it.file_id == f));
+        self.grid.selected = prev.and_then(|f| self.items.iter().position(|it| it.file_id == f));
         // Several selected items stay selected by file id; those that are gone are dropped.
-        self.selected = self
+        self.grid.selected = self
+            .grid
             .sel
-            .rebase(self.items.iter().map(|it| it.file_id), self.selected);
+            .rebase(self.items.iter().map(|it| it.file_id), self.grid.selected);
         self.top_item = None;
         self.loaded = true;
     }
@@ -693,35 +658,35 @@ impl TimelineState {
                 .filter(|it| ids.contains(&it.file_id))
                 .count()
         };
-        let primary = self.selected.filter(|&s| s < self.items.len());
+        let primary = self.grid.selected.filter(|&s| s < self.items.len());
         let primary_removed = primary.is_some_and(|s| ids.contains(&self.items[s].file_id));
         let sel_shift = primary.map(|s| before(&self.items, s));
         let top = self.top_item.filter(|&t| t > 0);
         let top_shift = top.map(|t| before(&self.items, t));
         Arc::make_mut(&mut self.items).retain(|it| !ids.contains(&it.file_id));
-        self.sel.remove_all(ids);
+        self.grid.sel.remove_all(ids);
         self.generation += 1;
         self.dates = date_index(&self.items);
         self.recount();
         let len = self.items.len();
-        self.selected = match (primary, sel_shift) {
+        self.grid.selected = match (primary, sel_shift) {
             (Some(s), Some(shift)) => {
                 let moved = s - shift;
                 if !primary_removed {
                     Some(moved)
-                } else if !self.sel.is_empty() {
+                } else if !self.grid.sel.is_empty() {
                     // Others stay selected: the first of them takes over.
                     self.items
                         .iter()
-                        .position(|it| self.sel.contains(it.file_id))
+                        .position(|it| self.grid.sel.contains(it.file_id))
                 } else {
                     (len > 0).then(|| moved.min(len - 1))
                 }
             }
             _ => None,
         };
-        if self.selected.is_some() {
-            self.keyboard_moved = true;
+        if self.grid.selected.is_some() {
+            self.grid.keyboard_moved = true;
         }
         if let Some((t, shift)) = top.zip(top_shift)
             && len > 0
@@ -806,7 +771,7 @@ impl TimelineState {
         } else {
             layout.reveal_span(item).0
         };
-        self.scroll_to = Some(top);
+        self.grid.scroll_to = Some(top);
     }
 }
 
@@ -825,32 +790,121 @@ fn file_name(item: &TimelineItem) -> String {
 // App wiring
 // ---------------------------------------------------------------------------------------------
 
+/// What the visible rows of the timeline need to be drawn.
+struct RowsView<'a> {
+    tl: &'a TimelineState,
+    layout: &'a Layout,
+    marks: &'a HashMap<i64, FavMark>,
+    albums: &'a [AlbumInfo],
+    width: f32,
+}
+
+impl RowsView<'_> {
+    /// Draws the rows that intersect `viewport` and reports what the user did to them.
+    fn show(&self, ui: &mut egui::Ui, thumbs: &mut ThumbCache, viewport: egui::Rect) -> GridEvents {
+        let (tl, layout) = (self.tl, self.layout);
+        let mut events = GridEvents::default();
+        let (origin, _) =
+            ui.allocate_exact_size(Vec2::new(self.width, layout.total), Sense::hover());
+        let range = layout.visible(viewport.min.y, viewport.max.y);
+        if let Some(&row) = layout.rows.get(range.start) {
+            events.top_item = Some(row.first_item());
+        }
+        for r in range {
+            let top = origin.min.y + layout.tops[r];
+            match layout.rows[r] {
+                Row::Header { group, .. } => {
+                    let g = tl.groups[group];
+                    let text = header_text(tl.group, g.key, g.end - g.start);
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(origin.min.x, top),
+                        Vec2::new(self.width, HEADER_H),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(text).text_style(style::section()));
+                    });
+                }
+                Row::Tiles { start, end } => {
+                    for i in start..end {
+                        let x = origin.min.x + (i - start) as f32 * (layout.tile + GAP);
+                        let rect =
+                            egui::Rect::from_min_size(egui::pos2(x, top), Vec2::splat(layout.tile));
+                        self.tile(ui, thumbs, i, rect, &mut events);
+                    }
+                }
+            }
+        }
+        events
+    }
+
+    fn tile(
+        &self,
+        ui: &mut egui::Ui,
+        thumbs: &mut ThumbCache,
+        i: usize,
+        rect: egui::Rect,
+        events: &mut GridEvents,
+    ) {
+        let tl = self.tl;
+        let picking = tl.grid.picking;
+        let item = &tl.items[i];
+        let key = thumb_key(item);
+        let name = || file_name(item);
+        let tip = || format!("{}\n{}", file_name(item), fmt_taken(item));
+        let mark = TileMark::of(
+            tl.grid.sel.contains(item.file_id),
+            tl.grid.selected == Some(i),
+            picking || tl.grid.sel.is_multi(),
+        );
+        let tile = Tile::new(&key, "Item", &name)
+            .tip(&tip)
+            .badge((item.kind == MediaKind::Video).then(|| fmt_time(item.duration.unwrap_or(0.0))))
+            .favorite(marked(self.marks, item.file_id, item.favorite))
+            .selectable(mark, picking);
+        let id = ui.make_persistent_id(("tile", i));
+        let o = tiles::show(ui, thumbs, id, rect, &tile);
+        if let Some((ev, mods)) = o.event {
+            events.clicked = Some((i, ev, mods));
+        }
+        if o.resp.secondary_clicked() {
+            events.right_clicked = Some(i);
+        }
+        let in_album = matches!(tl.view, View::Album(_));
+        o.resp.context_menu(|ui| {
+            if let Some(m) = albums::tile_menu(ui, self.albums, in_album) {
+                events.menu = Some((i, m));
+            }
+        });
+    }
+}
+
 impl App {
     /// True while the central area shows search results instead of the current view.
     pub(super) fn searching(&self) -> bool {
-        self.current.is_some() || !self.query.trim().is_empty()
+        self.res.current.is_some() || !self.query.trim().is_empty()
     }
 
     /// Leaves search results (back to the current view).
     pub(super) fn clear_search(&mut self) {
         self.query.clear();
         self.query_changed_at = None;
-        self.current = None;
-        self.awaiting = None;
-        self.results = Arc::default();
-        self.result_label.clear();
-        self.result_error = None;
-        self.selected = None;
-        self.selected_t = None;
-        self.result_sel.clear();
-        self.result_picking = false;
+        self.res.current = None;
+        self.res.awaiting = None;
+        self.res.hits = Arc::default();
+        self.res.label.clear();
+        self.res.error = None;
+        self.res.grid.selected = None;
+        self.res.selected_t = None;
+        self.res.grid.sel.clear();
+        self.res.grid.picking = false;
     }
 
     pub(super) fn set_view(&mut self, view: View) {
         if self.tl.view != view {
             self.tl.view = view;
-            self.tl.selected = None;
-            self.tl.scroll_to = Some(0.0);
+            self.tl.grid.selected = None;
+            self.tl.grid.scroll_to = Some(0.0);
             self.tl.pending = None;
         }
         if self.searching() {
@@ -876,8 +930,8 @@ impl App {
                         // A reload of what is shown: stay on the same photo.
                         self.tl.anchor_scroll(&items);
                     } else {
-                        self.tl.scroll_to = Some(0.0);
-                        self.tl.selected = None;
+                        self.tl.grid.scroll_to = Some(0.0);
+                        self.tl.grid.selected = None;
                         self.tl.pending = None;
                     }
                     self.tl.loaded_filter = Some(r.filter);
@@ -888,9 +942,9 @@ impl App {
                 Err(e) => {
                     if !same_view {
                         // Never keep showing another view's items.
-                        self.tl.selected = None;
+                        self.tl.grid.selected = None;
                         self.tl.pending = None;
-                        self.tl.scroll_to = Some(0.0);
+                        self.tl.grid.scroll_to = Some(0.0);
                         self.tl.loaded_filter = Some(r.filter.clone());
                         self.tl.set_items(Vec::new());
                     }
@@ -1036,159 +1090,98 @@ impl App {
             }
             return;
         }
-        self.tl.shown = true;
-        let width = ui.available_width() - 12.0; // leave room for the scroll bar
+        self.tl.grid.shown = true;
+        let width = ui.available_width() - style::SCROLLBAR_ALLOWANCE;
         self.tl.ensure_layout(width);
         self.tl.resolve_pending();
         let mut area = egui::ScrollArea::vertical()
             .id_salt("timeline")
             .auto_shrink([false, false]);
-        if let Some(y) = self.tl.scroll_to.take() {
+        if let Some(y) = self.tl.grid.scroll_to.take() {
             area = area.vertical_scroll_offset(y);
         }
-        let tl = &self.tl;
-        let marks = &self.fav_marks;
-        let thumbs = &mut self.thumbs;
-        let Some(layout) = tl.layout.as_ref() else {
+        let Some(layout) = self.tl.layout.as_ref() else {
             return;
         };
-        let albums = &self.albums;
-        let in_album = matches!(tl.view, View::Album(_));
-        let picking = self.picking;
-        let mut clicked: Option<(usize, TileEvent, ClickMods)> = None;
-        let mut right_clicked = None;
-        let mut menu = None;
-        let mut top_item = None;
+        let rows = RowsView {
+            tl: &self.tl,
+            layout,
+            marks: &self.fav_marks,
+            albums: &self.albums,
+            width,
+        };
+        let mut events = GridEvents::default();
         let out = area.show_viewport(ui, |ui, viewport| {
-            let (origin, _) =
-                ui.allocate_exact_size(Vec2::new(width, layout.total), Sense::hover());
-            let range = layout.visible(viewport.min.y, viewport.max.y);
-            if let Some(&row) = layout.rows.get(range.start) {
-                top_item = Some(row.first_item());
-            }
-            for r in range {
-                let top = origin.min.y + layout.tops[r];
-                match layout.rows[r] {
-                    Row::Header { group, .. } => {
-                        let g = tl.groups[group];
-                        let text = header_text(tl.group, g.key, g.end - g.start);
-                        let rect = egui::Rect::from_min_size(
-                            egui::pos2(origin.min.x, top),
-                            Vec2::new(width, HEADER_H),
-                        );
-                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(text).text_style(style::section()));
-                        });
-                    }
-                    Row::Tiles { start, end } => {
-                        for i in start..end {
-                            let x = origin.min.x + (i - start) as f32 * (layout.tile + GAP);
-                            let rect = egui::Rect::from_min_size(
-                                egui::pos2(x, top),
-                                Vec2::splat(layout.tile),
-                            );
-                            let item = &tl.items[i];
-                            let in_sel = tl.sel.contains(item.file_id);
-                            let checked = in_sel && (picking || tl.sel.is_multi());
-                            let name = file_name(item);
-                            let tile = Tile {
-                                key: &thumb_key(item),
-                                name: &name,
-                                role: "Item",
-                                badge: (item.kind == MediaKind::Video)
-                                    .then(|| fmt_time(item.duration.unwrap_or(0.0))),
-                                favorite: marked(marks, item.file_id, item.favorite),
-                                checked,
-                                focused: tl.selected == Some(i) && !checked,
-                                picking,
-                                selectable: true,
-                                selected: in_sel || tl.selected == Some(i),
-                                tip: &|| format!("{name}\n{}", fmt_taken(item)),
-                            };
-                            let id = ui.make_persistent_id(("tile", i));
-                            let o = tiles::show(ui, thumbs, id, rect, &tile);
-                            if let Some((ev, mods)) = o.event {
-                                clicked = Some((i, ev, mods));
-                            }
-                            if o.resp.secondary_clicked() {
-                                right_clicked = Some(i);
-                            }
-                            o.resp.context_menu(|ui| {
-                                if let Some(m) = albums::tile_menu(ui, albums, in_album) {
-                                    menu = Some((i, m));
-                                }
-                            });
-                        }
-                    }
-                }
-            }
+            events = rows.show(ui, &mut self.thumbs, viewport);
         });
-        self.tl.top_item = top_item;
-        self.tl.top_year = top_item
+        self.tl.top_item = events.top_item;
+        self.tl.top_year = events
+            .top_item
             .and_then(|i| self.tl.items.get(i))
             .map(|it| date_of(it.taken_at).year());
-        if let Some(i) = self.tl.selected.filter(|_| self.tl.keyboard_moved) {
-            self.tl.keyboard_moved = false;
-            if let Some(layout) = &self.tl.layout {
-                let (top, h) = layout.reveal_span(i);
-                self.tl.scroll_to = reveal(
-                    top,
-                    h,
-                    out.inner_rect.height(),
-                    out.state.clamped_offset().y,
-                );
-                if self.tl.scroll_to.is_some() {
-                    ui.ctx().request_repaint();
-                }
-            }
-        }
+        self.follow_keyboard_selection(ui, &out);
         if self.tl.pending.is_some() {
             ui.ctx().request_repaint();
         }
-        if let Some((i, ev, mods)) = clicked {
-            let items = Arc::clone(&self.tl.items);
-            match tiles::click_plan(ev, mods, self.picking) {
-                ClickPlan::Favorite => {
-                    let it = &items[i];
-                    let fav = !marked(&self.fav_marks, it.file_id, it.favorite);
-                    self.set_favorite(it.file_id, fav);
-                }
-                ClickPlan::Select { mods, fresh } => {
-                    if fresh {
-                        self.tl.sel.clear();
-                        self.tl.selected = None;
-                    }
-                    self.tl.selected = self.tl.sel.click(
-                        self.tl.selected,
-                        items.len(),
-                        &|k| items[k].file_id,
-                        i,
-                        mods,
-                    );
-                    self.picking = !self.tl.sel.is_empty();
-                }
-                ClickPlan::Open => {
-                    self.tl.selected = self.tl.sel.click(
-                        self.tl.selected,
-                        items.len(),
-                        &|k| items[k].file_id,
-                        i,
-                        ClickMods::default(),
-                    );
-                    self.open_timeline_item(i);
-                }
-            }
+        if let Some((i, ev, mods)) = events.clicked {
+            self.click_timeline_item(i, ev, mods);
         }
-        if let Some(i) = right_clicked {
+        if let Some(i) = events.right_clicked {
             self.select_for_menu(i);
         }
-        if let Some((i, m)) = menu {
+        if let Some((i, m)) = events.menu {
             self.apply_tile_menu(i, m);
         }
         // Applying a scroll offset needs one more frame to take effect.
-        if self.tl.scroll_to.is_some() {
+        if self.tl.grid.scroll_to.is_some() {
             ui.ctx().request_repaint();
+        }
+    }
+
+    /// Scrolls so that an item the keyboard moved to is in view.
+    fn follow_keyboard_selection<R>(
+        &mut self,
+        ui: &egui::Ui,
+        out: &egui::scroll_area::ScrollAreaOutput<R>,
+    ) {
+        let Some(i) = self
+            .tl
+            .grid
+            .selected
+            .filter(|_| self.tl.grid.keyboard_moved)
+        else {
+            return;
+        };
+        self.tl.grid.keyboard_moved = false;
+        if let Some(layout) = &self.tl.layout {
+            let (top, h) = layout.reveal_span(i);
+            self.tl.grid.scroll_to = reveal(
+                top,
+                h,
+                out.inner_rect.height(),
+                out.state.clamped_offset().y,
+            );
+            if self.tl.grid.scroll_to.is_some() {
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+
+    /// What a click on tile `i` does: favorite it, change the selection or open it.
+    fn click_timeline_item(&mut self, i: usize, ev: TileEvent, mods: ClickMods) {
+        let items = Arc::clone(&self.tl.items);
+        match self
+            .tl
+            .grid
+            .apply_click(i, ev, mods, items.len(), &|k| items[k].file_id)
+        {
+            ClickOutcome::Favorite => {
+                let it = &items[i];
+                let fav = !marked(&self.fav_marks, it.file_id, it.favorite);
+                self.set_favorite(it.file_id, fav);
+            }
+            ClickOutcome::Selected => {}
+            ClickOutcome::Open => self.open_timeline_item(i),
         }
     }
 
@@ -1228,21 +1221,16 @@ impl App {
                         ui.vertical(|ui| {
                             let (rect, _) =
                                 ui.allocate_exact_size(Vec2::splat(SIZE), Sense::hover());
-                            let name = file_name(item);
-                            let tile = Tile {
-                                key: &thumb_key(item),
-                                name: &name,
-                                role: "On this day",
-                                badge: (item.kind == MediaKind::Video)
-                                    .then(|| fmt_time(item.duration.unwrap_or(0.0))),
-                                favorite: marked(&self.fav_marks, item.file_id, item.favorite),
-                                checked: false,
-                                focused: false,
-                                picking: false,
-                                selectable: false,
-                                selected: false,
-                                tip: &|| format!("{name}\n{}", fmt_taken(item)),
-                            };
+                            let key = thumb_key(item);
+                            let name = || file_name(item);
+                            let tip = || format!("{}\n{}", file_name(item), fmt_taken(item));
+                            let tile = Tile::new(&key, "On this day", &name)
+                                .tip(&tip)
+                                .badge(
+                                    (item.kind == MediaKind::Video)
+                                        .then(|| fmt_time(item.duration.unwrap_or(0.0))),
+                                )
+                                .favorite(marked(&self.fav_marks, item.file_id, item.favorite));
                             let id = ui.make_persistent_id(("otd", pos));
                             let o = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
                             match o.event {
@@ -1283,9 +1271,9 @@ impl App {
             return;
         }
         if take_plain_key(ctx, egui::Key::F) {
-            if self.tl.sel.is_multi() {
+            if self.tl.grid.sel.is_multi() {
                 self.toggle_favorite_of_selection();
-            } else if let Some(item) = self.tl.selected.and_then(|i| self.tl.items.get(i)) {
+            } else if let Some(item) = self.tl.grid.selected.and_then(|i| self.tl.items.get(i)) {
                 let id = item.file_id;
                 let fav = !marked(&self.fav_marks, id, item.favorite);
                 self.set_favorite(id, fav);
@@ -1295,10 +1283,10 @@ impl App {
         let items = Arc::clone(&self.tl.items);
         let len = items.len();
         let layout = self.tl.layout.as_ref();
-        let before = self.tl.selected;
+        let before = self.tl.grid.selected;
         let next = selection::apply_keys(
             &input,
-            &mut self.tl.sel,
+            &mut self.tl.grid.sel,
             before,
             len,
             &|i| items[i].file_id,
@@ -1311,11 +1299,11 @@ impl App {
             },
         );
         if next != before {
-            self.tl.selected = next;
-            self.tl.keyboard_moved = true;
+            self.tl.grid.selected = next;
+            self.tl.grid.keyboard_moved = true;
         }
         if input.enter
-            && let Some(i) = self.tl.selected
+            && let Some(i) = self.tl.grid.selected
         {
             self.open_timeline_item(i);
         }
@@ -1763,20 +1751,20 @@ mod tests {
         let mut tl_items: Vec<TimelineItem> = (0..5).map(|i| item(1_000_000 + i)).collect();
         let mut st = state_for_test();
         st.set_items(std::mem::take(&mut tl_items));
-        st.selected = Some(3);
+        st.grid.selected = Some(3);
         st.remove_file(1_000_001);
         assert_eq!(st.items.len(), 4);
-        assert_eq!(st.selected, Some(2), "still the same file");
+        assert_eq!(st.grid.selected, Some(2), "still the same file");
         assert_eq!(st.items[2].file_id, 1_000_003);
         // Removing the selected one selects the next; at the end, the new last one.
         st.remove_file(1_000_003);
-        assert_eq!(st.selected, Some(2));
+        assert_eq!(st.grid.selected, Some(2));
         assert_eq!(st.items[2].file_id, 1_000_004);
         st.remove_file(1_000_004);
-        assert_eq!(st.selected, Some(1));
+        assert_eq!(st.grid.selected, Some(1));
         st.remove_file(1_000_000);
         st.remove_file(1_000_002);
-        assert_eq!(st.selected, None);
+        assert_eq!(st.grid.selected, None);
         assert!(st.items.is_empty());
         st.remove_file(42); // unknown: nothing happens
     }
@@ -1794,8 +1782,8 @@ mod tests {
         st.set_items(items);
         // Every even file goes; the selection is file 11.
         let gone: HashSet<i64> = (0..50_000).filter(|i| i % 2 == 0).collect();
-        st.selected = Some(11);
-        st.sel.only(11);
+        st.grid.selected = Some(11);
+        st.grid.sel.only(11);
         st.top_item = Some(1_001);
         let generation = st.generation;
         st.remove_files(&gone);
@@ -1807,8 +1795,8 @@ mod tests {
         );
         assert!(st.items.iter().all(|it| it.file_id % 2 == 1));
         // File 11 is now at index 5; the file at the top (1001, odd) is at 500.
-        assert_eq!(st.selected, Some(5));
-        assert!(st.sel.contains(11));
+        assert_eq!(st.grid.selected, Some(5));
+        assert!(st.grid.sel.contains(11));
         assert_eq!(st.pending, Some((500, false)));
         // Removing the primary with others selected hands it to the first remaining one.
         let mut st = state_for_test();
@@ -1821,10 +1809,10 @@ mod tests {
                 })
                 .collect(),
         );
-        st.selected = Some(2);
-        st.sel.only(2);
+        st.grid.selected = Some(2);
+        st.grid.sel.only(2);
         let ids = |v: &[i64]| v.iter().copied().collect::<HashSet<i64>>();
-        st.sel.click(
+        st.grid.sel.click(
             Some(2),
             10,
             &|k| k as i64,
@@ -1834,7 +1822,7 @@ mod tests {
                 range: false,
             },
         );
-        st.sel.click(
+        st.grid.sel.click(
             Some(6),
             10,
             &|k| k as i64,
@@ -1844,12 +1832,12 @@ mod tests {
                 range: false,
             },
         );
-        st.selected = Some(8);
+        st.grid.selected = Some(8);
         st.remove_files(&ids(&[8, 2, 0]));
         // Items 1,3,4,5,6,7,9 remain; 6 is the first selected one left, at index 4.
-        assert_eq!(st.selected, Some(4));
+        assert_eq!(st.grid.selected, Some(4));
         assert_eq!(st.items[4].file_id, 6);
-        assert_eq!(st.sel.len(), 1);
+        assert_eq!(st.grid.sel.len(), 1);
     }
 
     /// A timeline state without a real library behind it.

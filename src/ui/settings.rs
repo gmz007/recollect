@@ -336,16 +336,53 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(pal.text_secondary));
 }
 
+/// The section list on the left of the sheet.
+fn settings_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut Section, nav_w: f32, h: f32) {
+    egui::Frame::new()
+        .fill(pal.raised)
+        .corner_radius(CornerRadius {
+            nw: 16,
+            sw: 16,
+            ne: 0,
+            se: 0,
+        })
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(nav_w - 24.0);
+                ui.set_height(h - 24.0);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.add_space(4.0);
+                ui.label(style::semibold("Settings").size(18.0));
+                ui.add_space(10.0);
+                for s in Section::ALL {
+                    let (_, r) = nav_row(
+                        ui,
+                        s.icon(),
+                        s.name(),
+                        &format!("{} settings", s.name()),
+                        None,
+                        *current == s,
+                        0.0,
+                    );
+                    if r.clicked() {
+                        *current = s;
+                    }
+                }
+            });
+        });
+}
+
 impl App {
     /// Opens Settings on the section the user saw last.
     pub(super) fn open_settings(&mut self) {
-        self.settings_open = true;
+        self.dialogs.settings_open = true;
     }
 
     /// Opens Settings on `section`.
     pub(super) fn open_settings_at(&mut self, section: Section) {
-        self.settings_section = section;
-        self.settings_open = true;
+        self.dialogs.settings_section = section;
+        self.dialogs.settings_open = true;
     }
 
     /// Changes the settings `f` touches (and only those) and saves them at once.
@@ -365,6 +402,54 @@ impl App {
     /// above the photos.
     pub(super) fn set_search_prompt_dismissed(&mut self, dismissed: bool) {
         self.change_settings(|s| s.search_prompt_dismissed = dismissed);
+    }
+
+    /// The title, close button and settings of the chosen section; true when the button was
+    /// clicked.
+    fn settings_content(&mut self, ui: &mut egui::Ui, width: f32, height: f32) -> bool {
+        let mut close = false;
+        let section = self.dialogs.settings_section;
+        egui::Frame::new()
+            .inner_margin(Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    ui.set_height(height);
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(section.name()).text_style(egui::TextStyle::Heading),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if style::icon_button_framed(ui, icons::ICON_CLOSE, "Close settings")
+                                .clicked()
+                            {
+                                close = true;
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    // A scrollbar that takes its own room: the content never runs under it.
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                    egui::ScrollArea::vertical()
+                        .id_salt(("settings-scroll", section as u8))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space(2.0);
+                            // Breathing room between the content and the bar.
+                            ui.set_max_width(ui.available_width() - 8.0);
+                            match section {
+                                Section::Appearance => self.settings_appearance(ui),
+                                Section::SmartSearch => self.settings_smart_search(ui),
+                                Section::Library => self.settings_library(ui),
+                                Section::Storage => self.settings_storage(ui),
+                                Section::About => Self::settings_about(ui),
+                            }
+                            ui.add_space(24.0);
+                        });
+                });
+            });
+        close
     }
 
     /// The sheet itself. Closed by its × button, by Esc and by a click outside it.
@@ -388,93 +473,13 @@ impl App {
                 ui.set_height(h);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 ui.horizontal_top(|ui| {
-                    egui::Frame::new()
-                        .fill(pal.raised)
-                        .corner_radius(CornerRadius {
-                            nw: 16,
-                            sw: 16,
-                            ne: 0,
-                            se: 0,
-                        })
-                        .inner_margin(Margin::same(12))
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(nav_w - 24.0);
-                                ui.set_height(h - 24.0);
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                ui.add_space(4.0);
-                                ui.label(style::semibold("Settings").size(18.0));
-                                ui.add_space(10.0);
-                                for s in Section::ALL {
-                                    let (_, r) = nav_row(
-                                        ui,
-                                        s.icon(),
-                                        s.name(),
-                                        &format!("{} settings", s.name()),
-                                        None,
-                                        self.settings_section == s,
-                                        0.0,
-                                    );
-                                    if r.clicked() {
-                                        self.settings_section = s;
-                                    }
-                                }
-                            });
-                        });
-                    egui::Frame::new()
-                        .inner_margin(Margin::symmetric(20, 14))
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(w - nav_w - 40.0);
-                                ui.set_height(h - 28.0);
-                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(self.settings_section.name())
-                                            .text_style(egui::TextStyle::Heading),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if style::icon_button_framed(
-                                                ui,
-                                                icons::ICON_CLOSE,
-                                                "Close settings",
-                                            )
-                                            .clicked()
-                                            {
-                                                close = true;
-                                            }
-                                        },
-                                    );
-                                });
-                                ui.add_space(6.0);
-                                // A scrollbar that takes its own room: the content never runs
-                                // under it.
-                                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-                                egui::ScrollArea::vertical()
-                                    .id_salt(("settings-scroll", self.settings_section as u8))
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        ui.add_space(2.0);
-                                        // Breathing room between the content and the bar.
-                                        ui.set_max_width(ui.available_width() - 8.0);
-                                        match self.settings_section {
-                                            Section::Appearance => self.settings_appearance(ui),
-                                            Section::SmartSearch => self.settings_smart_search(ui),
-                                            Section::Library => self.settings_library(ui),
-                                            Section::Storage => self.settings_storage(ui),
-                                            Section::About => Self::settings_about(ui),
-                                        }
-                                        ui.add_space(24.0);
-                                    });
-                            });
-                        });
+                    settings_nav(ui, &pal, &mut self.dialogs.settings_section, nav_w, h);
+                    close = self.settings_content(ui, w - nav_w - 40.0, h - 28.0);
                 });
             });
         let nothing_on_top = !self.dialog_open();
         if close || (out.backdrop_response.clicked() && nothing_on_top) {
-            self.settings_open = false;
+            self.dialogs.settings_open = false;
         }
     }
 
@@ -559,7 +564,7 @@ impl App {
                 note,
             ) && m.id != current.id
             {
-                self.model_confirm = Some(m.id);
+                self.dialogs.model_confirm = Some(m.id);
             }
             ui.add_space(4.0);
         }
@@ -600,8 +605,14 @@ impl App {
     }
 
     fn settings_library(&mut self, ui: &mut egui::Ui) {
+        self.settings_folders(ui);
+        self.settings_library_summary(ui);
+        ui.add_space(14.0);
+        self.settings_advanced(ui);
+    }
+
+    fn settings_folders(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
-        let busy = self.lib.is_busy();
         heading(ui, "Folders");
         if self.snapshot.folders.is_empty() {
             ui.label("No folders yet. Add the folders where your photos and videos are.");
@@ -651,7 +662,7 @@ impl App {
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button(&stop_label).clicked() {
-                                self.stop_folder = Some(super::sidebar::StopFolder {
+                                self.dialogs.stop_folder = Some(super::sidebar::StopFolder {
                                     id,
                                     name: name.clone(),
                                 });
@@ -666,7 +677,11 @@ impl App {
         {
             self.open_add_folder();
         }
+    }
 
+    fn settings_library_summary(&mut self, ui: &mut egui::Ui) {
+        let pal = Palette::of(ui.ctx());
+        let busy = self.lib.is_busy();
         heading(ui, "Your library");
         let stats = self.snapshot.stats.clone();
         let text = counts_text(&stats, self.snapshot.model_installed);
@@ -708,8 +723,9 @@ impl App {
             ui,
             "Recollect also checks when it starts. Use this after adding photos to a folder.",
         );
+    }
 
-        ui.add_space(14.0);
+    fn settings_advanced(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Advanced")
             .id_salt("settings-advanced")
             .show(ui, |ui| {
@@ -875,11 +891,11 @@ impl App {
 
     /// The question before switching smart search: it makes every photo get looked at again.
     pub(super) fn model_confirm_dialog(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.model_confirm else {
+        let Some(id) = self.dialogs.model_confirm else {
             return;
         };
         let Some(spec) = registry::get(id) else {
-            self.model_confirm = None;
+            self.dialogs.model_confirm = None;
             return;
         };
         let here = self.snapshot.installed_models.contains(&spec.id);
@@ -904,10 +920,10 @@ impl App {
             });
         });
         if switch {
-            self.model_confirm = None;
+            self.dialogs.model_confirm = None;
             self.switch_model(spec);
         } else if cancel {
-            self.model_confirm = None;
+            self.dialogs.model_confirm = None;
         }
     }
 

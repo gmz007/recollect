@@ -1,16 +1,13 @@
 //! Background helpers for the UI thread: a latest-wins search worker and a thumbnail loader.
 
+use super::bg::LatestWorker;
+use super::texture_loader::{Slot, TextureLoader};
 use crate::Library;
 use crate::library::SearchError;
-use crate::media::image::Rgb;
 use crate::search::{SearchHit, SearchOptions};
 use crate::thumbs::{self, ThumbKey};
-use crossbeam_channel::{Receiver, Sender, unbounded};
-use parking_lot::{Condvar, Mutex};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
@@ -42,215 +39,111 @@ pub struct SearchResponse {
 
 /// Runs searches on a dedicated thread. Only the newest pending request is executed, so typing
 /// quickly never queues up stale searches.
-pub struct SearchWorker {
-    tx: Sender<(u64, Query, SearchOptions)>,
-    rx: Receiver<SearchResponse>,
-    next_id: u64,
-}
+pub struct SearchWorker(LatestWorker<(Query, SearchOptions), SearchResponse>);
 
 impl SearchWorker {
     pub fn new(lib: Arc<Library>, repaint: impl Fn() + Send + 'static) -> Self {
-        let (tx, req_rx) = unbounded::<(u64, Query, SearchOptions)>();
-        let (resp_tx, rx) = unbounded();
-        std::thread::Builder::new()
-            .name("recollect-search".into())
-            .spawn(move || {
-                while let Ok(mut req) = req_rx.recv() {
-                    while let Ok(newer) = req_rx.try_recv() {
-                        req = newer;
-                    }
-                    let (id, query, opts) = req;
-                    // A bug in one search must not kill the worker for the rest of the session.
-                    let run = std::panic::AssertUnwindSafe(|| match &query {
-                        Query::Text(q) => lib.search(q, &opts),
-                        Query::Similar { item_id, .. } => lib.similar(*item_id, &opts),
-                    });
-                    let hits = match std::panic::catch_unwind(run) {
-                        Ok(r) => r.map_err(|e| SearchFailure {
-                            kind: SearchError::of(&e),
-                            detail: format!("{e:#}"),
-                        }),
-                        Err(_) => Err(SearchFailure {
-                            kind: SearchError::Other,
-                            detail: "search failed unexpectedly".to_string(),
-                        }),
-                    };
-                    if resp_tx.send(SearchResponse { id, query, hits }).is_err() {
-                        break;
-                    }
-                    repaint();
-                }
-            })
-            .expect("spawning search thread");
-        Self { tx, rx, next_id: 0 }
+        Self(LatestWorker::spawn(
+            "search",
+            repaint,
+            move |(query, opts)| match query {
+                Query::Text(q) => lib.search(q, opts),
+                Query::Similar { item_id, .. } => lib.similar(*item_id, opts),
+            },
+            |id, (query, _), outcome| SearchResponse {
+                id,
+                query,
+                hits: match outcome {
+                    Some(r) => r.map_err(|e| SearchFailure {
+                        kind: SearchError::of(&e),
+                        detail: format!("{e:#}"),
+                    }),
+                    None => Err(SearchFailure {
+                        kind: SearchError::Other,
+                        detail: "search failed unexpectedly".to_string(),
+                    }),
+                },
+            },
+        ))
     }
 
     /// Submits a search; returns its id.
     pub fn submit(&mut self, query: Query, opts: SearchOptions) -> u64 {
-        self.next_id += 1;
-        let _ = self.tx.send((self.next_id, query, opts));
-        self.next_id
+        self.0.submit((query, opts))
     }
 
     /// The newest finished search, if any arrived since the last call.
     pub fn poll(&self) -> Option<SearchResponse> {
-        let mut last = None;
-        while let Ok(r) = self.rx.try_recv() {
-            last = Some(r);
-        }
-        last
+        self.0.poll()
     }
-}
-
-enum ThumbState {
-    Loading,
-    Ready(egui::TextureHandle),
-    Failed,
-}
-
-struct Shared {
-    queue: Mutex<Vec<ThumbKey>>,
-    cv: Condvar,
-    done: Mutex<Vec<(ThumbKey, Option<Rgb>)>>,
-    stop: AtomicBool,
 }
 
 /// Most requests are for what is on screen *now*, so the queue is LIFO and bounded.
 const QUEUE_CAP: usize = 300;
+/// Textures kept before the least recently used are evicted.
+const MAX_TEXTURES: usize = 600;
 
 /// Loads thumbnails on worker threads and keeps a bounded set of GPU textures.
 pub struct ThumbCache {
-    shared: Arc<Shared>,
-    states: HashMap<ThumbKey, (ThumbState, u64)>,
-    frame: u64,
-    max_textures: usize,
+    loader: TextureLoader<ThumbKey>,
 }
 
 impl ThumbCache {
     pub fn new(ctx: &egui::Context, cache_dir: &Path, workers: usize) -> Self {
-        let shared = Arc::new(Shared {
-            queue: Mutex::new(Vec::new()),
-            cv: Condvar::new(),
-            done: Mutex::new(Vec::new()),
-            stop: AtomicBool::new(false),
-        });
-        for i in 0..workers.max(1) {
-            let sh = Arc::clone(&shared);
-            let ctx = ctx.clone();
-            let dir = cache_dir.to_path_buf();
-            std::thread::Builder::new()
-                .name(format!("recollect-thumb-{i}"))
-                .spawn(move || {
-                    loop {
-                        let key = {
-                            let mut q = sh.queue.lock();
-                            while q.is_empty() && !sh.stop.load(Ordering::Relaxed) {
-                                sh.cv.wait(&mut q);
-                            }
-                            if sh.stop.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            q.pop()
-                        };
-                        let Some(key) = key else { continue };
-                        let res = thumbs::load(&key, &dir)
-                            .map_err(|e| tracing::debug!("thumbnail {}: {e:#}", key.path.display()))
-                            .ok();
-                        sh.done.lock().push((key, res));
-                        ctx.request_repaint();
-                    }
-                })
-                .expect("spawning thumbnail thread");
-        }
+        let dir = cache_dir.to_path_buf();
+        let decode = move |key: &ThumbKey| {
+            thumbs::load(key, &dir)
+                .map_err(|e| tracing::debug!("thumbnail {}: {e:#}", key.path.display()))
+                .ok()
+        };
+        let name = |key: &ThumbKey| format!("thumb:{}:{:?}", key.path.display(), key.t_ms);
         Self {
-            shared,
-            states: HashMap::new(),
-            frame: 0,
-            max_textures: 600,
+            loader: TextureLoader::new(ctx, "thumb", workers, decode, name),
         }
     }
 
     /// Call once per frame before drawing: uploads finished thumbnails and evicts old ones.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
-        self.frame += 1;
-        let done: Vec<_> = std::mem::take(&mut *self.shared.done.lock());
-        for (key, rgb) in done {
-            let state = match rgb {
-                Some(rgb) if rgb.width > 0 => {
-                    let img = egui::ColorImage::from_rgb(
-                        [rgb.width as usize, rgb.height as usize],
-                        &rgb.data,
-                    );
-                    ThumbState::Ready(ctx.load_texture(
-                        format!("thumb:{}:{:?}", key.path.display(), key.t_ms),
-                        img,
-                        egui::TextureOptions::LINEAR,
-                    ))
-                }
-                _ => ThumbState::Failed,
-            };
-            let used = self.states.get(&key).map_or(self.frame, |s| s.1);
-            self.states.insert(key, (state, used));
-        }
-        if self.states.len() > self.max_textures {
-            let mut by_age: Vec<(u64, ThumbKey)> = self
-                .states
-                .iter()
-                .filter(|(_, (s, _))| !matches!(s, ThumbState::Loading))
-                .map(|(k, (_, f))| (*f, k.clone()))
-                .collect();
-            by_age.sort_by_key(|x| x.0);
-            let excess = self.states.len() - self.max_textures;
-            for (f, k) in by_age.into_iter().take(excess) {
-                if f + 2 < self.frame {
-                    self.states.remove(&k);
-                }
-            }
+        self.loader.upload_finished(ctx, true);
+        let len = self.loader.states.len();
+        if len > MAX_TEXTURES {
+            self.loader.evict(len - MAX_TEXTURES, 2, |_| true);
         }
     }
 
     /// The texture for `key` if ready; schedules loading otherwise.
     pub fn get(&mut self, key: &ThumbKey) -> Option<&egui::TextureHandle> {
-        let frame = self.frame;
-        if let Some(entry) = self.states.get_mut(key) {
+        let frame = self.loader.frame;
+        if let Some(entry) = self.loader.states.get_mut(key) {
             entry.1 = frame;
         } else {
             self.request(key.clone());
-            self.states
-                .insert(key.clone(), (ThumbState::Loading, frame));
+            self.loader
+                .states
+                .insert(key.clone(), (Slot::Loading, frame));
             return None;
         }
-        match self.states.get(key) {
-            Some((ThumbState::Ready(t), _)) => Some(t),
+        match self.loader.states.get(key) {
+            Some((Slot::Ready(t), _)) => Some(t),
             _ => None,
         }
     }
 
     pub fn failed(&self, key: &ThumbKey) -> bool {
-        matches!(self.states.get(key), Some((ThumbState::Failed, _)))
+        matches!(self.loader.states.get(key), Some((Slot::Failed, _)))
     }
 
     fn request(&mut self, key: ThumbKey) {
-        let mut q = self.shared.queue.lock();
-        q.push(key);
-        if q.len() > QUEUE_CAP {
+        let dropped: Vec<ThumbKey> = {
+            let mut q = self.loader.shared.queue.lock();
+            q.push(key);
             // Forget the oldest requests; they are re-requested if still visible.
-            let excess = q.len() - QUEUE_CAP;
-            let dropped: Vec<ThumbKey> = q.drain(..excess).collect();
-            for k in dropped {
-                self.states.remove(&k);
-            }
+            let excess = q.len().saturating_sub(QUEUE_CAP);
+            q.drain(..excess).collect()
+        };
+        for k in dropped {
+            self.loader.states.remove(&k);
         }
-        self.shared.cv.notify_one();
-    }
-}
-
-impl Drop for ThumbCache {
-    fn drop(&mut self) {
-        // Under the queue lock: a worker that just checked `stop` is then either still before
-        // its wait (and sees the flag when it rechecks) or already waiting (and is woken).
-        let _queue = self.shared.queue.lock();
-        self.shared.stop.store(true, Ordering::Relaxed);
-        self.shared.cv.notify_all();
+        self.loader.shared.notify_one();
     }
 }

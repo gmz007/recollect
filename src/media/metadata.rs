@@ -21,20 +21,28 @@ pub enum DateSource {
     Video,
 }
 
-impl DateSource {
-    pub fn as_i64(self) -> i64 {
-        match self {
+impl From<DateSource> for i64 {
+    fn from(source: DateSource) -> i64 {
+        match source {
             DateSource::File => 0,
             DateSource::Exif => 1,
             DateSource::Video => 2,
         }
     }
+}
 
-    pub fn from_i64(v: i64) -> Self {
+impl TryFrom<i64> for DateSource {
+    type Error = super::UnknownValue;
+
+    fn try_from(v: i64) -> Result<Self, Self::Error> {
         match v {
-            1 => DateSource::Exif,
-            2 => DateSource::Video,
-            _ => DateSource::File,
+            0 => Ok(DateSource::File),
+            1 => Ok(DateSource::Exif),
+            2 => Ok(DateSource::Video),
+            value => Err(super::UnknownValue {
+                what: "date source",
+                value,
+            }),
         }
     }
 }

@@ -91,6 +91,3 @@ module_name_repetitions = "allow"
 module_inception = "allow"
 cast_precision_loss = "allow"   # statistics and layout floats
 assert_is_empty = "allow"        # the suggested assert_eq!(x, []) needs type annotations for no gain
-# To be tightened once the large functions and state structs are split up.
-too_many_lines = "allow"
-struct_excessive_bools = "allow"

@@ -267,10 +267,10 @@ impl App {
 
     /// What the search results show when there is nothing to list.
     pub(super) fn results_empty_state(&mut self, ui: &mut egui::Ui) {
-        if self.awaiting.is_some() {
+        if self.res.awaiting.is_some() {
             return;
         }
-        if let Some(e) = self.result_error.clone() {
+        if let Some(e) = self.res.error.clone() {
             if !self.snapshot.model_installed {
                 if empty_state(
                     ui,
@@ -301,13 +301,13 @@ impl App {
             }
             return;
         }
-        if self.result_label.is_empty() {
+        if self.res.label.is_empty() {
             return;
         }
         let date_set = self.date != super::when::DateFilter::default();
         let sentence = format!(
             "No photos match “{}”. Try different words{}.",
-            super::albums::short_name(&self.result_label, 40),
+            super::albums::short_name(&self.res.label, 40),
             if date_set {
                 ", or check the When filter"
             } else {
@@ -339,6 +339,10 @@ impl App {
 
 /// Where the search field is and whether its help is showing (from the previous frame).
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-frame UI flags, each set and cleared by a different event"
+)]
 pub(super) struct SearchHelp {
     pub field: Option<Rect>,
     pub focused: bool,
@@ -468,7 +472,7 @@ impl App {
             .is_some_and(|(r, p)| r.contains(p));
         let show = self.snapshot.model_installed
             && self.query.is_empty()
-            && !self.settings_open
+            && !self.dialogs.settings_open
             && !self.dialog_open()
             && !self.search_help.suppressed
             && (self.search_help.focused
@@ -593,7 +597,7 @@ impl Tip {
 impl App {
     /// The tip to show now, if any. Only one at a time, and only on a grid with photos in it.
     pub(super) fn pending_tip(&self) -> Option<Tip> {
-        if self.picking || !self.tl.loaded || self.tl.items.is_empty() {
+        if self.tl.grid.picking || !self.tl.loaded || self.tl.items.is_empty() {
             return None;
         }
         let todo = |t: Tip| !self.settings.tips_dismissed.iter().any(|d| d == t.id());

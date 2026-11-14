@@ -21,6 +21,14 @@ pub const CARD_RADIUS: u8 = 10;
 pub const CONTROL_RADIUS: u8 = 8;
 /// Corner radius of photo tiles.
 pub const TILE_RADIUS: u8 = 6;
+/// Default side of a grid tile, in points.
+pub const TILE: f32 = 180.0;
+/// Space between grid tiles.
+pub const GAP: f32 = 4.0;
+/// Inner margin of the central panel (horizontal, vertical).
+pub const PANEL_MARGIN: (i8, i8) = (16, 12);
+/// Width kept free beside a scrolling grid for its scroll bar.
+pub const SCROLLBAR_ALLOWANCE: f32 = 12.0;
 
 /// The colours of one theme.
 #[derive(Debug, Clone, Copy)]

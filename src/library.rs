@@ -157,6 +157,15 @@ pub struct Control {
     cv: Condvar,
 }
 
+impl std::fmt::Debug for Control {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Control")
+            .field("cancelled", &self.cancel.load(Ordering::Relaxed))
+            .field("paused", &*self.paused.lock())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Control {
     /// Blocks while paused; returns `true` if the current job should stop.
     pub fn checkpoint(&self) -> bool {
@@ -249,6 +258,15 @@ pub struct AlbumWrite {
     pub error_kind: Option<AlbumError>,
 }
 
+/// What [`Library::start_add_folders`] does once the folders are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterAdd {
+    /// Only look through the folders.
+    Nothing,
+    /// Also download the smart-search model.
+    DownloadModel,
+}
+
 pub struct Library {
     paths: Paths,
     settings: RwLock<Settings>,
@@ -301,6 +319,16 @@ pub struct Library {
     /// Which jobs started, in order (tests).
     #[cfg(test)]
     pub(crate) job_log: Mutex<Vec<&'static str>>,
+}
+
+impl std::fmt::Debug for Library {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Library")
+            .field("paths", &self.paths)
+            .field("model", &self.model().id)
+            .field("busy", &self.busy.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 /// What an applied album change did.
@@ -874,10 +902,10 @@ impl Library {
     }
 
     /// Adds several folders one after the other off the calling thread, then looks through them
-    /// (dates, thumbnails) so they can be browsed. With `then_download`, smart search is
+    /// (dates, thumbnails) so they can be browsed. With [`AfterAdd::DownloadModel`], smart search is
     /// downloaded after that, without cutting the scan short; if the download fails the folders
     /// are still scanned.
-    pub fn start_add_folders(self: &Arc<Self>, paths: Vec<PathBuf>, then_download: bool) {
+    pub fn start_add_folders(self: &Arc<Self>, paths: Vec<PathBuf>, then: AfterAdd) {
         self.spawn_task("recollect-add-folders", ErrorKind::AddFolder, move |lib| {
             let mut added = false;
             let mut failure = None;
@@ -890,7 +918,9 @@ impl Library {
             if added {
                 let _ = lib.request_scan();
             }
-            if then_download && let Err(e) = lib.request_download() {
+            if then == AfterAdd::DownloadModel
+                && let Err(e) = lib.request_download()
+            {
                 lib.update_status(|s| {
                     s.set_error_of(ErrorKind::Download, format!("Model download failed: {e:#}"));
                 });
@@ -1416,9 +1446,10 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::Embedded;
     use crate::media::{MediaKind, ScannedFile};
     use crate::search::SearchSort;
-    use crate::store::db::{FileMeta, FileRow, NewItem};
+    use crate::store::db::{FileMeta, NewItem};
 
     fn open(dir: &Path) -> Arc<Library> {
         crate::gpu::force_cpu(true);
@@ -1884,7 +1915,7 @@ mod tests {
         // (Empty, so the placeholder model files never have to embed anything.)
         let empty = d.path().join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        lib.start_add_folders(vec![empty], true);
+        lib.start_add_folders(vec![empty], AfterAdd::DownloadModel);
         wait_until(&lib, || lib.job_log.lock().len() >= 3);
         // The scan, then the download, then the scan that follows a download.
         assert_eq!(*lib.job_log.lock(), ["scan", "download", "scan"]);
@@ -1898,7 +1929,7 @@ mod tests {
         let lib = open(&d.path().join("home"));
         lib.fail_download.store(true, Ordering::Release);
         let photos = one_photo_folder(d.path());
-        lib.start_add_folders(vec![photos], true);
+        lib.start_add_folders(vec![photos], AfterAdd::DownloadModel);
         wait_until(&lib, || {
             lib.status().last_error.is_some() && lib.job_log.lock().len() >= 2
         });
@@ -1986,7 +2017,7 @@ mod tests {
 
     /// Four images captured on known days. The better the match, the earlier its name: a, b, c, d.
     /// By date: b (2022) is newest, then d (2021), a (2020), c (2019).
-    fn seed_dated(lib: &Library, undated: &[&str]) -> Vec<(FileRow, FileMeta, Vec<NewItem>)> {
+    fn seed_dated(lib: &Library, undated: &[&str]) -> Vec<Embedded> {
         let mut db = lib.db.lock();
         let f = db.add_folder(Path::new("/lib")).unwrap();
         let spec = [
@@ -2038,7 +2069,11 @@ mod tests {
                     t_end: None,
                     embedding: at_angle(a),
                 };
-                (r, FileMeta::default(), vec![item])
+                Embedded {
+                    file: r,
+                    meta: FileMeta::default(),
+                    items: vec![item],
+                }
             })
             .collect()
     }
@@ -2099,7 +2134,10 @@ mod tests {
         {
             let lib = open(d.path());
             let rows = seed_dated(&lib, &[]);
-            let batch: Vec<_> = rows.iter().map(|(r, m, i)| (r.id, *m, i.clone())).collect();
+            let batch: Vec<_> = rows
+                .iter()
+                .map(|e| (e.file.id, e.meta, e.items.clone()))
+                .collect();
             lib.db
                 .lock()
                 .put_items(registry::CLIP_B32.id, &batch)
@@ -2118,9 +2156,9 @@ mod tests {
         // The index filled while indexing (dates are known before embedding).
         let d2 = tempfile::tempdir().unwrap();
         let lib = open(d2.path());
-        let mut rows = seed_dated(&lib, &[]);
+        let rows = seed_dated(&lib, &[]);
         assert_eq!(lib.indexed_items(), 0);
-        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        crate::indexer::write_items(&lib, rows).unwrap();
         assert_eq!(lib.indexed_items(), 4);
         check_date_search(&lib);
     }
@@ -2132,14 +2170,14 @@ mod tests {
             let lib = open(d.path());
             // File "b" is embedded before its date could be read: only its file time (1970)
             // is known.
-            let mut rows = seed_dated(&lib, &["b"]);
+            let rows = seed_dated(&lib, &["b"]);
             let b = rows
                 .iter()
-                .find(|r| r.0.path.ends_with("b.jpg"))
+                .find(|r| r.file.path.ends_with("b.jpg"))
                 .unwrap()
-                .0
+                .file
                 .id;
-            crate::indexer::write_items(&lib, &mut rows).unwrap();
+            crate::indexer::write_items(&lib, rows).unwrap();
             b
         };
         let lib = open(d.path());
@@ -2196,7 +2234,7 @@ mod tests {
         };
         let caps: Vec<_> = rows
             .iter()
-            .map(|r| (r.0.id, cap(day(2020, 1, 1))))
+            .map(|r| (r.file.id, cap(day(2020, 1, 1))))
             .collect();
         // With a reader holding the index, any attempt to write to it would block for good.
         let guard = lib.index.read();
@@ -2218,8 +2256,8 @@ mod tests {
     fn an_undated_file_has_the_same_date_everywhere() {
         let d = tempfile::tempdir().unwrap();
         let lib = open(d.path());
-        let mut rows = seed_dated(&lib, &["b"]);
-        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        let rows = seed_dated(&lib, &["b"]);
+        crate::indexer::write_items(&lib, rows).unwrap();
         let expected = crate::media::metadata::effective_taken(None, 1);
         let b = lib
             .timeline(&TimelineFilter::default())
@@ -2282,10 +2320,10 @@ mod tests {
     fn a_file_removed_before_its_vectors_are_written_adds_none() {
         let d = tempfile::tempdir().unwrap();
         let lib = open(d.path());
-        let mut rows = seed_dated(&lib, &[]);
+        let rows = seed_dated(&lib, &[]);
         let folder = lib.db.lock().folders().unwrap()[0].id;
         lib.db.lock().remove_folder(folder).unwrap();
-        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        crate::indexer::write_items(&lib, rows).unwrap();
         assert_eq!(lib.indexed_items(), 0);
     }
 
@@ -2527,8 +2565,8 @@ mod tests {
     fn favorites_are_stored_and_found_in_search_hits_and_the_timeline() {
         let d = tempfile::tempdir().unwrap();
         let lib = open(d.path());
-        let mut rows = seed_dated(&lib, &[]);
-        crate::indexer::write_items(&lib, &mut rows).unwrap();
+        let rows = seed_dated(&lib, &[]);
+        crate::indexer::write_items(&lib, rows).unwrap();
         let tl = |fav| {
             lib.timeline(&TimelineFilter {
                 favorites_only: fav,

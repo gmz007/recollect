@@ -6,16 +6,15 @@
 //! for the neighbouring items ahead of time so stepping through a list feels instant; what is
 //! on screen is always decoded before those prefetches ([`Previews::get_urgent`]).
 
+use super::texture_loader::{Slot, TextureLoader};
 use crate::Library;
 use crate::media::image::{self as img, Rgb};
 use crate::store::db::FileDetails;
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use parking_lot::{Condvar, Mutex};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Longest side of a preview that fits the window.
 pub const MAX_FIT_SIDE: u32 = 2048;
@@ -82,23 +81,8 @@ pub enum Preview<'a> {
     Failed,
 }
 
-enum State {
-    Loading,
-    Ready(egui::TextureHandle),
-    Failed,
-}
-
-struct Shared {
-    queue: Mutex<Vec<PreviewKey>>,
-    cv: Condvar,
-    done: Mutex<Vec<(PreviewKey, Option<Rgb>)>>,
-    stop: AtomicBool,
-}
-
 pub struct Previews {
-    shared: Arc<Shared>,
-    states: HashMap<PreviewKey, (State, u64)>,
-    frame: u64,
+    loader: TextureLoader<PreviewKey>,
     details: HashMap<i64, Option<FileDetails>>,
     /// Bumped whenever the details cache is emptied; answers to older requests are ignored.
     details_epoch: u64,
@@ -110,46 +94,21 @@ pub struct Previews {
 
 impl Previews {
     pub fn new(ctx: &egui::Context, lib: Arc<Library>, workers: usize) -> Self {
-        let shared = Arc::new(Shared {
-            queue: Mutex::new(Vec::new()),
-            cv: Condvar::new(),
-            done: Mutex::new(Vec::new()),
-            stop: AtomicBool::new(false),
-        });
-        for i in 0..workers.max(1) {
-            let sh = Arc::clone(&shared);
-            let ctx = ctx.clone();
-            std::thread::Builder::new()
-                .name(format!("recollect-preview-{i}"))
-                .spawn(move || {
-                    loop {
-                        let key = {
-                            let mut q = sh.queue.lock();
-                            while q.is_empty() && !sh.stop.load(Ordering::Relaxed) {
-                                sh.cv.wait(&mut q);
-                            }
-                            if sh.stop.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            // Newest request first: it is what the user is looking at.
-                            q.pop()
-                        };
-                        let Some(key) = key else { continue };
-                        let rgb = decode_preview(&key)
-                            .map_err(|e| tracing::debug!("preview {}: {e:#}", key.path.display()))
-                            .ok();
-                        sh.done.lock().push((key, rgb));
-                        ctx.request_repaint();
-                    }
-                })
-                .expect("spawning preview thread");
-        }
+        let decode = |key: &PreviewKey| {
+            decode_preview(key)
+                .map_err(|e| tracing::debug!("preview {}: {e:#}", key.path.display()))
+                .ok()
+        };
+        let name = |key: &PreviewKey| {
+            format!("preview:{}:{:?}:{}", key.path.display(), key.t_ms, key.side)
+        };
+        let loader = TextureLoader::new(ctx, "preview", workers, decode, name);
         // Reading details touches the database and the file system, so it happens off the UI
         // thread too.
         let (details_tx, req_rx) = unbounded::<(i64, u64)>();
         let (resp_tx, details_rx) = unbounded();
         let c = ctx.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("recollect-details".into())
             .spawn(move || {
                 while let Ok((id, epoch)) = req_rx.recv() {
@@ -159,12 +118,13 @@ impl Previews {
                     }
                     c.request_repaint();
                 }
-            })
-            .expect("spawning details thread");
+            });
+        if let Err(e) = spawned {
+            // Details then never arrive; the viewer still shows the image.
+            tracing::error!("could not start the details thread: {e}");
+        }
         Self {
-            shared,
-            states: HashMap::new(),
-            frame: 0,
+            loader,
             details: HashMap::new(),
             details_epoch: 0,
             details_stamp: None,
@@ -175,71 +135,29 @@ impl Previews {
 
     /// Call once per frame before drawing: uploads finished previews and evicts old ones.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
-        self.frame += 1;
-        let done: Vec<_> = std::mem::take(&mut *self.shared.done.lock());
-        for (key, rgb) in done {
-            let Some(slot) = self.states.get_mut(&key) else {
-                continue; // no longer wanted
-            };
-            let state = match rgb {
-                Some(rgb) if rgb.width > 0 && rgb.height > 0 => {
-                    let img = egui::ColorImage::from_rgb(
-                        [rgb.width as usize, rgb.height as usize],
-                        &rgb.data,
-                    );
-                    State::Ready(ctx.load_texture(
-                        format!("preview:{}:{:?}:{}", key.path.display(), key.t_ms, key.side),
-                        img,
-                        egui::TextureOptions::LINEAR,
-                    ))
-                }
-                _ => State::Failed,
-            };
-            slot.0 = state;
-        }
+        self.loader.upload_finished(ctx, false);
         while let Ok((id, epoch, d)) = self.details_rx.try_recv() {
             if epoch == self.details_epoch {
                 self.details.insert(id, d);
             }
         }
-        let finished = self
-            .states
-            .values()
-            .filter(|(s, _)| !matches!(s, State::Loading))
-            .count();
+        let finished = self.loader.finished();
         if finished > MAX_TEXTURES {
-            let mut by_age: Vec<(u64, PreviewKey)> = self
-                .states
-                .iter()
-                .filter(|(_, (s, f))| !matches!(s, State::Loading) && *f + 1 < self.frame)
-                .map(|(k, (_, f))| (*f, k.clone()))
-                .collect();
-            by_age.sort_by_key(|x| x.0);
-            for (_, k) in by_age.into_iter().take(finished - MAX_TEXTURES) {
-                self.states.remove(&k);
-            }
+            self.loader.evict(finished - MAX_TEXTURES, 1, |_| true);
         }
         self.evict_zoom_textures();
     }
 
     /// Keeps at most [`MAX_ZOOM_TEXTURES`] zoom textures, dropping the least recently used.
     fn evict_zoom_textures(&mut self) {
-        let mut zooms: Vec<(u64, PreviewKey)> = self
-            .states
-            .iter()
-            .filter(|(k, (s, f))| k.zoom && !matches!(s, State::Loading) && *f + 1 < self.frame)
-            .map(|(k, (_, f))| (*f, k.clone()))
-            .collect();
         let total = self
+            .loader
             .states
             .iter()
-            .filter(|(k, (s, _))| k.zoom && !matches!(s, State::Loading))
+            .filter(|(k, (s, _))| k.zoom && !s.is_loading())
             .count();
         if total > MAX_ZOOM_TEXTURES {
-            zooms.sort_by_key(|x| x.0);
-            for (_, k) in zooms.into_iter().take(total - MAX_ZOOM_TEXTURES) {
-                self.states.remove(&k);
-            }
+            self.loader.evict(total - MAX_ZOOM_TEXTURES, 1, |k| k.zoom);
         }
     }
 
@@ -257,26 +175,26 @@ impl Previews {
     }
 
     fn request(&mut self, key: &PreviewKey, urgent: bool) -> Preview<'_> {
-        let frame = self.frame;
-        let entry = match self.states.entry(key.clone()) {
+        let frame = self.loader.frame;
+        let shared = &self.loader.shared;
+        let entry = match self.loader.states.entry(key.clone()) {
             Entry::Vacant(v) => {
-                self.shared.queue.lock().push(key.clone());
-                self.shared.cv.notify_one();
-                v.insert((State::Loading, frame))
+                shared.push(key.clone());
+                v.insert((Slot::Loading, frame))
             }
             Entry::Occupied(o) => {
                 let entry = o.into_mut();
-                if urgent && matches!(entry.0, State::Loading) {
-                    promote(&mut self.shared.queue.lock(), key);
+                if urgent && entry.0.is_loading() {
+                    promote(&mut shared.queue.lock(), key);
                 }
                 entry
             }
         };
         entry.1 = frame;
         match &entry.0 {
-            State::Ready(t) => Preview::Ready(t),
-            State::Loading => Preview::Loading,
-            State::Failed => Preview::Failed,
+            Slot::Ready(t) => Preview::Ready(t),
+            Slot::Loading => Preview::Loading,
+            Slot::Failed => Preview::Failed,
         }
     }
 
@@ -285,21 +203,21 @@ impl Previews {
     pub fn retain_queued(&mut self, wanted: &[PreviewKey]) {
         let keep: HashSet<&PreviewKey> = wanted.iter().collect();
         let dropped: Vec<PreviewKey> = {
-            let mut q = self.shared.queue.lock();
+            let mut q = self.loader.shared.queue.lock();
             let (kept, dropped) = q.drain(..).partition(|k| keep.contains(k));
             *q = kept;
             dropped
         };
         for k in dropped {
-            self.states.remove(&k);
+            self.loader.states.remove(&k);
         }
     }
 
     /// Empties the decode queue and drops every texture and cached detail: for when the viewer
     /// goes away. Decodes already running finish, but their results are discarded.
     pub fn clear(&mut self) {
-        self.shared.queue.lock().clear();
-        self.states.clear();
+        self.loader.shared.queue.lock().clear();
+        self.loader.states.clear();
         self.details.clear();
         self.details_epoch += 1;
         self.details_stamp = None;
@@ -320,7 +238,7 @@ impl Previews {
     /// Number of previews and details held (tests).
     #[cfg(test)]
     pub(super) fn cached(&self) -> usize {
-        self.states.len() + self.details.len() + self.shared.queue.lock().len()
+        self.loader.states.len() + self.details.len() + self.loader.shared.queue.lock().len()
     }
 
     /// Drops the cached details when `stamp` (what the library looked like when they were
@@ -334,16 +252,6 @@ impl Previews {
             }
             self.details_stamp = Some(stamp);
         }
-    }
-}
-
-impl Drop for Previews {
-    fn drop(&mut self) {
-        // Under the queue lock: a worker that just checked `stop` is then either still before
-        // its wait (and sees the flag when it rechecks) or already waiting (and is woken).
-        let _queue = self.shared.queue.lock();
-        self.shared.stop.store(true, Ordering::Relaxed);
-        self.shared.cv.notify_all();
     }
 }
 
@@ -414,26 +322,30 @@ mod tests {
     #[test]
     fn clearing_forgets_queue_textures_and_details() {
         let (_d, mut p) = previews();
-        p.shared.queue.lock().push(key("queued", false));
-        p.states.insert(key("failed", false), (State::Failed, 1));
+        p.loader.shared.queue.lock().push(key("queued", false));
+        p.loader
+            .states
+            .insert(key("failed", false), (Slot::Failed, 1));
         p.details.insert(7, None);
         p.clear();
-        assert!(p.shared.queue.lock().is_empty());
-        assert!(p.states.is_empty());
+        assert!(p.loader.shared.queue.lock().is_empty());
+        assert!(p.loader.states.is_empty());
         assert!(p.details.is_empty());
     }
 
     #[test]
     fn only_two_zoom_textures_are_kept() {
         let (_d, mut p) = previews();
-        p.frame = 100;
+        p.loader.frame = 100;
         for (i, n) in ["a", "b", "c", "d"].iter().enumerate() {
-            p.states
-                .insert(key(n, true), (State::Failed, 10 + i as u64));
+            p.loader
+                .states
+                .insert(key(n, true), (Slot::Failed, 10 + i as u64));
         }
-        p.states.insert(key("fit", false), (State::Failed, 1));
+        p.loader.states.insert(key("fit", false), (Slot::Failed, 1));
         p.evict_zoom_textures();
         let mut left: Vec<_> = p
+            .loader
             .states
             .keys()
             .filter(|k| k.zoom)
@@ -441,7 +353,7 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, ["c.jpg", "d.jpg"], "the most recently used stay");
-        assert!(p.states.contains_key(&key("fit", false)));
+        assert!(p.loader.states.contains_key(&key("fit", false)));
     }
 
     #[test]

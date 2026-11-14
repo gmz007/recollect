@@ -230,7 +230,7 @@ impl App {
             .iter()
             .map(|f| f.path.clone())
             .collect();
-        self.add_folder_dialog = Some(AddFolder {
+        self.dialogs.add_folder_dialog = Some(AddFolder {
             typed: String::new(),
             suggestions: folder_suggestions(candidates, &added),
         });
@@ -351,7 +351,7 @@ impl App {
             self.set_view(View::Folder(id));
         }
         if stop.is_some() {
-            self.stop_folder = stop;
+            self.dialogs.stop_folder = stop;
         }
     }
 
@@ -502,12 +502,12 @@ impl App {
     /// Adds a folder to the library (it is scanned in the background).
     pub(super) fn add_folder(&mut self, p: PathBuf) {
         self.lib.start_add_folder(p);
-        self.snapshot_again = true;
+        self.snapshot_read.mark_again();
     }
 
     /// The "Add a folder" dialog and the "Stop showing" confirmation.
     pub(super) fn folder_dialogs(&mut self, ctx: &egui::Context) {
-        if let Some(mut dlg) = self.add_folder_dialog.take() {
+        if let Some(mut dlg) = self.dialogs.add_folder_dialog.take() {
             let suggestions = std::mem::take(&mut dlg.suggestions);
             let (mut close, mut bad_path, mut chosen) = (false, false, None::<PathBuf>);
             modal_window(ctx, "Add a folder", |ui| {
@@ -582,10 +582,10 @@ impl App {
                 self.add_folder(p);
             } else if !close {
                 dlg.suggestions = suggestions;
-                self.add_folder_dialog = Some(dlg);
+                self.dialogs.add_folder_dialog = Some(dlg);
             }
         }
-        if let Some(s) = self.stop_folder.clone() {
+        if let Some(s) = self.dialogs.stop_folder.clone() {
             let (mut stop, mut cancel) = (false, false);
             modal_window(ctx, "Stop showing this folder?", |ui| {
                 ui.label(format!("Stop showing “{}”?", s.name));
@@ -601,10 +601,10 @@ impl App {
                 self.lib.start_remove_folder(s.id);
                 self.snapshot.folders.retain(|f| f.id != s.id);
                 // A fetch already in flight may predate the removal: fetch again after it.
-                self.snapshot_again = true;
-                self.stop_folder = None;
+                self.snapshot_read.mark_again();
+                self.dialogs.stop_folder = None;
             } else if cancel {
-                self.stop_folder = None;
+                self.dialogs.stop_folder = None;
             }
         }
     }

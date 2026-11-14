@@ -384,7 +384,7 @@ fn index_images(
             });
         });
         let mut ready: Vec<(FileRow, Vec<u8>, FileMeta)> = Vec::with_capacity(batch);
-        let mut out: Vec<(FileRow, FileMeta, Vec<NewItem>)> = Vec::new();
+        let mut out: Vec<Embedded> = Vec::new();
         let mut result = Ok(());
         for (f, r) in &rx {
             if result.is_err() || lib.control.is_cancelled() {
@@ -408,7 +408,7 @@ fn index_images(
                 result = embed_ready(lib, enc, &mut ready, &mut out, prog);
             }
             if out.len() >= WRITE_BATCH && result.is_ok() {
-                result = write_items(lib, &mut out);
+                result = write_items(lib, std::mem::take(&mut out));
             }
             if result.is_err() {
                 abort.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -418,7 +418,7 @@ fn index_images(
             result = embed_ready(lib, enc, &mut ready, &mut out, prog);
         }
         if result.is_ok() {
-            result = write_items(lib, &mut out);
+            result = write_items(lib, std::mem::take(&mut out));
         }
         result
     })
@@ -428,7 +428,7 @@ fn embed_ready(
     lib: &Library,
     enc: &mut VisionEncoder,
     ready: &mut Vec<(FileRow, Vec<u8>, FileMeta)>,
-    out: &mut Vec<(FileRow, FileMeta, Vec<NewItem>)>,
+    out: &mut Vec<Embedded>,
     prog: &mut Progress,
 ) -> Result<()> {
     if ready.is_empty() {
@@ -439,33 +439,37 @@ fn embed_ready(
     check_count("images", embs.len(), ready.len())?;
     for ((f, _, meta), e) in ready.drain(..).zip(embs) {
         prog.file_done(lib, &f, 1, false);
-        out.push((
-            f,
+        out.push(Embedded {
+            file: f,
             meta,
-            vec![NewItem {
+            items: vec![NewItem {
                 t_start: None,
                 t_end: None,
                 embedding: e,
             }],
-        ));
+        });
     }
     Ok(())
 }
 
+/// A file whose items have been embedded and wait to be stored.
+pub(crate) struct Embedded {
+    pub(crate) file: FileRow,
+    pub(crate) meta: FileMeta,
+    pub(crate) items: Vec<NewItem>,
+}
+
 /// Persists finished files and appends their vectors to the live index. (Stale vectors of
 /// changed files were already dropped during the folder sync.)
-pub(crate) fn write_items(
-    lib: &Library,
-    out: &mut Vec<(FileRow, FileMeta, Vec<NewItem>)>,
-) -> Result<()> {
+pub(crate) fn write_items(lib: &Library, out: Vec<Embedded>) -> Result<()> {
     if out.is_empty() {
         return Ok(());
     }
     let spec = lib.model();
-    let kinds: Vec<MediaKind> = out.iter().map(|o| o.0.kind).collect();
+    let kinds: Vec<MediaKind> = out.iter().map(|o| o.file.kind).collect();
     let batch: Vec<(i64, FileMeta, Vec<NewItem>)> = out
-        .drain(..)
-        .map(|(f, m, items)| (f.id, m, items))
+        .into_iter()
+        .map(|e| (e.file.id, e.meta, e.items))
         .collect();
     // Hold the db lock while updating the index so a concurrent folder removal can't slip in
     // between (lock order: db, then index).

@@ -2,7 +2,7 @@
 //! the in-memory vector index is rebuilt from it at startup (see `docs/design.md`).
 
 use crate::media::metadata::{Capture, DateSource, effective_taken};
-use crate::media::{MediaKind, ScannedFile};
+use crate::media::{MediaKind, ScannedFile, UnknownValue};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -108,13 +108,47 @@ pub enum FileStatus {
     Error,
 }
 
-impl FileStatus {
-    fn from_i64(v: i64) -> Self {
+impl TryFrom<i64> for FileStatus {
+    type Error = UnknownValue;
+
+    fn try_from(v: i64) -> Result<Self, UnknownValue> {
         match v {
-            1 => Self::Indexed,
-            2 => Self::Error,
-            _ => Self::Pending,
+            0 => Ok(Self::Pending),
+            1 => Ok(Self::Indexed),
+            2 => Ok(Self::Error),
+            value => Err(UnknownValue {
+                what: "file status",
+                value,
+            }),
         }
+    }
+}
+
+/// Reads column `idx` as `T`; a stored number that names no variant is an error.
+fn typed<T: TryFrom<i64, Error = UnknownValue>>(
+    r: &rusqlite::Row<'_>,
+    idx: usize,
+) -> rusqlite::Result<T> {
+    let v: i64 = r.get(idx)?;
+    T::try_from(v).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Integer, Box::new(e))
+    })
+}
+
+/// [`typed`] for a column that may be NULL, which reads as the default (`0`).
+fn typed_or_zero<T: TryFrom<i64, Error = UnknownValue>>(
+    r: &rusqlite::Row<'_>,
+    idx: usize,
+) -> rusqlite::Result<T> {
+    match r.get::<_, Option<i64>>(idx)? {
+        Some(_) => typed(r, idx),
+        None => T::try_from(0).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                idx,
+                rusqlite::types::Type::Integer,
+                Box::new(e),
+            )
+        }),
     }
 }
 
@@ -346,10 +380,10 @@ pub struct Stats {
 struct RawTimelineRow {
     file_id: i64,
     path: String,
-    kind: i64,
+    kind: MediaKind,
     mtime: i64,
     taken_at: Option<i64>,
-    date_source: Option<i64>,
+    date_source: DateSource,
     duration: Option<f64>,
     width: Option<u32>,
     height: Option<u32>,
@@ -362,6 +396,14 @@ struct RawTimelineRow {
 /// Unconverted timeline rows; turning them into sorted [`TimelineItem`]s is CPU work that
 /// needs no database access.
 pub struct TimelineRows(Vec<RawTimelineRow>);
+
+impl std::fmt::Debug for TimelineRows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelineRows")
+            .field("rows", &self.0.len())
+            .finish()
+    }
+}
 
 impl TimelineRows {
     /// Converts and sorts into display order. Files whose capture time is not known yet are
@@ -377,10 +419,10 @@ impl TimelineRows {
                         file_id: r.file_id,
                         item_id: r.item_id,
                         path: PathBuf::from(r.path),
-                        kind: MediaKind::from_i64(r.kind),
+                        kind: r.kind,
                         mtime: r.mtime,
                         taken_at: effective_taken(r.taken_at, r.mtime),
-                        date_source: DateSource::from_i64(r.date_source.unwrap_or(0)),
+                        date_source: r.date_source,
                         duration: r.duration,
                         width: r.width,
                         height: r.height,
@@ -413,14 +455,20 @@ pub struct Db {
     conn: Connection,
 }
 
+impl std::fmt::Debug for Db {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Db").finish_non_exhaustive()
+    }
+}
+
 fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     Ok(FileRow {
         id: r.get(0)?,
         path: PathBuf::from(r.get::<_, String>(1)?),
-        kind: MediaKind::from_i64(r.get(2)?),
+        kind: typed(r, 2)?,
         size: unsigned(r.get::<_, i64>(3)?),
         mtime: r.get(4)?,
-        status: FileStatus::from_i64(r.get(5)?),
+        status: typed(r, 5)?,
     })
 }
 
@@ -770,7 +818,7 @@ impl Db {
                         stats.added += ins.execute(params![
                             folder_id,
                             p,
-                            f.kind.as_i64(),
+                            i64::from(f.kind),
                             signed(f.size),
                             f.mtime,
                             added_at
@@ -826,7 +874,7 @@ impl Db {
                 upd.execute(params![
                     id,
                     c.taken_at,
-                    c.source.as_i64(),
+                    i64::from(c.source),
                     c.camera,
                     c.duration
                 ])?;
@@ -967,7 +1015,7 @@ impl Db {
                     AlbumCover {
                         file_id: r.get(1)?,
                         path: PathBuf::from(r.get::<_, String>(2)?),
-                        kind: MediaKind::from_i64(r.get(3)?),
+                        kind: typed(r, 3)?,
                         mtime: r.get(4)?,
                     },
                 ))
@@ -1017,7 +1065,7 @@ impl Db {
                     Ok(FileDetails {
                         path: PathBuf::from(r.get::<_, String>(5)?),
                         taken_at: effective_taken(taken, mtime),
-                        date_source: DateSource::from_i64(r.get::<_, Option<i64>>(2)?.unwrap_or(0)),
+                        date_source: typed_or_zero(r, 2)?,
                         camera: r.get(3)?,
                         favorite: r.get::<_, i64>(4)? != 0,
                         size: None,
@@ -1086,7 +1134,7 @@ impl Db {
         }
         if let Some(k) = filter.kind {
             sql.push_str(" AND kind = ?");
-            args.push(k.as_i64());
+            args.push(i64::from(k));
         }
         if filter.favorites_only {
             sql.push_str(" AND favorite = 1");
@@ -1101,10 +1149,10 @@ impl Db {
                 Ok(RawTimelineRow {
                     file_id: r.get(0)?,
                     path: r.get(1)?,
-                    kind: r.get(2)?,
+                    kind: typed(r, 2)?,
                     mtime: r.get(3)?,
                     taken_at: r.get(4)?,
-                    date_source: r.get(5)?,
+                    date_source: typed_or_zero(r, 5)?,
                     duration: r.get(6)?,
                     width: r.get(7)?,
                     height: r.get(8)?,
@@ -1227,7 +1275,7 @@ impl Db {
             f(StoredItem {
                 id: r.get(0)?,
                 file_id: r.get(1)?,
-                kind: MediaKind::from_i64(r.get(2)?),
+                kind: typed(r, 2)?,
                 taken_at: effective_taken(r.get(4)?, r.get(5)?),
                 embedding: blob_to_emb(r.get_ref(3)?.as_blob()?),
             });
@@ -1277,7 +1325,7 @@ impl Db {
                     item_id: r.get(0)?,
                     file_id: r.get(1)?,
                     path: PathBuf::from(r.get::<_, String>(2)?),
-                    kind: MediaKind::from_i64(r.get(3)?),
+                    kind: typed(r, 3)?,
                     mtime: r.get(4)?,
                     t_start: r.get(5)?,
                     t_end: r.get(6)?,
@@ -1738,7 +1786,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let e = Db::open(&p).err().expect("must refuse").to_string();
+        let e = Db::open(&p).expect_err("must refuse").to_string();
         assert!(e.contains("schema version 3"), "{e}");
     }
 

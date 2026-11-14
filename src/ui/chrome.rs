@@ -109,51 +109,56 @@ impl App {
                     self.open_settings();
                 }
                 if style::icon_button_framed(ui, icons::ICON_HELP, "Help").clicked() {
-                    self.help_open = true;
+                    self.dialogs.help_open = true;
                 }
             });
         });
+    }
+
+    /// The search field while smart search is off: a prompt that opens Settings.
+    fn search_field_off(&mut self, ui: &mut egui::Ui, width: f32) {
+        let pal = Palette::of(ui.ctx());
+        let radius = CornerRadius::same(style::CONTROL_RADIUS);
+        // Searching needs smart search: the field invites turning it on instead.
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
+        ui.painter().rect_filled(rect, radius, pal.raised);
+        ui.painter().text(
+            Pos2::new(rect.min.x + 20.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            icons::ICON_SEARCH.codepoint,
+            style::icon_font_id(icons::ICON_SEARCH, 20.0),
+            pal.text_secondary,
+        );
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            SEARCH_OFF_HINT.to_string(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            pal.text_secondary,
+        );
+        job.wrap.max_width = width - 44.0;
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        job.wrap.overflow_character = Some('…');
+        let g = ui.painter().layout_job(job);
+        ui.painter().galley(
+            Pos2::new(rect.min.x + 38.0, rect.center().y - g.size().y / 2.0),
+            g,
+            pal.text_secondary,
+        );
+        self.search_help.field = None;
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, SEARCH_OFF_LABEL));
+        if resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.open_settings_at(super::settings::Section::SmartSearch);
+        }
     }
 
     fn search_field(&mut self, ui: &mut egui::Ui, width: f32) {
         let pal = Palette::of(ui.ctx());
         let radius = CornerRadius::same(style::CONTROL_RADIUS);
         if !self.snapshot.model_installed {
-            // Searching needs smart search: the field invites turning it on instead.
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
-            ui.painter().rect_filled(rect, radius, pal.raised);
-            ui.painter().text(
-                Pos2::new(rect.min.x + 20.0, rect.center().y),
-                egui::Align2::CENTER_CENTER,
-                icons::ICON_SEARCH.codepoint,
-                style::icon_font_id(icons::ICON_SEARCH, 20.0),
-                pal.text_secondary,
-            );
-            let mut job = egui::text::LayoutJob::simple_singleline(
-                SEARCH_OFF_HINT.to_string(),
-                egui::TextStyle::Body.resolve(ui.style()),
-                pal.text_secondary,
-            );
-            job.wrap.max_width = width - 44.0;
-            job.wrap.max_rows = 1;
-            job.wrap.break_anywhere = true;
-            job.wrap.overflow_character = Some('…');
-            let g = ui.painter().layout_job(job);
-            ui.painter().galley(
-                Pos2::new(rect.min.x + 38.0, rect.center().y - g.size().y / 2.0),
-                g,
-                pal.text_secondary,
-            );
-            self.search_help.field = None;
-            resp.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::Button, true, SEARCH_OFF_LABEL)
-            });
-            if resp
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                self.open_settings_at(super::settings::Section::SmartSearch);
-            }
+            self.search_field_off(ui, width);
             return;
         }
         let id = egui::Id::unique("search");
@@ -375,17 +380,18 @@ impl App {
     /// narrow and order them. (The photo/video filter lives in the top bar.)
     pub(super) fn results_header(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
-        let title = match &self.current {
+        let title = match &self.res.current {
             Some(super::Query::Similar { label, .. }) => format!("Photos similar to {label}"),
             Some(super::Query::Text(q)) => format!("Results for “{q}”"),
             None => format!("Results for “{}”", self.query.trim()),
         };
         let photos = self
-            .results
+            .res
+            .hits
             .iter()
             .filter(|h| h.kind == MediaKind::Image)
             .count();
-        let videos = self.results.len() - photos;
+        let videos = self.res.hits.len() - photos;
         let subtitle = count_text(photos, videos);
         let year = chrono::Datelike::year(&self.today());
         let mut changed = false;
@@ -396,18 +402,19 @@ impl App {
                         egui::Label::new(RichText::new(title).text_style(egui::TextStyle::Heading))
                             .truncate(),
                     );
-                    if self.awaiting.is_some() {
+                    if self.res.awaiting.is_some() {
                         ui.spinner();
                     }
                 });
                 // An empty result list shows the problem itself; don't say it twice.
                 if let Some(e) = self
-                    .result_error
+                    .res
+                    .error
                     .as_ref()
-                    .filter(|_| !self.results.is_empty())
+                    .filter(|_| !self.res.hits.is_empty())
                 {
                     ui.colored_label(pal.error, &e.text);
-                } else if self.result_error.is_none() && !subtitle.is_empty() {
+                } else if self.res.error.is_none() && !subtitle.is_empty() {
                     ui.label(RichText::new(subtitle).color(pal.text_secondary));
                 }
             });

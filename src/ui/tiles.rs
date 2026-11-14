@@ -10,29 +10,105 @@ use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 
 /// Size of the clickable areas of the circle and the star.
 const ZONE: f32 = 34.0;
+/// Radius of the selection circle and of the dark disc behind the star.
+const CIRCLE_RADIUS: f32 = 11.0;
+const STAR_DISC_RADIUS: f32 = 12.0;
+/// Size of the check mark and of the star.
+const CHECK_SIZE: f32 = 16.0;
+const STAR_SIZE: f32 = 18.0;
+/// Opacity (0-255) of the dark discs behind the circle and the star.
+const CIRCLE_DISC_ALPHA: u8 = 70;
+const STAR_DISC_ALPHA: u8 = 90;
+/// The shades at the top and bottom edge while hovered: height and opacity at the edge.
+const SHADE_HEIGHT: f32 = 64.0;
+const SHADE_ALPHA: u8 = 105;
+
+/// How a tile takes part in the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum TileMark {
+    #[default]
+    None,
+    /// The tile the keyboard is on.
+    Focused,
+    /// Part of the selection the user made on purpose (circle, Ctrl or Shift).
+    Checked,
+}
 
 /// What a tile shows.
 pub(super) struct Tile<'a> {
     pub key: &'a ThumbKey,
-    /// File name (for assistive technology and the hover text).
-    pub name: &'a str,
     /// Prefix of the accessible name of the tile ("Item", "Result").
-    pub role: &'a str,
+    role: &'a str,
+    /// File name (for assistive technology and the hover text); built only when needed.
+    name: &'a dyn Fn() -> String,
+    /// The hover text if it is not just the name; built only when the tile is hovered.
+    tip: Option<&'a dyn Fn() -> String>,
     /// Text of the pill on videos (a time).
-    pub badge: Option<String>,
-    pub favorite: bool,
-    /// Part of the selection the user made on purpose (circle, Ctrl or Shift).
-    pub checked: bool,
-    /// The tile the keyboard is on.
-    pub focused: bool,
+    badge: Option<String>,
+    favorite: bool,
+    mark: TileMark,
     /// Selection mode: circles stay visible on every tile.
-    pub picking: bool,
-    /// Whether assistive technology should hear "selected".
-    pub selected: bool,
+    picking: bool,
     /// Whether the tile has a selection circle (a tile that only opens has none).
-    pub selectable: bool,
-    /// The hover text, built only when the tile is hovered.
-    pub tip: &'a dyn Fn() -> String,
+    selectable: bool,
+}
+
+impl<'a> Tile<'a> {
+    /// A tile that only opens (no selection circle).
+    pub(super) fn new(key: &'a ThumbKey, role: &'a str, name: &'a dyn Fn() -> String) -> Self {
+        Self {
+            key,
+            role,
+            name,
+            tip: None,
+            badge: None,
+            favorite: false,
+            mark: TileMark::None,
+            picking: false,
+            selectable: false,
+        }
+    }
+
+    pub(super) fn tip(mut self, tip: &'a dyn Fn() -> String) -> Self {
+        self.tip = Some(tip);
+        self
+    }
+
+    pub(super) fn badge(mut self, badge: Option<String>) -> Self {
+        self.badge = badge;
+        self
+    }
+
+    pub(super) fn favorite(mut self, favorite: bool) -> Self {
+        self.favorite = favorite;
+        self
+    }
+
+    /// Gives the tile a selection circle, in the given selection state.
+    pub(super) fn selectable(mut self, mark: TileMark, picking: bool) -> Self {
+        self.selectable = true;
+        self.mark = mark;
+        self.picking = picking;
+        self
+    }
+
+    fn checked(&self) -> bool {
+        self.mark == TileMark::Checked
+    }
+}
+
+impl TileMark {
+    /// The mark of an item that is `in_sel` (selected) and/or the keyboard's `primary`, given
+    /// whether the user is deliberately picking items.
+    pub(super) fn of(in_sel: bool, primary: bool, picking_or_multi: bool) -> Self {
+        if in_sel && picking_or_multi {
+            Self::Checked
+        } else if in_sel || primary {
+            Self::Focused
+        } else {
+            Self::None
+        }
+    }
 }
 
 /// What the user did to a tile this frame.
@@ -139,27 +215,30 @@ pub(super) fn show(
         },
     );
     let star = ui.interact(star_zone, id.with("favorite"), Sense::click());
-    let select_label = if tile.checked {
-        format!("Deselect {}", tile.name)
-    } else {
-        format!("Select {}", tile.name)
-    };
     if tile.selectable {
         circle.widget_info(|| {
-            egui::WidgetInfo::selected(egui::Role::CheckBox, true, tile.checked, &select_label)
+            let verb = if tile.checked() { "Deselect" } else { "Select" };
+            let label = format!("{verb} {}", (tile.name)());
+            egui::WidgetInfo::selected(egui::Role::CheckBox, true, tile.checked(), &label)
         });
     }
-    let star_label = if tile.favorite {
-        format!("Remove {} from favorites", tile.name)
-    } else {
-        format!("Add {} to favorites", tile.name)
-    };
     star.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, tile.favorite, &star_label)
+        let name = (tile.name)();
+        let label = if tile.favorite {
+            format!("Remove {name} from favorites")
+        } else {
+            format!("Add {name} to favorites")
+        };
+        egui::WidgetInfo::selected(egui::Role::Button, true, tile.favorite, &label)
     });
-    let label = format!("{} {}", tile.role, tile.name);
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, tile.selected, &label)
+        let label = format!("{} {}", tile.role, (tile.name)());
+        egui::WidgetInfo::selected(
+            egui::Role::Button,
+            true,
+            tile.mark != TileMark::None,
+            &label,
+        )
     });
 
     if ui.is_rect_visible(rect) {
@@ -183,10 +262,49 @@ pub(super) fn show(
         resp
     } else {
         resp.on_hover_ui(|ui| {
-            ui.label((tile.tip)());
+            ui.label(tile.tip.map_or_else(|| (tile.name)(), |tip| tip()));
         })
     };
     TileOut { resp, event }
+}
+
+/// What shows where the picture is not (yet) available.
+fn paint_placeholder(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    failed: bool,
+    pal: &Palette,
+) {
+    let radius = CornerRadius::same(style::TILE_RADIUS);
+    painter.rect_filled(rect, radius, pal.surface);
+    if failed {
+        // A picture that is not there: the icon alone on small tiles, with a line of
+        // text on larger ones.
+        let wide = rect.width() > 110.0;
+        let size = (rect.width() * 0.3).clamp(14.0, 32.0);
+        let centre = if wide {
+            rect.center() - Vec2::new(0.0, 10.0)
+        } else {
+            rect.center()
+        };
+        paint_icon(
+            painter,
+            centre,
+            icons::ICON_BROKEN_IMAGE,
+            size,
+            pal.text_secondary,
+        );
+        if wide {
+            painter.text(
+                rect.center() + Vec2::new(0.0, size / 2.0 + 2.0),
+                egui::Align2::CENTER_CENTER,
+                "Preview unavailable",
+                egui::TextStyle::Small.resolve(ui.style()),
+                pal.text_secondary,
+            );
+        }
+    }
 }
 
 fn paint(
@@ -206,79 +324,76 @@ fn paint(
             .with_texture(tex.id(), square_uv(tex.size_vec2()));
         painter.add(shape);
     } else {
-        painter.rect_filled(rect, radius, pal.surface);
-        if failed {
-            // A picture that is not there: the icon alone on small tiles, with a line of
-            // text on larger ones.
-            let wide = rect.width() > 110.0;
-            let size = (rect.width() * 0.3).clamp(14.0, 32.0);
-            let centre = if wide {
-                rect.center() - Vec2::new(0.0, 10.0)
-            } else {
-                rect.center()
-            };
-            paint_icon(
-                &painter,
-                centre,
-                icons::ICON_BROKEN_IMAGE,
-                size,
-                pal.text_secondary,
-            );
-            if wide {
-                painter.text(
-                    rect.center() + Vec2::new(0.0, size / 2.0 + 2.0),
-                    egui::Align2::CENTER_CENTER,
-                    "Preview unavailable",
-                    egui::TextStyle::Small.resolve(ui.style()),
-                    pal.text_secondary,
-                );
-            }
-        }
+        paint_placeholder(ui, &painter, rect, failed, pal);
     }
 
-    let show_controls = tile.selectable && (hovered || tile.picking || tile.checked) && !small;
+    let show_controls = tile.selectable && (hovered || tile.picking || tile.checked()) && !small;
     if hovered {
         // Soft shades at the top and bottom keep the circle, the star and the time readable
         // on bright photos, without a visible edge.
-        painter.add(fade(rect, true, 64.0, 105, f32::from(style::TILE_RADIUS)));
-        painter.add(fade(rect, false, 64.0, 105, f32::from(style::TILE_RADIUS)));
+        painter.add(fade(
+            rect,
+            true,
+            SHADE_HEIGHT,
+            SHADE_ALPHA,
+            f32::from(style::TILE_RADIUS),
+        ));
+        painter.add(fade(
+            rect,
+            false,
+            SHADE_HEIGHT,
+            SHADE_ALPHA,
+            f32::from(style::TILE_RADIUS),
+        ));
     }
     if show_controls {
         let c = circle_center(rect);
-        if tile.checked {
-            painter.circle_filled(c, 11.0, pal.accent);
-            paint_icon(&painter, c, icons::ICON_CHECK, 16.0, pal.on_accent);
+        if tile.checked() {
+            painter.circle_filled(c, CIRCLE_RADIUS, pal.accent);
+            paint_icon(&painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.on_accent);
         } else {
-            painter.circle_filled(c, 11.0, Color32::from_black_alpha(70));
-            painter.circle_stroke(c, 10.0, Stroke::new(2.0, Color32::WHITE));
+            painter.circle_filled(
+                c,
+                CIRCLE_RADIUS,
+                Color32::from_black_alpha(CIRCLE_DISC_ALPHA),
+            );
+            painter.circle_stroke(c, CIRCLE_RADIUS - 1.0, Stroke::new(2.0, Color32::WHITE));
         }
     }
     if tile.favorite && !small {
         let c = star_center(rect);
-        painter.circle_filled(c, 12.0, Color32::from_black_alpha(90));
-        paint_icon(&painter, c, icons::ICON_STAR, 18.0, pal.favorite);
+        painter.circle_filled(
+            c,
+            STAR_DISC_RADIUS,
+            Color32::from_black_alpha(STAR_DISC_ALPHA),
+        );
+        paint_icon(&painter, c, icons::ICON_STAR, STAR_SIZE, pal.favorite);
     } else if hovered && !small {
         let c = star_center(rect);
-        painter.circle_filled(c, 12.0, Color32::from_black_alpha(90));
+        painter.circle_filled(
+            c,
+            STAR_DISC_RADIUS,
+            Color32::from_black_alpha(STAR_DISC_ALPHA),
+        );
         paint_icon(
             &painter,
             c,
             icons::ICON_STAR.outlined(),
-            18.0,
+            STAR_SIZE,
             Color32::WHITE,
         );
     }
     if let Some(text) = &tile.badge {
         paint_pill(&painter, rect, text);
     }
-    if tile.checked {
+    if tile.checked() {
         painter.rect_stroke(
             rect.shrink(1.5),
             radius,
             Stroke::new(3.0, pal.accent),
             egui::StrokeKind::Inside,
         );
-    } else if tile.focused {
+    } else if tile.mark == TileMark::Focused {
         painter.rect_stroke(
             rect.shrink(1.0),
             radius,

@@ -5,4 +5,4 @@ pub mod metadata;
 pub mod scan;
 pub mod video;
 
-pub use scan::{MediaKind, ScannedFile};
+pub use scan::{MediaKind, ScannedFile, UnknownValue};

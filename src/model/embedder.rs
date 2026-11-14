@@ -135,6 +135,16 @@ pub struct VisionEncoder {
     gpu_failures: u32,
 }
 
+impl std::fmt::Debug for VisionEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisionEncoder")
+            .field("model", &self.spec.id)
+            .field("device", &self.device)
+            .field("batch", &self.batch)
+            .finish_non_exhaustive()
+    }
+}
+
 impl VisionEncoder {
     /// Loads the vision model, trying the GPU first when `prefer_gpu` and falling back to the
     /// CPU if the GPU session can't be created or fails a warm-up run.
@@ -288,6 +298,14 @@ pub struct TextEncoder {
     tokenizer: tokenizers::Tokenizer,
     output: String,
     needs_mask: bool,
+}
+
+impl std::fmt::Debug for TextEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextEncoder")
+            .field("model", &self.spec.id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TextEncoder {

@@ -9,19 +9,41 @@ pub enum MediaKind {
     Video,
 }
 
-impl MediaKind {
-    pub fn as_i64(self) -> i64 {
-        match self {
+/// A number read from storage that names no known variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownValue {
+    pub what: &'static str,
+    pub value: i64,
+}
+
+impl std::fmt::Display for UnknownValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown {} {}", self.what, self.value)
+    }
+}
+
+impl std::error::Error for UnknownValue {}
+
+impl From<MediaKind> for i64 {
+    fn from(kind: MediaKind) -> i64 {
+        match kind {
             MediaKind::Image => 0,
             MediaKind::Video => 1,
         }
     }
+}
 
-    pub fn from_i64(v: i64) -> Self {
-        if v == 1 {
-            MediaKind::Video
-        } else {
-            MediaKind::Image
+impl TryFrom<i64> for MediaKind {
+    type Error = UnknownValue;
+
+    fn try_from(v: i64) -> Result<Self, UnknownValue> {
+        match v {
+            0 => Ok(MediaKind::Image),
+            1 => Ok(MediaKind::Video),
+            value => Err(UnknownValue {
+                what: "media kind",
+                value,
+            }),
         }
     }
 }

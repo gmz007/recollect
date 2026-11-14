@@ -13,7 +13,7 @@ use crate::search::{SearchHit, SearchOptions};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -157,28 +157,76 @@ pub fn paths(cli: &Cli) -> Result<Paths> {
     })
 }
 
+/// Prints the known models and which of them are installed.
+fn list_models(lib: &Library) {
+    let current = lib.model().id;
+    for m in registry::MODELS {
+        let mark = if m.id == current { "*" } else { " " };
+        let inst = if download::is_installed(&lib.paths().models_dir(), m) {
+            "installed"
+        } else {
+            "not downloaded"
+        };
+        println!(
+            "{mark} {:<16} {:<32} {:>5} MB  {:<11} {inst}",
+            m.id,
+            m.name,
+            m.total_size() / 1_000_000,
+            m.license
+        );
+    }
+}
+
+/// Prints what the library holds and how far indexing is.
+fn print_status(lib: &Library) -> Result<()> {
+    let s = lib.stats()?;
+    println!(
+        "model:   {}{}",
+        lib.model().id,
+        if lib.model_installed() {
+            ""
+        } else {
+            " (not downloaded)"
+        }
+    );
+    println!("folders: {}", s.folders);
+    println!("files:   {} images, {} videos", s.images, s.videos);
+    let d = lib.date_counts()?;
+    println!(
+        "dates:   {} from EXIF, {} from video metadata, {} from file time",
+        d.exif, d.video, d.file
+    );
+    println!(
+        "indexed: {} files ({} vectors), {} pending, {} errors",
+        s.indexed, s.items, s.pending, s.errors
+    );
+    for (p, e) in lib.errors(10)? {
+        println!("  error: {}: {e}", p.display());
+    }
+    Ok(())
+}
+
+/// Removes the library folder at `path` (as given or as it resolves on disk).
+fn remove_folder(lib: &Library, path: &Path) -> Result<()> {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let Some(f) = lib
+        .folders()?
+        .into_iter()
+        .find(|f| f.path == canon || f.path == *path)
+    else {
+        bail!("{} is not a library folder", path.display());
+    };
+    lib.remove_folder(f.id)?;
+    Ok(())
+}
+
 /// Runs a command that works on an opened library.
 pub fn run(lib: &Arc<Library>, command: &LibCommand) -> Result<()> {
     match command {
         LibCommand::Models {
             cmd: ModelsCmd::List,
         } => {
-            let current = lib.model().id;
-            for m in registry::MODELS {
-                let mark = if m.id == current { "*" } else { " " };
-                let inst = if download::is_installed(&lib.paths().models_dir(), m) {
-                    "installed"
-                } else {
-                    "not downloaded"
-                };
-                println!(
-                    "{mark} {:<16} {:<32} {:>5} MB  {:<11} {inst}",
-                    m.id,
-                    m.name,
-                    m.total_size() / 1_000_000,
-                    m.license
-                );
-            }
+            list_models(lib);
         }
         LibCommand::Models {
             cmd: ModelsCmd::Download { yes },
@@ -195,15 +243,7 @@ pub fn run(lib: &Arc<Library>, command: &LibCommand) -> Result<()> {
                 }
             }
             FoldersCmd::Remove { path } => {
-                let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                let Some(f) = lib
-                    .folders()?
-                    .into_iter()
-                    .find(|f| f.path == canon || f.path == *path)
-                else {
-                    bail!("{} is not a library folder", path.display());
-                };
-                lib.remove_folder(f.id)?;
+                remove_folder(lib, path)?;
             }
         },
         LibCommand::Index { paths } => {
@@ -239,30 +279,7 @@ pub fn run(lib: &Arc<Library>, command: &LibCommand) -> Result<()> {
             }
         }
         LibCommand::Status => {
-            let s = lib.stats()?;
-            println!(
-                "model:   {}{}",
-                lib.model().id,
-                if lib.model_installed() {
-                    ""
-                } else {
-                    " (not downloaded)"
-                }
-            );
-            println!("folders: {}", s.folders);
-            println!("files:   {} images, {} videos", s.images, s.videos);
-            let d = lib.date_counts()?;
-            println!(
-                "dates:   {} from EXIF, {} from video metadata, {} from file time",
-                d.exif, d.video, d.file
-            );
-            println!(
-                "indexed: {} files ({} vectors), {} pending, {} errors",
-                s.indexed, s.items, s.pending, s.errors
-            );
-            for (p, e) in lib.errors(10)? {
-                println!("  error: {}: {e}", p.display());
-            }
+            print_status(lib)?;
         }
     }
     Ok(())

@@ -251,6 +251,14 @@ pub struct ViewerEnv<'a> {
     pub keys: bool,
 }
 
+/// What the canvas draws for the current item.
+struct Shown {
+    tex: Option<egui::TextureHandle>,
+    /// Only the thumbnail is available so far, and the preview is on its way.
+    loading: bool,
+    failed: bool,
+}
+
 impl Viewer {
     pub fn new(source: Source, index: usize, info: bool) -> Self {
         debug_assert!(source.len() > 0, "a viewer needs something to show");
@@ -505,7 +513,6 @@ impl Viewer {
         actions: &mut Vec<Action>,
         text: bool,
     ) {
-        let pal = style::Palette::of(ui.ctx());
         let word = |w: &'static str| text.then_some(w);
         if self.current().kind == MediaKind::Image {
             let (icon, label) = if self.zoom {
@@ -570,41 +577,47 @@ impl Viewer {
             actions.push(Action::AddToAlbum(self.current().file_id, c));
         }
         self.favorite_button(ui, actions, text);
+        if self.current().kind == MediaKind::Video {
+            self.play_button(ui, actions);
+        }
+    }
+
+    /// The accent button that plays the current video from the chosen moment.
+    fn play_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let pal = style::Palette::of(ui.ctx());
         let e = self.current().clone();
-        if e.kind == MediaKind::Video {
-            ui.add_space(8.0);
-            let t = e.t.unwrap_or(0.0);
-            let label = format!("Play at {}", fmt_time(t));
-            let mut job = egui::text::LayoutJob::default();
-            for (text, font, gap) in [
-                (
-                    icons::ICON_PLAY_ARROW.codepoint,
-                    style::icon_font_id(icons::ICON_PLAY_ARROW, 20.0),
-                    0.0,
-                ),
-                (
-                    label.as_str(),
-                    egui::TextStyle::Button.resolve(ui.style()),
-                    4.0,
-                ),
-            ] {
-                job.append(
-                    text,
-                    gap,
-                    egui::TextFormat {
-                        font_id: font,
-                        color: pal.on_accent,
-                        valign: egui::Align::Center,
-                        ..Default::default()
-                    },
-                );
-            }
-            let b = egui::Button::new(job).fill(pal.accent);
-            let r = ui.add(b);
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-            if r.on_hover_text("Play this video").clicked() {
-                actions.push(Action::PlayAt(e.path, t));
-            }
+        ui.add_space(8.0);
+        let t = e.t.unwrap_or(0.0);
+        let label = format!("Play at {}", fmt_time(t));
+        let mut job = egui::text::LayoutJob::default();
+        for (text, font, gap) in [
+            (
+                icons::ICON_PLAY_ARROW.codepoint,
+                style::icon_font_id(icons::ICON_PLAY_ARROW, 20.0),
+                0.0,
+            ),
+            (
+                label.as_str(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                4.0,
+            ),
+        ] {
+            job.append(
+                text,
+                gap,
+                egui::TextFormat {
+                    font_id: font,
+                    color: pal.on_accent,
+                    valign: egui::Align::Center,
+                    ..Default::default()
+                },
+            );
+        }
+        let b = egui::Button::new(job).fill(pal.accent);
+        let r = ui.add(b);
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        if r.on_hover_text("Play this video").clicked() {
+            actions.push(Action::PlayAt(e.path, t));
         }
     }
 
@@ -708,18 +721,10 @@ impl Viewer {
         }
     }
 
-    /// The media area: preview (or the thumbnail until it is ready), zoom and previous / next.
-    fn canvas(&mut self, ui: &mut egui::Ui, previews: &mut Previews, thumbs: &mut ThumbCache) {
-        let ctx = ui.ctx().clone();
-        let area = ui.available_rect_before_wrap();
-        let resp = ui.allocate_rect(area, Sense::click_and_drag());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Viewer canvas"));
-        if resp.double_clicked() {
-            self.toggle_zoom();
-        }
-        let ppp = ctx.pixels_per_point();
-        let fit = preview::fit_side(ctx.content_rect().size(), ppp);
-        let e = self.current.clone();
+    /// Asks for what the canvas needs (and forgets what it no longer wants) and picks the
+    /// texture to draw.
+    fn pick_texture(&self, previews: &mut Previews, thumbs: &mut ThumbCache, fit: u32) -> Shown {
+        let e = &self.current;
         // The neighbours are prefetched; the item on screen is asked for urgently every frame,
         // so it is decoded before them even if they were queued first (the fitted preview
         // last of all, hence first in line). Whatever is no longer wanted is forgotten.
@@ -765,6 +770,30 @@ impl Viewer {
             tex = thumbs.get(&e.thumb_key()).cloned();
             loading = !failed;
         }
+        Shown {
+            tex,
+            loading,
+            failed,
+        }
+    }
+
+    /// The media area: preview (or the thumbnail until it is ready), zoom and previous / next.
+    fn canvas(&mut self, ui: &mut egui::Ui, previews: &mut Previews, thumbs: &mut ThumbCache) {
+        let ctx = ui.ctx().clone();
+        let area = ui.available_rect_before_wrap();
+        let resp = ui.allocate_rect(area, Sense::click_and_drag());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Viewer canvas"));
+        if resp.double_clicked() {
+            self.toggle_zoom();
+        }
+        let ppp = ctx.pixels_per_point();
+        let fit = preview::fit_side(ctx.content_rect().size(), ppp);
+        let e = self.current.clone();
+        let Shown {
+            tex,
+            loading,
+            failed,
+        } = self.pick_texture(previews, thumbs, fit);
         let painter = ui.painter_at(area);
         if let Some(tex) = tex {
             let native = tex.size_vec2();
@@ -897,22 +926,24 @@ impl App {
 
     /// Opens the viewer on the whole album list at `i`. The list is shared, not copied.
     pub(super) fn open_viewer_timeline(&mut self, i: usize) {
-        self.tl.selected = Some(i);
+        self.tl.grid.selected = Some(i);
         self.start_viewer(Source::Timeline(Arc::clone(&self.tl.items)), i, None);
     }
 
     /// Opens the viewer on the search results at `i`. The list is shared, not copied.
     pub(super) fn open_viewer_results(&mut self, i: usize) {
         let moment = self
+            .res
             .selected_t
-            .filter(|_| self.selected == Some(i))
+            .filter(|_| self.res.grid.selected == Some(i))
             .filter(|_| {
-                self.results
+                self.res
+                    .hits
                     .get(i)
                     .is_some_and(|h| h.kind == MediaKind::Video)
             });
-        self.selected = Some(i);
-        self.start_viewer(Source::Results(Arc::clone(&self.results)), i, moment);
+        self.res.grid.selected = Some(i);
+        self.start_viewer(Source::Results(Arc::clone(&self.res.hits)), i, moment);
     }
 
     /// Opens the viewer on a subset of the album (e.g. the "On this day" strip).
@@ -968,7 +999,7 @@ impl App {
                 ),
                 Action::FindSimilar { item_id, label } => {
                     self.end_viewer();
-                    self.tl.selected = None;
+                    self.tl.grid.selected = None;
                     self.query.clear();
                     self.submit(Query::Similar { item_id, label });
                 }
@@ -999,15 +1030,15 @@ impl App {
             return;
         };
         let e = v.current();
-        if self.searching() {
-            if let Some(i) = self.results.iter().position(|h| h.file_id == e.file_id) {
-                self.selected = Some(i);
-                self.selected_t = e.t.or(self.results[i].t_start);
-                self.keyboard_moved = true;
-            }
-        } else if let Some(i) = self.tl.items.iter().position(|it| it.file_id == e.file_id) {
-            self.tl.selected = Some(i);
-            self.tl.keyboard_moved = true;
+        let Some(i) = self.listed().position(|(id, _)| id == e.file_id) else {
+            return;
+        };
+        let searching = self.searching();
+        let grid = self.active_grid();
+        grid.selected = Some(i);
+        grid.keyboard_moved = true;
+        if searching {
+            self.res.selected_t = e.t.or(self.res.hits[i].t_start);
         }
     }
 }

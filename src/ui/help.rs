@@ -70,6 +70,83 @@ fn step(ui: &mut egui::Ui, n: usize, title: &str, text: &str) {
     });
 }
 
+/// The topic list on the left of the sheet.
+fn help_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut HelpTopic, nav_w: f32, h: f32) {
+    egui::Frame::new()
+        .fill(pal.raised)
+        .corner_radius(CornerRadius {
+            nw: 16,
+            sw: 16,
+            ne: 0,
+            se: 0,
+        })
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(nav_w - 24.0);
+                ui.set_height(h - 24.0);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.add_space(4.0);
+                ui.label(style::semibold("Help").size(18.0));
+                ui.add_space(10.0);
+                for t in HelpTopic::ALL {
+                    let (_, r) = nav_row(
+                        ui,
+                        t.icon(),
+                        t.name(),
+                        &format!("{} help", t.name()),
+                        None,
+                        *current == t,
+                        0.0,
+                    );
+                    if r.clicked() {
+                        *current = t;
+                    }
+                }
+            });
+        });
+}
+
+/// The text of one topic with its title and close button; true when the button was clicked.
+fn help_content(ui: &mut egui::Ui, topic: HelpTopic, width: f32, height: f32) -> bool {
+    let mut close = false;
+    egui::Frame::new()
+        .inner_margin(Margin::symmetric(20, 14))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(width);
+                ui.set_height(height);
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(topic.name()).text_style(egui::TextStyle::Heading));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if style::icon_button_framed(ui, icons::ICON_CLOSE, "Close help").clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                egui::ScrollArea::vertical()
+                    .id_salt(("help-scroll", topic as u8))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width() - 8.0);
+                        match topic {
+                            HelpTopic::GettingStarted => getting_started(ui),
+                            HelpTopic::Searching => searching(ui),
+                            HelpTopic::Organizing => organizing(ui),
+                            HelpTopic::Shortcuts => shortcuts(ui),
+                            HelpTopic::Privacy => privacy(ui),
+                        }
+                        ui.add_space(24.0);
+                    });
+            });
+        });
+    close
+}
+
 impl App {
     /// The sheet itself. Closed by its × button, by Esc and by a click outside it.
     pub(super) fn help_sheet(&mut self, ctx: &egui::Context) {
@@ -92,88 +169,12 @@ impl App {
                 ui.set_height(h);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 ui.horizontal_top(|ui| {
-                    egui::Frame::new()
-                        .fill(pal.raised)
-                        .corner_radius(CornerRadius {
-                            nw: 16,
-                            sw: 16,
-                            ne: 0,
-                            se: 0,
-                        })
-                        .inner_margin(Margin::same(12))
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(nav_w - 24.0);
-                                ui.set_height(h - 24.0);
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                ui.add_space(4.0);
-                                ui.label(style::semibold("Help").size(18.0));
-                                ui.add_space(10.0);
-                                for t in HelpTopic::ALL {
-                                    let (_, r) = nav_row(
-                                        ui,
-                                        t.icon(),
-                                        t.name(),
-                                        &format!("{} help", t.name()),
-                                        None,
-                                        self.help_topic == t,
-                                        0.0,
-                                    );
-                                    if r.clicked() {
-                                        self.help_topic = t;
-                                    }
-                                }
-                            });
-                        });
-                    egui::Frame::new()
-                        .inner_margin(Margin::symmetric(20, 14))
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(w - nav_w - 40.0);
-                                ui.set_height(h - 28.0);
-                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(self.help_topic.name())
-                                            .text_style(egui::TextStyle::Heading),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if style::icon_button_framed(
-                                                ui,
-                                                icons::ICON_CLOSE,
-                                                "Close help",
-                                            )
-                                            .clicked()
-                                            {
-                                                close = true;
-                                            }
-                                        },
-                                    );
-                                });
-                                ui.add_space(6.0);
-                                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-                                egui::ScrollArea::vertical()
-                                    .id_salt(("help-scroll", self.help_topic as u8))
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        ui.set_max_width(ui.available_width() - 8.0);
-                                        match self.help_topic {
-                                            HelpTopic::GettingStarted => getting_started(ui),
-                                            HelpTopic::Searching => searching(ui),
-                                            HelpTopic::Organizing => organizing(ui),
-                                            HelpTopic::Shortcuts => shortcuts(ui),
-                                            HelpTopic::Privacy => privacy(ui),
-                                        }
-                                        ui.add_space(24.0);
-                                    });
-                            });
-                        });
+                    help_nav(ui, &pal, &mut self.dialogs.help_topic, nav_w, h);
+                    close = help_content(ui, self.dialogs.help_topic, w - nav_w - 40.0, h - 28.0);
                 });
             });
         if close || out.backdrop_response.clicked() {
-            self.help_open = false;
+            self.dialogs.help_open = false;
         }
     }
 }

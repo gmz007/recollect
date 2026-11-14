@@ -51,6 +51,34 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
+/// Times the text encoder and estimates the full latency of a search from it.
+fn report_text_encoding(lib: &Library, search_latencies: &[Duration]) -> Result<()> {
+    lib.embed_text("warm up")?;
+    let mut tl = Vec::new();
+    for q in [
+        "kids on the beach at sunset",
+        "a dog playing in the snow",
+        "birthday cake with candles",
+    ] {
+        for _ in 0..5 {
+            let t = Instant::now();
+            lib.embed_text(q)?;
+            tl.push(t.elapsed());
+        }
+    }
+    tl.sort();
+    println!(
+        "text encoding: p50 {:.1} ms, p95 {:.1} ms",
+        percentile(&tl, 0.5).as_secs_f64() * 1e3,
+        percentile(&tl, 0.95).as_secs_f64() * 1e3
+    );
+    println!(
+        "search latency estimate (text p95 + search p95): {:.1} ms",
+        (percentile(&tl, 0.95) + percentile(search_latencies, 0.95)).as_secs_f64() * 1e3
+    );
+    Ok(())
+}
+
 /// Builds (if needed) a synthetic library of `images` images and `videos` videos with
 /// `segments` segments each, then measures load time, memory, DB size and search latency.
 pub fn search(
@@ -147,29 +175,7 @@ pub fn search(
         lat.last().copied().unwrap_or_default().as_secs_f64() * 1e3
     );
     if lib.model_installed() {
-        lib.embed_text("warm up")?;
-        let mut tl = Vec::new();
-        for q in [
-            "kids on the beach at sunset",
-            "a dog playing in the snow",
-            "birthday cake with candles",
-        ] {
-            for _ in 0..5 {
-                let t = Instant::now();
-                lib.embed_text(q)?;
-                tl.push(t.elapsed());
-            }
-        }
-        tl.sort();
-        println!(
-            "text encoding: p50 {:.1} ms, p95 {:.1} ms",
-            percentile(&tl, 0.5).as_secs_f64() * 1e3,
-            percentile(&tl, 0.95).as_secs_f64() * 1e3
-        );
-        println!(
-            "search latency estimate (text p95 + search p95): {:.1} ms",
-            (percentile(&tl, 0.95) + percentile(&lat, 0.95)).as_secs_f64() * 1e3
-        );
+        report_text_encoding(&lib, &lat)?;
     } else {
         println!("(model not installed in this home: text encoding not measured)");
     }
