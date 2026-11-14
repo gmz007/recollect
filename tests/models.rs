@@ -13,7 +13,7 @@ fn images(n: usize, size: u32) -> Vec<Vec<u8>> {
     (0..n)
         .map(|i| {
             (0..size * size * 3)
-                .map(|p| ((p as usize * (i + 3)) % 251) as u8)
+                .map(|p| u8::try_from((p as usize * (i + 3)) % 251).unwrap())
                 .collect()
         })
         .collect()
@@ -31,7 +31,7 @@ fn padding_and_devices_give_the_same_embeddings() {
             continue;
         };
         let imgs = images(3, spec.image_size);
-        let refs: Vec<&[u8]> = imgs.iter().map(|v| v.as_slice()).collect();
+        let refs: Vec<&[u8]> = imgs.iter().map(std::vec::Vec::as_slice).collect();
         let mut cpu = VisionEncoder::load(spec, &dir, false, 4).unwrap();
         assert_eq!(cpu.device(), Device::Cpu);
         let batch = cpu.embed(&refs).unwrap();

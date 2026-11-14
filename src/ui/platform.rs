@@ -15,15 +15,13 @@ pub fn reveal(path: &Path) -> Result<()> {
     {
         let mut arg = std::ffi::OsString::from("/select,");
         arg.push(path);
-        spawn(Command::new("explorer").arg(arg))?;
-        return Ok(());
+        spawn(Command::new("explorer").arg(arg))
     }
     #[cfg(target_os = "macos")]
     {
-        spawn(Command::new("open").arg("-R").arg(path))?;
-        return Ok(());
+        spawn(Command::new("open").arg("-R").arg(path))
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let dir = path.parent().unwrap_or(path);
         open::that_detached(dir).with_context(|| format!("opening {}", dir.display()))

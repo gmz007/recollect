@@ -240,8 +240,8 @@ fn paint(
     if hovered {
         // Soft shades at the top and bottom keep the circle, the star and the time readable
         // on bright photos, without a visible edge.
-        painter.add(fade(rect, true, 64.0, 105, style::TILE_RADIUS as f32));
-        painter.add(fade(rect, false, 64.0, 105, style::TILE_RADIUS as f32));
+        painter.add(fade(rect, true, 64.0, 105, f32::from(style::TILE_RADIUS)));
+        painter.add(fade(rect, false, 64.0, 105, f32::from(style::TILE_RADIUS)));
     }
     if show_controls {
         let c = circle_center(rect);
@@ -305,13 +305,13 @@ fn fade(rect: Rect, top: bool, height: f32, alpha: u8, radius: f32) -> egui::Sha
             0.0
         };
         let t = (d / height).clamp(0.0, 1.0);
-        let a = (alpha as f32 * (1.0 - t) * (1.0 - t)).round() as u8;
+        let a = (f32::from(alpha) * (1.0 - t) * (1.0 - t)).round() as u8;
         let color = Color32::from_black_alpha(a);
         let y = if top { rect.min.y + d } else { rect.max.y - d };
         mesh.colored_vertex(Pos2::new(rect.min.x + inset, y), color);
         mesh.colored_vertex(Pos2::new(rect.max.x - inset, y), color);
         if i > 0 {
-            let k = (i * 2) as u32;
+            let k = u32::try_from(i * 2).unwrap_or(u32::MAX);
             mesh.add_triangle(k - 2, k - 1, k);
             mesh.add_triangle(k - 1, k + 1, k);
         }

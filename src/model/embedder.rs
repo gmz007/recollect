@@ -61,21 +61,51 @@ fn session(path: &Path, threads: usize, gpu: bool) -> Result<Session> {
         .map_err(|e| anyhow!("loading {}: {e}", path.display()))
 }
 
-fn output_name(s: &Session, preferred: &str) -> String {
-    let names: Vec<&str> = s.outputs().iter().map(|o| o.name()).collect();
+fn output_name(s: &Session, preferred: &str) -> Result<String> {
+    let names: Vec<&str> = s.outputs().iter().map(ort::value::Outlet::name).collect();
     for want in [preferred, "pooler_output"] {
         if names.contains(&want) {
-            return want.to_string();
+            return Ok(want.to_string());
         }
     }
-    names.first().map(|s| s.to_string()).unwrap_or_default()
+    names
+        .first()
+        .map(|n| (*n).to_string())
+        .ok_or_else(|| anyhow!("model has no outputs"))
+}
+
+/// Splits a flat output tensor of the given `shape` into `count` unit vectors of `dim`
+/// values. A model that returns an unexpected shape is an error, not a panic.
+fn unit_rows(shape: &[i64], data: &[f32], dim: usize, count: usize) -> Result<Vec<Vec<f32>>> {
+    let last = shape.last().context("model returned a scalar output")?;
+    let d = usize::try_from(*last).with_context(|| format!("invalid output dimension {last}"))?;
+    if d != dim {
+        bail!("model returned {d}-dim vectors, expected {dim}");
+    }
+    if d == 0 || data.len() < count * d {
+        bail!(
+            "model returned {} values for {count} vectors of {d}",
+            data.len()
+        );
+    }
+    Ok(data
+        .chunks_exact(d)
+        .take(count)
+        .map(|c| {
+            let mut v = c.to_vec();
+            normalize(&mut v);
+            v
+        })
+        .collect())
 }
 
 /// L2-normalizes in place.
 pub fn normalize(v: &mut [f32]) {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if n > 1e-12 {
-        v.iter_mut().for_each(|x| *x /= n);
+        for x in &mut v[..] {
+            *x /= n;
+        }
     }
 }
 
@@ -86,7 +116,7 @@ pub fn rgb_to_chw(spec: &ModelSpec, rgb: &[u8], out: &mut [f32]) {
     debug_assert_eq!(out.len(), 3 * n);
     for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
         for c in 0..3 {
-            out[c * n + i] = (px[c] as f32 / 255.0 - spec.mean[c]) / spec.std[c];
+            out[c * n + i] = (f32::from(px[c]) / 255.0 - spec.mean[c]) / spec.std[c];
         }
     }
 }
@@ -132,7 +162,7 @@ impl VisionEncoder {
     ) -> Result<Self> {
         let session = session(path, threads, device == Device::Gpu)?;
         let input = s_input(&session)?;
-        let output = output_name(&session, "image_embeds");
+        let output = output_name(&session, "image_embeds")?;
         let batch = match device {
             Device::Gpu => spec.gpu_max_batch,
             Device::Cpu => 16,
@@ -205,8 +235,13 @@ impl VisionEncoder {
             Device::Cpu
         };
         let failures = self.gpu_failures;
-        let fresh = Self::with_device(self.spec, &self.path, device, self.threads)
-            .or_else(|_| Self::with_device(self.spec, &self.path, Device::Cpu, self.threads))?;
+        let fresh = match Self::with_device(self.spec, &self.path, device, self.threads) {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                tracing::warn!("rebuilding the {device} session failed ({e:#}); using the CPU");
+                Self::with_device(self.spec, &self.path, Device::Cpu, self.threads)?
+            }
+        };
         *self = fresh;
         self.gpu_failures = failures;
         Ok(())
@@ -234,19 +269,7 @@ impl VisionEncoder {
             .session
             .run(ort::inputs![self.input.as_str() => TensorRef::from_array_view(&arr)?])?;
         let (shape, data) = outputs[self.output.as_str()].try_extract_tensor::<f32>()?;
-        let d = shape[shape.len() - 1] as usize;
-        if d != self.spec.dim {
-            bail!("model returned {d}-dim vectors, expected {}", self.spec.dim);
-        }
-        Ok(data
-            .chunks_exact(d)
-            .take(images.len())
-            .map(|c| {
-                let mut v = c.to_vec();
-                normalize(&mut v);
-                v
-            })
-            .collect())
+        unit_rows(shape, data, self.spec.dim, images.len())
     }
 }
 
@@ -272,7 +295,7 @@ impl TextEncoder {
         let session = session(&dir.join(spec.text_file), threads, false)?;
         let tokenizer = tokenizers::Tokenizer::from_file(dir.join(TOKENIZER_FILE))
             .map_err(|e| anyhow!("loading tokenizer: {e}"))?;
-        let output = output_name(&session, "text_embeds");
+        let output = output_name(&session, "text_embeds")?;
         let needs_mask = session
             .inputs()
             .iter()
@@ -354,6 +377,21 @@ pub(crate) fn tokenize(
 mod tests {
     use super::*;
     use crate::model::registry::{CLIP_B32, SIGLIP_B16};
+
+    #[test]
+    fn malformed_output_shapes_are_errors() {
+        let data = [1.0f32, 0.0, 0.0, 1.0];
+        let rows = unit_rows(&[2, 2], &data, 2, 2).unwrap();
+        assert_eq!(rows, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert!(unit_rows(&[], &data, 2, 2).is_err(), "scalar output");
+        assert!(
+            unit_rows(&[2, -1], &data, 2, 2).is_err(),
+            "negative dimension"
+        );
+        assert!(unit_rows(&[2, 3], &data, 2, 2).is_err(), "wrong dimension");
+        assert!(unit_rows(&[0, 0], &[], 0, 1).is_err(), "zero dimension");
+        assert!(unit_rows(&[2, 2], &data[..3], 2, 2).is_err(), "short data");
+    }
 
     #[test]
     fn normalize_unit_length() {

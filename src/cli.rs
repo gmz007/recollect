@@ -1,4 +1,9 @@
 //! Command-line interface. Without a subcommand, the GUI starts.
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a duration in seconds is shown as whole seconds; saturation is intended"
+)]
 
 use crate::config::Paths;
 use crate::library::{Activity, Library};
@@ -21,7 +26,7 @@ use std::time::Duration;
 )]
 pub struct Cli {
     /// Keep all Recollect data under this directory instead of the platform defaults
-    /// (also settable with the RECOLLECT_HOME environment variable).
+    /// (also settable with the `RECOLLECT_HOME` environment variable).
     #[arg(long, global = true)]
     pub home: Option<PathBuf>,
     /// Use this embedding model for this run (see `recollect models list`).
@@ -38,6 +43,18 @@ pub struct Cli {
 pub enum Command {
     /// Start the graphical app (default).
     Gui,
+    #[command(flatten)]
+    Lib(LibCommand),
+    /// Performance measurements on synthetic data (needs --home <scratch dir>).
+    Bench {
+        #[command(subcommand)]
+        cmd: BenchCmd,
+    },
+}
+
+/// Commands that work on an opened library.
+#[derive(Subcommand, Debug)]
+pub enum LibCommand {
     /// List or download embedding models.
     Models {
         #[command(subcommand)]
@@ -72,11 +89,6 @@ pub enum Command {
     },
     /// Show library statistics and recent errors.
     Status,
-    /// Performance measurements on synthetic data (needs --home <scratch dir>).
-    Bench {
-        #[command(subcommand)]
-        cmd: BenchCmd,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -145,11 +157,10 @@ pub fn paths(cli: &Cli) -> Result<Paths> {
     })
 }
 
-/// Runs a non-GUI command.
-pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
-    match cli.command.as_ref().expect("GUI handled by caller") {
-        Command::Gui => unreachable!(),
-        Command::Models {
+/// Runs a command that works on an opened library.
+pub fn run(lib: &Arc<Library>, command: &LibCommand) -> Result<()> {
+    match command {
+        LibCommand::Models {
             cmd: ModelsCmd::List,
         } => {
             let current = lib.model().id;
@@ -169,10 +180,10 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
                 );
             }
         }
-        Command::Models {
+        LibCommand::Models {
             cmd: ModelsCmd::Download { yes },
         } => download_model(lib, *yes)?,
-        Command::Folders { cmd } => match cmd {
+        LibCommand::Folders { cmd } => match cmd {
             FoldersCmd::Add { paths } => {
                 for p in paths {
                     lib.add_folder(p)?;
@@ -195,13 +206,13 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
                 lib.remove_folder(f.id)?;
             }
         },
-        Command::Index { paths } => {
+        LibCommand::Index { paths } => {
             for p in paths {
                 lib.add_folder(p)?;
             }
             index(lib)?;
         }
-        Command::Search {
+        LibCommand::Search {
             query,
             limit,
             kind,
@@ -215,7 +226,7 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
             let hits = lib.search(query, &opts)?;
             print_hits(&hits, *json);
         }
-        Command::Eval {
+        LibCommand::Eval {
             queries,
             root,
             json,
@@ -227,8 +238,7 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
                 println!("model {}\n{rep}", lib.model().id);
             }
         }
-        Command::Bench { .. } => unreachable!("handled before opening the library"),
-        Command::Status => {
+        LibCommand::Status => {
             let s = lib.stats()?;
             println!(
                 "model:   {}{}",
@@ -260,9 +270,8 @@ pub fn run(cli: &Cli, lib: &Arc<Library>) -> Result<()> {
 
 /// Runs a benchmark (without opening a library first).
 pub fn bench(cli: &Cli, cmd: &BenchCmd) -> Result<()> {
-    crate::bench::require_scratch_home(cli.home.as_ref())?;
-    let dir = cli.home.clone().expect("checked");
-    let paths = Paths::under(&dir);
+    let dir = crate::bench::require_scratch_home(cli.home.as_deref())?;
+    let paths = Paths::under(dir);
     match cmd {
         BenchCmd::Search {
             images,
@@ -277,7 +286,7 @@ pub fn bench(cli: &Cli, cmd: &BenchCmd) -> Result<()> {
             crate::bench::timeline(&Paths::under(&dir.join("timeline-home")), *files)
         }
         BenchCmd::Rescan { files } => {
-            crate::bench::rescan(&Paths::under(&dir.join("rescan-home")), &dir, *files)
+            crate::bench::rescan(&Paths::under(&dir.join("rescan-home")), dir, *files)
         }
     }
 }

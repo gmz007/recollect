@@ -76,7 +76,7 @@ fn decode_jpeg_scaled(bytes: &[u8], min_side: u32) -> Result<Option<Decoded>> {
     // Ask for the smallest IDCT scale whose output still covers `min_side` on both axes.
     // `scale` picks the smallest factor satisfying *either* axis, so constrain only the shorter
     // axis (the other request can never be met).
-    let want = min_side.min(w).min(h).min(u32::from(u16::MAX)) as u16;
+    let want = u16::try_from(min_side.min(w).min(h)).unwrap_or(u16::MAX);
     let (sw, sh) = if w <= h {
         dec.scale(want, u16::MAX)?
     } else {
@@ -160,7 +160,7 @@ fn into_rgb(img: DynamicImage) -> Rgb {
 pub enum Fit {
     /// Scale the short side to the target and center-crop (CLIP).
     CenterCrop,
-    /// Squash to the target size ignoring aspect ratio (SigLIP).
+    /// Squash to the target size ignoring aspect ratio (`SigLIP`).
     Stretch,
 }
 
@@ -177,11 +177,21 @@ pub fn to_square(img: &Rgb, size: u32, fit: Fit) -> Result<Vec<u8>> {
     Ok(dst.into_vec())
 }
 
+/// `dim` scaled by `scale`, at least 1.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the result is rounded, positive and far below u32::MAX for any image size"
+)]
+fn scaled(dim: u32, scale: f32) -> u32 {
+    ((dim as f32 * scale).round() as u32).max(1)
+}
+
 /// Downscales to fit within `max_side`×`max_side`, keeping the aspect ratio (never upscales).
 pub fn fit_within(img: &Rgb, max_side: u32) -> Result<Rgb> {
     let scale = (max_side as f32 / img.width.max(img.height) as f32).min(1.0);
-    let w = ((img.width as f32 * scale).round() as u32).max(1);
-    let h = ((img.height as f32 * scale).round() as u32).max(1);
+    let w = scaled(img.width, scale);
+    let h = scaled(img.height, scale);
     if (w, h) == (img.width, img.height) {
         return Ok(img.clone());
     }
@@ -214,7 +224,7 @@ mod tests {
         tiff.extend_from_slice(&0u32.to_be_bytes()); // no next IFD
         let mut seg = vec![0xFF, 0xE1];
         let payload_len = 2 + 6 + tiff.len();
-        seg.extend_from_slice(&(payload_len as u16).to_be_bytes());
+        seg.extend_from_slice(&u16::try_from(payload_len).unwrap().to_be_bytes());
         seg.extend_from_slice(b"Exif\0\0");
         seg.extend_from_slice(&tiff);
         seg

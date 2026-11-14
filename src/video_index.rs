@@ -1,16 +1,15 @@
 //! Video indexing: sample frames, embed them, merge similar consecutive frames into
 //! segments, store one vector per segment.
 
-use crate::indexer::{Progress, fit_for, write_items};
+use crate::indexer::{Progress, contain, fit_for, write_items};
 use crate::library::Library;
 use crate::media::image as img;
 use crate::media::video::{self, SamplerConfig, VideoInfo};
 use crate::model::embedder::normalize;
 use crate::model::{Device, VisionEncoder};
 use crate::store::db::{FileMeta, FileRow, NewItem};
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Consecutive frames whose embedding has at least this cosine similarity with the first frame
@@ -81,20 +80,19 @@ pub(crate) fn index_videos(
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(f) = files.get(i) else { return };
                         // A decoder bug on one odd file must fail that file, not the whole run.
-                        let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        let res = contain("the video decoder", || {
                             video::sample(&f.path, cfg, spec.image_size, &halt, &mut |fr| {
                                 let px = img::to_square(&fr.rgb, spec.image_size, fit)?;
                                 tx.send(Msg::Frame(i, fr.t, px))
-                                    .map_err(|_| anyhow::anyhow!("embedding stopped"))
+                                    .map_err(|_| anyhow!("embedding stopped"))
                             })
-                        }))
-                        .unwrap_or_else(|_| Err(anyhow::anyhow!("video decoder panicked")));
+                        });
                         if tx.send(Msg::End(i, res)).is_err() {
                             return;
                         }
                     }
                 })
-                .expect("spawning video sampler");
+                .context("spawning a video sampler thread")?;
         }
         drop(tx);
         let new_state = || FileState {
@@ -105,7 +103,7 @@ pub(crate) fn index_videos(
         let mut states: HashMap<usize, FileState> = HashMap::new();
         let mut pending: Vec<(usize, f64, Vec<u8>)> = Vec::with_capacity(batch);
         let mut result: Result<()> = Ok(());
-        for msg in rx.iter() {
+        for msg in &rx {
             if lib.control.is_cancelled() {
                 break;
             }
@@ -148,7 +146,8 @@ fn embed_pending(
         return Ok(());
     }
     let px: Vec<&[u8]> = pending.iter().map(|p| p.2.as_slice()).collect();
-    let embs = enc.embed(&px).map_err(|e| ModelError(format!("{e:#}")))?;
+    let embs = enc.embed(&px).context("embedding frames")?;
+    crate::indexer::check_count("frames", embs.len(), pending.len())?;
     let n = pending.len();
     for ((i, t, _), e) in pending.drain(..).zip(embs) {
         if let Some(st) = states.get_mut(&i) {
@@ -173,9 +172,13 @@ fn finalize_ready(
         .map(|(i, _)| *i)
         .collect();
     for i in ready {
-        let st = states.remove(&i).expect("present");
-        let f = &files[i];
-        match st.ended.expect("ended") {
+        let Some(st) = states.remove(&i) else {
+            continue;
+        };
+        let (Some(f), Some(ended)) = (files.get(i), st.ended) else {
+            continue;
+        };
+        match ended {
             Ok(info) => {
                 let items = st.merger.finish(info.duration);
                 let meta = FileMeta {
@@ -189,26 +192,13 @@ fn finalize_ready(
             // Cancelled: the file stays pending for the next run.
             Err(_) if lib.control.is_cancelled() => {}
             Err(e) => {
-                let failed = crate::indexer::file_failed(lib, f, &e)?;
-                prog.file_done(lib, f, 0, failed);
+                let failure = crate::indexer::file_failed(lib, f, &e)?;
+                prog.file_done(lib, f, 0, failure.is_error());
             }
         }
     }
     Ok(())
 }
-
-/// Errors from the model itself (not the file) stop the run instead of marking every
-/// remaining video as broken.
-#[derive(Debug)]
-struct ModelError(String);
-
-impl std::fmt::Display for ModelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "inference failed: {}", self.0)
-    }
-}
-
-impl std::error::Error for ModelError {}
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -318,7 +308,8 @@ mod tests {
 
     #[test]
     fn too_short_header_duration_never_makes_empty_segments() {
-        let frames: Vec<(f64, Vec<f32>)> = (0..4).map(|i| (i as f64 * 2.0, v(i as f32))).collect();
+        let frames: Vec<(f64, Vec<f32>)> =
+            (0..4).map(|i| (f64::from(i) * 2.0, v(i as f32))).collect();
         let segs = merge_segments(&frames, 3.0, 2.0, 0.99);
         assert_eq!(segs.len(), 4);
         for s in &segs {
@@ -329,7 +320,7 @@ mod tests {
 
     #[test]
     fn caps_segment_length_and_handles_edges() {
-        let frames: Vec<(f64, Vec<f32>)> = (0..100).map(|i| (i as f64 * 2.0, v(0.0))).collect();
+        let frames: Vec<(f64, Vec<f32>)> = (0..100).map(|i| (f64::from(i) * 2.0, v(0.0))).collect();
         let segs = merge_segments(&frames, 200.0, 2.0, 0.9);
         assert!(segs.len() >= 3, "{}", segs.len());
         assert!(

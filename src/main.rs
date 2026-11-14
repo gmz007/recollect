@@ -20,24 +20,26 @@ fn main() -> anyhow::Result<()> {
     if args.cpu {
         recollect::gpu::force_cpu(true);
     }
-    let gui = matches!(args.command, None | Some(Command::Gui));
-    if let Some(Command::Bench { cmd }) = &args.command {
+    let lib_cmd = match &args.command {
         // Benchmarks open their own libraries; don't load one up front.
-        return cli::bench(&args, cmd);
-    }
+        Some(Command::Bench { cmd }) => return cli::bench(&args, cmd),
+        Some(Command::Lib(cmd)) => Some(cmd),
+        None | Some(Command::Gui) => None,
+    };
+    let gui = lib_cmd.is_none();
     let lib = match cli::paths(&args).and_then(|p| Library::open(p, args.model.as_deref())) {
         Ok(lib) => lib,
         Err(e) if gui => {
             let msg = format!("{e:#}");
             eprintln!("error: {msg}");
-            return recollect::ui::run_error(msg);
+            return recollect::run_error(msg);
         }
         Err(e) => return Err(e),
     };
-    match args.command {
-        None | Some(Command::Gui) => recollect::ui::run(lib),
-        Some(_) => {
-            let res = cli::run(&args, &lib);
+    match lib_cmd {
+        None => recollect::run(lib),
+        Some(cmd) => {
+            let res = cli::run(&lib, cmd);
             // No-op unless something changed, so CLI runs leave a valid cache behind.
             lib.save_index_cache();
             res

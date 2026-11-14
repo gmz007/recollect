@@ -128,8 +128,7 @@ pub fn scan(root: &Path, cancel: &dyn Fn() -> bool) -> ScanResult {
                         .modified()
                         .ok()
                         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0),
+                        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
                     path,
                 }),
                 Err(e) => out.problems.push((path, e.to_string())),

@@ -4,7 +4,16 @@ use crate::media::MediaKind;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// A length for the cache header, which stores them as 32-bit values.
+fn header_u32(n: usize) -> std::io::Result<u32> {
+    u32::try_from(n).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "value too large for the header",
+        )
+    })
+}
 
 const CACHE_MAGIC: &[u8; 8] = b"RCLXIDX3";
 
@@ -62,11 +71,19 @@ impl PartialOrd for Entry {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the value is rounded and clamped to the i8 range first"
+)]
 fn quantize(v: &[f32], scale: f32) -> impl Iterator<Item = i8> + '_ {
     v.iter()
         .map(move |x| (x * scale).round().clamp(-127.0, 127.0) as i8)
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "must be inlined into the AVX2 wrapper so it is compiled with that feature"
+)]
 #[inline(always)]
 fn dot_i8_portable(a: &[i8], b: &[i8]) -> i32 {
     // Written so LLVM auto-vectorizes it (i8×i8 → i16 → i32 accumulate).
@@ -93,8 +110,11 @@ type DotFn = fn(&[i8], &[i8]) -> i32;
 fn pick_dot() -> DotFn {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: only called after confirming the CPU supports AVX2.
-        return |a, b| unsafe { dot_i8_avx2(a, b) };
+        return |a, b| {
+            // SAFETY: this closure is only handed out after `is_x86_feature_detected!` confirmed
+            // that the running CPU supports AVX2, the one requirement of `dot_i8_avx2`.
+            unsafe { dot_i8_avx2(a, b) }
+        };
     }
     dot_i8
 }
@@ -176,16 +196,7 @@ impl VectorIndex {
         library_id: &str,
         epoch: u64,
     ) -> std::io::Result<()> {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let tmp = path.with_file_name(format!(
-            "{name}.{}.{}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
+        let tmp = crate::config::temp_sibling(path);
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -209,11 +220,11 @@ impl VectorIndex {
         use std::io::Write;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
         w.write_all(CACHE_MAGIC)?;
-        w.write_all(&(model.len() as u32).to_le_bytes())?;
+        w.write_all(&header_u32(model.len())?.to_le_bytes())?;
         w.write_all(model.as_bytes())?;
-        w.write_all(&(library_id.len() as u32).to_le_bytes())?;
+        w.write_all(&header_u32(library_id.len())?.to_le_bytes())?;
         w.write_all(library_id.as_bytes())?;
-        w.write_all(&(self.dim as u32).to_le_bytes())?;
+        w.write_all(&header_u32(self.dim)?.to_le_bytes())?;
         w.write_all(&self.scale.to_le_bytes())?;
         w.write_all(&epoch.to_le_bytes())?;
         w.write_all(&(self.len() as u64).to_le_bytes())?;
@@ -226,18 +237,23 @@ impl VectorIndex {
         for v in &self.taken {
             w.write_all(&v.to_le_bytes())?;
         }
-        w.write_all(
-            &self
-                .kinds
-                .iter()
-                .map(|k| k.as_i64() as u8)
-                .collect::<Vec<_>>(),
-        )?;
-        // SAFETY: i8 and u8 have the same size and layout.
+        let kinds = self
+            .kinds
+            .iter()
+            .map(|k| {
+                u8::try_from(k.as_i64())
+                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "media kind"))
+            })
+            .collect::<std::io::Result<Vec<u8>>>()?;
+        w.write_all(&kinds)?;
+        // SAFETY: `i8` and `u8` have the same size, alignment and valid bit patterns, and the
+        // pointer and length come from a live `Vec<i8>` borrowed for the slice's lifetime.
         let bytes =
             unsafe { std::slice::from_raw_parts(self.data.as_ptr().cast::<u8>(), self.data.len()) };
         w.write_all(bytes)?;
-        w.into_inner().map_err(|e| e.into_error())?.sync_all()
+        w.into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?
+            .sync_all()
     }
 
     /// Loads a cache written by [`Self::save`] if it matches `model`, `library_id`, `dim`,
@@ -287,7 +303,7 @@ impl VectorIndex {
         if name != model.as_bytes()
             || id != library_id.as_bytes()
             || d != dim
-            || sc != scale
+            || sc.to_bits() != scale.to_bits()
             || ep != epoch
         {
             return None;
@@ -323,7 +339,9 @@ impl VectorIndex {
         r.read_exact(&mut raw).ok()?;
         // Reinterpret the bytes as i8 without copying.
         let mut raw = std::mem::ManuallyDrop::new(raw);
-        // SAFETY: same allocation, element size, alignment and length; ownership moves over.
+        // SAFETY: the pointer, length and capacity come from one `Vec<u8>` that is wrapped in
+        // `ManuallyDrop` (so it is not freed twice); `i8` has the same size, alignment and valid
+        // bit patterns as `u8`, so the allocation is a valid `Vec<i8>` of the same length.
         let data = unsafe {
             Vec::from_raw_parts(raw.as_mut_ptr().cast::<i8>(), raw.len(), raw.capacity())
         };
@@ -421,7 +439,10 @@ impl VectorIndex {
                 heap
             })
             .collect();
-        let mut all: Vec<Entry> = heaps.into_iter().flat_map(|h| h.into_vec()).collect();
+        let mut all: Vec<Entry> = heaps
+            .into_iter()
+            .flat_map(std::collections::BinaryHeap::into_vec)
+            .collect();
         all.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         all.truncate(k);
         let denom = self.scale * qscale;
@@ -439,6 +460,7 @@ impl VectorIndex {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
     use super::*;
 
     fn unit(v: &[f32]) -> Vec<f32> {
@@ -584,7 +606,7 @@ mod tests {
         std::fs::write(&p, &forged).unwrap();
         assert!(VectorIndex::load(&p, "m", "lib", 16, 300.0, 7).is_none());
         // Oversized model name.
-        let mut forged = bytes.clone();
+        let mut forged = bytes;
         forged[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
         std::fs::write(&p, &forged).unwrap();
         assert!(VectorIndex::load(&p, "m", "lib", 16, 300.0, 7).is_none());
@@ -609,7 +631,7 @@ mod tests {
                 .iter()
                 .map(|c| c.item_id)
                 .collect();
-            v.sort();
+            v.sort_unstable();
             v
         };
         assert_eq!(ids(&idx, None), [0, 1, 2, 3]);

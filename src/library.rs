@@ -315,10 +315,10 @@ struct Applied {
 /// Consecutive favorite marks collapse to the latest value per file; an album change ends the
 /// run, so nothing is ever reordered. Exits when the library is gone.
 fn library_writer(
-    lib: std::sync::Weak<Library>,
-    rx: Receiver<WriteMsg>,
-    favorites: Sender<FavoriteWrite>,
-    albums: Sender<AlbumWrite>,
+    lib: &std::sync::Weak<Library>,
+    rx: &Receiver<WriteMsg>,
+    favorites: &Sender<FavoriteWrite>,
+    albums: &Sender<AlbumWrite>,
 ) {
     while let Ok(first) = rx.recv() {
         let mut batch = vec![first];
@@ -336,14 +336,14 @@ fn library_writer(
                     run.insert(id, fav);
                 }
                 WriteMsg::Album(ticket, op) => {
-                    write_favorites(&lib, &mut run, &favorites);
+                    write_favorites(&lib, &mut run, favorites);
                     let result = write_album(&lib, ticket, op);
                     let _ = albums.send(result);
                 }
                 WriteMsg::Flush(done) => flushes.push(done),
             }
         }
-        write_favorites(&lib, &mut run, &favorites);
+        write_favorites(&lib, &mut run, favorites);
         lib.notify();
         for done in flushes {
             let _ = done.send(());
@@ -457,15 +457,16 @@ impl Library {
         }
         let id = match model_override {
             Some(id) => id.to_string(),
-            None => match &settings.model {
-                Some(id) => id.clone(),
-                None => {
+            None => {
+                if let Some(id) = &settings.model {
+                    id.clone()
+                } else {
                     let id = default_model_for_hardware().to_string();
                     settings.model = Some(id.clone());
                     settings.save(&paths.settings_path())?;
                     id
                 }
-            },
+            }
         };
         let spec = registry::get(&id).ok_or_else(|| anyhow!("unknown model '{id}'"))?;
         let db = Db::open(&paths.db_path())?;
@@ -526,7 +527,7 @@ impl Library {
         let weak = Arc::downgrade(&lib);
         std::thread::Builder::new()
             .name("recollect-writer".into())
-            .spawn(move || library_writer(weak, write_rx, favorite_tx, album_tx))
+            .spawn(move || library_writer(&weak, &write_rx, &favorite_tx, &album_tx))
             .context("starting the library writer")?;
         Ok(lib)
     }
@@ -569,6 +570,9 @@ impl Library {
             );
         }
         let path = index_cache_path(&self.paths, spec);
+        // The read lock is held for the whole write: the file must describe exactly this index,
+        // so writers (new items, date patches) wait until it is on disk. Searches are not
+        // blocked, and the write is skipped when the cache is already current.
         match index.save(&path, spec.id, &library_id, epoch) {
             Ok(()) => *self.saved.lock() = Some((spec.id, epoch)),
             Err(e) => tracing::warn!("could not write index cache {}: {e}", path.display()),
@@ -827,11 +831,30 @@ impl Library {
         Ok(())
     }
 
+    /// Runs `task` on a named background thread. If the thread cannot be started the failure
+    /// is reported through the status as an error of `kind`.
+    fn spawn_task(
+        self: &Arc<Self>,
+        name: &str,
+        kind: ErrorKind,
+        task: impl FnOnce(&Arc<Self>) + Send + 'static,
+    ) {
+        let lib = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || task(&lib));
+        if let Err(e) = spawned {
+            self.update_status(|s| {
+                s.set_error_of(kind, format!("Could not start a background task: {e}"));
+            });
+            self.notify();
+        }
+    }
+
     /// Adds a folder off the calling thread (canonicalizing a dead network path or waiting for
     /// the database must not freeze the UI), then makes sure it gets indexed.
     pub fn start_add_folder(self: &Arc<Self>, path: PathBuf) {
-        let lib = Arc::clone(self);
-        std::thread::spawn(move || {
+        self.spawn_task("recollect-add-folder", ErrorKind::AddFolder, move |lib| {
             match lib.add_folder(&path) {
                 Ok(()) => {
                     // If a job is running it picks the folder up (rescan_requested).
@@ -841,7 +864,7 @@ impl Library {
                     }
                 }
                 Err(e) => {
-                    lib.update_status(|s| s.set_error_of(ErrorKind::AddFolder, format!("{e:#}")))
+                    lib.update_status(|s| s.set_error_of(ErrorKind::AddFolder, format!("{e:#}")));
                 }
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
@@ -855,8 +878,7 @@ impl Library {
     /// downloaded after that, without cutting the scan short; if the download fails the folders
     /// are still scanned.
     pub fn start_add_folders(self: &Arc<Self>, paths: Vec<PathBuf>, then_download: bool) {
-        let lib = Arc::clone(self);
-        std::thread::spawn(move || {
+        self.spawn_task("recollect-add-folders", ErrorKind::AddFolder, move |lib| {
             let mut added = false;
             let mut failure = None;
             for p in &paths {
@@ -870,7 +892,7 @@ impl Library {
             }
             if then_download && let Err(e) = lib.request_download() {
                 lib.update_status(|s| {
-                    s.set_error_of(ErrorKind::Download, format!("Model download failed: {e:#}"))
+                    s.set_error_of(ErrorKind::Download, format!("Model download failed: {e:#}"));
                 });
             }
             // After the jobs started: starting one clears the last error.
@@ -902,20 +924,23 @@ impl Library {
     /// a database transaction plus an index update under the usual lock order, and a running
     /// indexer simply skips files that disappeared.
     pub fn start_remove_folder(self: &Arc<Self>, folder_id: i64) {
-        let lib = Arc::clone(self);
-        std::thread::spawn(move || {
-            if let Err(e) = lib.remove_folder(folder_id) {
-                lib.update_status(|s| {
-                    s.set_error_of(
-                        ErrorKind::RemoveFolder,
-                        format!("Removing the folder failed: {e:#}"),
-                    )
-                });
-            }
-            lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
-            lib.notify();
-            lib.save_index_cache();
-        });
+        self.spawn_task(
+            "recollect-remove-folder",
+            ErrorKind::RemoveFolder,
+            move |lib| {
+                if let Err(e) = lib.remove_folder(folder_id) {
+                    lib.update_status(|s| {
+                        s.set_error_of(
+                            ErrorKind::RemoveFolder,
+                            format!("Removing the folder failed: {e:#}"),
+                        );
+                    });
+                }
+                lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
+                lib.notify();
+                lib.save_index_cache();
+            },
+        );
     }
 
     pub(crate) fn remove_files_from_index(&self, ids: &HashSet<i64>) {
@@ -929,7 +954,7 @@ impl Library {
         let mut guard = self.settings.write();
         let mut new = guard.clone();
         f(&mut new);
-        new.model = guard.model.clone();
+        new.model.clone_from(&guard.model);
         if new == *guard {
             return Ok(());
         }
@@ -954,12 +979,14 @@ impl Library {
             lib.update_status(|s| s.activity = Activity::SwitchingModel);
             let res = lib.switch_model(spec);
             let ok = res.is_ok();
+            if !ok {
+                // A download queued behind the switch would fetch the wrong model.
+                lib.pending.lock().download = false;
+            }
             lib.update_status(|s| {
                 s.activity = Activity::Idle;
                 s.last_run = None;
                 if let Err(e) = res {
-                    // A download queued behind the switch would fetch the wrong model.
-                    lib.pending.lock().download = false;
                     s.set_error_of(
                         ErrorKind::SwitchModel,
                         format!("Switching models failed: {e:#}"),
@@ -1016,11 +1043,10 @@ impl Library {
             return Ok(());
         }
         self.cancel();
-        let lib = Arc::clone(self);
-        std::thread::spawn(move || {
+        self.spawn_task("recollect-download", ErrorKind::Download, move |lib| {
             for _ in 0..200 {
                 lib.wait();
-                if lib.spawn(Self::download_job(Arc::clone(&lib))).is_ok() {
+                if lib.spawn(Self::download_job(Arc::clone(lib))).is_ok() {
                     return;
                 }
                 // Something else won the race; cancel that one too and try again.
@@ -1031,13 +1057,17 @@ impl Library {
                 s.set_error_of(
                     ErrorKind::Download,
                     "Model download failed: another job would not stop",
-                )
+                );
             });
         });
         Ok(())
     }
 
     /// True in tests that make downloads fail without the network.
+    #[cfg_attr(
+        not(test),
+        expect(clippy::unused_self, reason = "only tests simulate download failures")
+    )]
     fn simulated_download_failure(&self) -> bool {
         #[cfg(test)]
         return self.fail_download.load(Ordering::Acquire);
@@ -1064,7 +1094,7 @@ impl Library {
                                 done,
                                 total,
                             }
-                        })
+                        });
                     },
                 )
             };
@@ -1085,7 +1115,7 @@ impl Library {
 
     /// Looks for new photos now, or as soon as the running job ends. Never cuts a job short.
     pub fn request_scan(self: &Arc<Self>) -> Result<Request> {
-        self.request(|p| p.scan = true, |lib| lib.start_indexing())
+        self.request(|p| p.scan = true, Library::start_indexing)
     }
 
     /// Downloads smart search now, or as soon as the running job ends (the job goes on to scan
@@ -1259,25 +1289,24 @@ impl Library {
 
     /// Text → vector with the current model (loads the text tower on first use).
     pub fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
+        // One model for the whole call, even if the choice changes meanwhile.
+        let spec = self.model();
         let mut guard = self.text.lock();
-        // Reload if missing or if the model changed since it was loaded.
-        if guard
-            .as_ref()
-            .is_none_or(|t| t.spec().id != self.model().id)
-        {
-            if !self.model_installed() {
-                return Err(SearchError::ModelMissing.into());
+        let encoder = match &mut *guard {
+            Some(t) if t.spec().id == spec.id => t,
+            // Missing, or loaded for another model: (re)load it.
+            slot => {
+                let dir = download::model_dir(&self.paths.models_dir(), spec);
+                if !download::is_installed(&self.paths.models_dir(), spec) {
+                    return Err(SearchError::ModelMissing.into());
+                }
+                let threads = std::thread::available_parallelism()
+                    .map_or(4, std::num::NonZero::get)
+                    .min(8);
+                slot.insert(TextEncoder::load(spec, &dir, threads)?)
             }
-            let threads = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .min(8);
-            *guard = Some(TextEncoder::load(self.model(), &self.model_dir(), threads)?);
-        }
-        guard
-            .as_mut()
-            .map(|t| t.embed(text))
-            .unwrap_or_else(|| Err(anyhow!("text model unavailable")))
+        };
+        encoder.embed(text)
     }
 
     /// Text search.
@@ -1536,8 +1565,8 @@ mod tests {
                     // 1000 segments all closer to the query than any image.
                     (0..1000)
                         .map(|i| NewItem {
-                            t_start: Some(i as f64 * 2.0),
-                            t_end: Some(i as f64 * 2.0 + 2.0),
+                            t_start: Some(f64::from(i) * 2.0),
+                            t_end: Some(f64::from(i) * 2.0 + 2.0),
                             embedding: unit(0.01),
                         })
                         .collect()
@@ -1630,7 +1659,18 @@ mod tests {
             status: crate::store::db::FileStatus::Pending,
         };
         let err = anyhow!("decode failed");
-        assert!(!crate::indexer::file_failed(&lib, &row, &err).unwrap());
+        assert_eq!(
+            crate::indexer::file_failed(&lib, &row, &err).unwrap(),
+            crate::indexer::Failure::Retry
+        );
+        // A file that is still there but cannot be decoded is recorded as an error.
+        let bad = media.join("bad.jpg");
+        std::fs::write(&bad, b"not an image").unwrap();
+        let row = crate::store::db::FileRow { path: bad, ..row };
+        assert_eq!(
+            crate::indexer::file_failed(&lib, &row, &err).unwrap(),
+            crate::indexer::Failure::Recorded
+        );
     }
 
     #[test]
@@ -1784,7 +1824,7 @@ mod tests {
             s.last_run = Some(RunSummary {
                 files: 99,
                 ..Default::default()
-            })
+            });
         });
         lib.start_download().unwrap();
         wait_idle(&lib);

@@ -1,7 +1,7 @@
 //! The look of the app: fonts, light and dark colours, text styles and spacing, plus a few small
 //! helpers for icons and icon buttons.
 //!
-//! Text is Inter (Regular and SemiBold, bundled), icons are Material Symbols, and egui's own
+//! Text is Inter (Regular and `SemiBold`, bundled), icons are Material Symbols, and egui's own
 //! fonts stay behind them as fallbacks for any character Inter does not have. The colours and
 //! sizes live here so every screen draws from one palette.
 
@@ -153,12 +153,12 @@ pub fn section() -> TextStyle {
     TextStyle::Name("section".into())
 }
 
-/// The SemiBold family (also used by headings).
+/// The `SemiBold` family (also used by headings).
 pub fn semibold_family() -> FontFamily {
     FontFamily::Name("Inter-SemiBold".into())
 }
 
-/// `text` in SemiBold.
+/// `text` in `SemiBold`.
 pub fn semibold(text: impl Into<String>) -> RichText {
     RichText::new(text).family(semibold_family())
 }

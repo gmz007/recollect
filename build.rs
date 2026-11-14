@@ -3,9 +3,7 @@
 
 fn main() {
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let dev = std::env::var("PROFILE")
-        .map(|p| p != "release")
-        .unwrap_or(true);
+    let dev = std::env::var("PROFILE").map_or(true, |p| p != "release");
     let origin = match os.as_str() {
         "linux" | "freebsd" => "$ORIGIN",
         "macos" => "@loader_path",

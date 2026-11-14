@@ -163,15 +163,19 @@ fn read_exif(path: &Path) -> std::io::Result<Option<Capture>> {
     }))
 }
 
+/// Longest make or model kept, in characters: camera strings come from untrusted tags and end
+/// up in the database and the UI.
+const MAX_CAMERA_CHARS: usize = 128;
+
 /// "Make Model", without repeating the make when the model already starts with it
-/// ("Canon" + "Canon EOS 5D" is just "Canon EOS 5D").
+/// ("Canon" + "Canon EOS 5D" is just "Canon EOS 5D"). Each part is cut to
+/// [`MAX_CAMERA_CHARS`] characters.
 fn camera_name(make: Option<&str>, model: Option<&str>) -> Option<String> {
-    match (make, model) {
-        (Some(mk), Some(md)) if md.to_lowercase().starts_with(&mk.to_lowercase()) => {
-            Some(md.to_string())
-        }
+    let bound = |s: &str| s.chars().take(MAX_CAMERA_CHARS).collect::<String>();
+    match (make.map(bound), model.map(bound)) {
+        (Some(mk), Some(md)) if md.to_lowercase().starts_with(&mk.to_lowercase()) => Some(md),
         (Some(mk), Some(md)) => Some(format!("{mk} {md}")),
-        (Some(s), None) | (None, Some(s)) => Some(s.to_string()),
+        (Some(s), None) | (None, Some(s)) => Some(s),
         (None, None) => None,
     }
 }
@@ -222,7 +226,7 @@ fn read_video(path: &Path) -> (Option<Capture>, Option<f64>) {
     let duration = best
         .as_ref()
         .map(|s| video::header_duration(&ictx, s))
-        .filter(|d| *d > 0.0);
+        .filter(|d| d.is_finite() && *d > 0.0);
     let stream: Tags = best
         .map(|s| {
             s.metadata()
@@ -261,9 +265,14 @@ fn read_video(path: &Path) -> (Option<Capture>, Option<f64>) {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::cast_possible_truncation,
+        reason = "hand-built TIFF structures with a few bytes of payload"
+    )]
     use super::*;
     use crate::media::video::tests::make_clip;
     use image::ImageEncoder;
+    use std::io::Write;
 
     fn ymd(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
         chrono::NaiveDate::from_ymd_opt(y, m, d)
@@ -447,7 +456,6 @@ mod tests {
         let p = d.path().join("big.tif");
         let f = File::create(&p).unwrap();
         // Sparse file: little-endian TIFF header, then a hole past the size limit.
-        use std::io::Write;
         (&f).write_all(b"II*\0\x08\0\0\0").unwrap();
         f.set_len(MAX_TIFF_EXIF_BYTES + 1).unwrap();
         drop(f);
@@ -489,6 +497,24 @@ mod tests {
         );
         assert_eq!(parse_video_time("1904-01-01T00:00:00.000000Z"), None);
         assert_eq!(parse_video_time("nonsense"), None);
+    }
+
+    #[test]
+    fn camera_strings_are_bounded() {
+        let long = "x".repeat(10_000);
+        let other = "y".repeat(10_000);
+        let name = camera_name(Some(&long), Some(&other)).unwrap();
+        assert_eq!(name.chars().count(), 2 * MAX_CAMERA_CHARS + 1);
+        assert_eq!(
+            camera_name(None, Some(&long)).unwrap().len(),
+            MAX_CAMERA_CHARS
+        );
+        // Characters, not bytes: no cut inside a multi-byte character.
+        let wide = "é".repeat(500);
+        assert_eq!(
+            camera_name(Some(&wide), None).unwrap().chars().count(),
+            MAX_CAMERA_CHARS
+        );
     }
 
     #[test]

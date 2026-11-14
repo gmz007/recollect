@@ -13,7 +13,6 @@ use crate::model::registry::{self, ModelSpec, megabytes};
 use crate::store::db::Stats;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
-use std::sync::Arc;
 
 /// The sections of the sheet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,8 +85,8 @@ pub(super) fn smart_search_status(
     match activity {
         Activity::Downloading { done, total, .. } => format!(
             "Downloading… {} of {} MB",
-            thousands(megabytes(*done) as usize),
-            thousands(megabytes(*total) as usize)
+            thousands(usize::try_from(megabytes(*done)).unwrap_or(usize::MAX)),
+            thousands(usize::try_from(megabytes(*total)).unwrap_or(usize::MAX))
         ),
         Activity::Idle if installed => format!("On — {}", quality_name(spec).to_lowercase()),
         Activity::Idle => "Off".to_string(),
@@ -465,7 +464,7 @@ impl App {
                                             Section::SmartSearch => self.settings_smart_search(ui),
                                             Section::Library => self.settings_library(ui),
                                             Section::Storage => self.settings_storage(ui),
-                                            Section::About => self.settings_about(ui),
+                                            Section::About => Self::settings_about(ui),
                                         }
                                         ui.add_space(24.0);
                                     });
@@ -715,9 +714,8 @@ impl App {
             .id_salt("settings-advanced")
             .show(ui, |ui| {
                 let s = self.settings.clone();
-                let max = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4) as u64;
+                let max =
+                    std::thread::available_parallelism().map_or(4, std::num::NonZero::get) as u64;
                 ui.label("Indexing threads (decoding workers while photos are indexed)");
                 if let Some(n) = committed_slider(
                     ui,
@@ -727,7 +725,9 @@ impl App {
                     1.0,
                     |n| format!("{}", n as u64),
                 ) {
-                    self.change_settings(|s| s.index_threads = Some(n as usize));
+                    self.change_settings(|s| {
+                        s.index_threads = Some(usize::try_from(n).unwrap_or(usize::MAX));
+                    });
                 }
                 ui.add_space(6.0);
                 ui.label(format!(
@@ -781,7 +781,7 @@ impl App {
                 paths.data.clone(),
             ),
             ("previews", "Previews", paths.cache.clone()),
-            ("settings", "Settings", paths.config.clone()),
+            ("settings", "Settings", paths.config),
         ] {
             let pal = Palette::of(ui.ctx());
             egui::Frame::new()
@@ -833,7 +833,7 @@ impl App {
         }
     }
 
-    fn settings_about(&mut self, ui: &mut egui::Ui) {
+    fn settings_about(ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         ui.horizontal(|ui| {
             ui.label(style::icon_text(icons::ICON_PHOTO_LIBRARY, 34.0).color(pal.accent));
@@ -920,23 +920,18 @@ impl App {
             );
             return;
         }
-        match self.lib.set_model(spec.id) {
-            Err(e) => self.notify_problem(
+        if let Err(e) = self.lib.set_model(spec.id) {
+            self.notify_problem(
                 "Couldn't change smart search. Please try again in a moment.",
                 format!("{e:#}"),
                 None,
-            ),
-            Ok(()) => {
-                // Old results and queries belong to the previous choice.
-                self.set_search_prompt_dismissed(false);
-                self.results = Arc::default();
-                self.end_viewer();
-                self.current = None;
-                self.query.clear();
-                self.result_label.clear();
-                self.selected = None;
-                self.refresh_snapshot(true);
-            }
+            );
+        } else {
+            // Old results and queries belong to the previous choice.
+            self.set_search_prompt_dismissed(false);
+            self.end_viewer();
+            self.clear_search();
+            self.refresh_snapshot(true);
         }
     }
 }

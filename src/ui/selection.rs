@@ -172,6 +172,10 @@ impl Selection {
         id_at: &dyn Fn(usize) -> i64,
         to: usize,
     ) {
+        if len == 0 {
+            return;
+        }
+        let to = to.min(len - 1);
         // The anchor is a file: when it is listed twice, the primary's position wins.
         let from = self
             .anchor
@@ -180,13 +184,13 @@ impl Selection {
                     .filter(|&p| p < len && id_at(p) == a)
                     .or_else(|| (0..len).find(|&k| id_at(k) == a))
             })
-            .or(primary)
+            .or(primary.filter(|&p| p < len))
             .unwrap_or(to);
         if self.anchor.is_none() {
             self.anchor = Some(id_at(from));
         }
         let (lo, hi) = (from.min(to), from.max(to));
-        self.ids = (lo..=hi.min(len.saturating_sub(1))).map(id_at).collect();
+        self.ids = (lo..=hi).map(id_at).collect();
     }
 
     /// Selects every item; returns the primary (kept, or the first item).
@@ -260,7 +264,7 @@ pub(super) fn read_nav_keys(ctx: &egui::Context) -> NavInput {
         });
     });
     if (!out.plain.is_empty() || !out.shift.is_empty())
-        && let Some(id) = ctx.memory(|m| m.focused())
+        && let Some(id) = ctx.memory(egui::Memory::focused)
     {
         ctx.memory_mut(|m| m.surrender_focus(id));
     }
@@ -310,13 +314,14 @@ pub(super) fn apply_keys(
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
     use super::*;
 
     const ID: &dyn Fn(usize) -> i64 = &|i| 100 + i as i64;
 
     fn ids(s: &Selection) -> Vec<i64> {
         let mut v: Vec<i64> = s.ids.iter().copied().collect();
-        v.sort();
+        v.sort_unstable();
         v
     }
 
@@ -449,6 +454,21 @@ mod tests {
         s.remove_all(&[100, 101].into_iter().collect());
         assert_eq!(ids(&s), vec![102, 103]);
         assert_eq!(s.anchor, None);
+    }
+
+    #[test]
+    fn extending_with_a_stale_primary_stays_inside_the_list() {
+        let mut s = Selection::default();
+        // The primary points past the end (the list shrank): the range starts at `to`.
+        s.extend_to(Some(10), 3, ID, 1);
+        assert_eq!(ids(&s), vec![101]);
+        // A target past the end is clamped, an empty list selects nothing.
+        let mut s = Selection::default();
+        s.extend_to(Some(0), 3, ID, 50);
+        assert_eq!(ids(&s), vec![100, 101, 102]);
+        let mut s = Selection::default();
+        s.extend_to(None, 0, ID, 0);
+        assert_eq!(s.len(), 0);
     }
 
     #[test]

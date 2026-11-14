@@ -55,21 +55,21 @@ fn generate(key: &ThumbKey) -> Result<Rgb> {
 
 fn save_jpeg(file: &Path, rgb: &Rgb) -> Result<()> {
     if let Some(d) = file.parent() {
-        std::fs::create_dir_all(d)?;
+        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
     }
-    let tmp = file.with_extension("tmp");
-    let out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(out, 82);
-    enc.encode(
-        &rgb.data,
-        rgb.width,
-        rgb.height,
-        image::ExtendedColorType::Rgb8,
-    )
-    .context("encoding thumbnail")?;
-    drop(enc);
-    std::fs::rename(&tmp, file)?;
-    Ok(())
+    crate::config::replace_file(file, |tmp| {
+        let out = std::io::BufWriter::new(
+            std::fs::File::create(tmp).with_context(|| format!("creating {}", tmp.display()))?,
+        );
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(out, 82);
+        enc.encode(
+            &rgb.data,
+            rgb.width,
+            rgb.height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .context("encoding thumbnail")
+    })
 }
 
 /// Deletes the least recently used thumbnails until the cache is below `max_bytes`.
@@ -117,9 +117,11 @@ mod tests {
     fn creates_caches_and_prunes() {
         let d = tempfile::tempdir().unwrap();
         let src = d.path().join("big.png");
-        image::RgbImage::from_fn(1000, 500, |x, _| image::Rgb([(x % 256) as u8, 0, 0]))
-            .save(&src)
-            .unwrap();
+        image::RgbImage::from_fn(1000, 500, |x, _| {
+            image::Rgb([u8::try_from(x % 256).unwrap(), 0, 0])
+        })
+        .save(&src)
+        .unwrap();
         let cache = d.path().join("cache");
         let key = ThumbKey {
             path: src.clone(),

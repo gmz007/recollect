@@ -139,7 +139,7 @@ impl ViewerEntry {
     fn name(&self) -> String {
         self.path
             .file_name()
-            .map(|n| n.to_string_lossy().to_string())
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     }
 
@@ -156,7 +156,7 @@ impl ViewerEntry {
         ThumbKey {
             path: self.path.clone(),
             mtime: self.mtime,
-            t_ms: self.frame_time().map(|t| (t * 1000.0) as i64),
+            t_ms: self.frame_time().map(super::to_millis),
         }
     }
 
@@ -168,7 +168,7 @@ impl ViewerEntry {
         PreviewKey {
             path: self.path.clone(),
             mtime: self.mtime,
-            t_ms: self.frame_time().map(|t| (t * 1000.0) as i64),
+            t_ms: self.frame_time().map(super::to_millis),
             side,
             min_side: preview::min_side_for(self.dims(), side),
             zoom,
@@ -253,6 +253,7 @@ pub struct ViewerEnv<'a> {
 
 impl Viewer {
     pub fn new(source: Source, index: usize, info: bool) -> Self {
+        debug_assert!(source.len() > 0, "a viewer needs something to show");
         let index = index.min(source.len().saturating_sub(1));
         let current = source.entry(index);
         Self {
@@ -344,18 +345,17 @@ impl Viewer {
         if esc > 0 {
             actions.push(Action::Close);
         }
-        let mut target = self.index as i64;
-        target -= left as i64;
-        target += right as i64;
+        let last = n.saturating_sub(1);
+        let mut target = (self.index + right).saturating_sub(left);
         if home > 0 {
             target = 0;
         }
         if end > 0 {
-            target = n as i64 - 1;
+            target = last;
         }
-        self.go(target.clamp(0, n as i64 - 1) as usize);
+        self.go(target.min(last));
         if left + right + home + end > 0
-            && let Some(id) = ctx.memory(|m| m.focused())
+            && let Some(id) = ctx.memory(egui::Memory::focused)
         {
             // A focused button would otherwise also move with the arrow keys.
             ctx.memory_mut(|m| m.surrender_focus(id));
@@ -378,13 +378,13 @@ impl Viewer {
         ui: &mut egui::Ui,
         previews: &mut Previews,
         thumbs: &mut ThumbCache,
-        env: ViewerEnv<'_>,
+        env: &ViewerEnv<'_>,
     ) -> Vec<Action> {
         let ViewerEnv {
             can_find_similar,
             albums,
             keys,
-        } = env;
+        } = *env;
         let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
         // While a text field has focus or a dialog is open, keys belong to them.
@@ -403,7 +403,7 @@ impl Viewer {
                 .min_size(240.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.info_panel(ui, previews, can_find_similar, &mut actions)
+                        self.info_panel(ui, previews, can_find_similar, &mut actions);
                     });
                 });
         }
@@ -551,7 +551,7 @@ impl Viewer {
         )
         .clicked()
         {
-            actions.push(Action::Open(path.clone()));
+            actions.push(Action::Open(path));
         }
         if style::toolbar_button(
             ui,
@@ -603,7 +603,7 @@ impl Viewer {
             let r = ui.add(b);
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
             if r.on_hover_text("Play this video").clicked() {
-                actions.push(Action::PlayAt(e.path.clone(), t));
+                actions.push(Action::PlayAt(e.path, t));
             }
         }
     }
@@ -656,7 +656,7 @@ impl Viewer {
         if let Some(dir) = e.path.parent() {
             let name = dir.file_name().map_or_else(
                 || dir.display().to_string(),
-                |n| n.to_string_lossy().to_string(),
+                |n| n.to_string_lossy().into_owned(),
             );
             ui.label(RichText::new(name).small().weak())
                 .on_hover_text(dir.display().to_string());
@@ -718,7 +718,7 @@ impl Viewer {
             self.toggle_zoom();
         }
         let ppp = ctx.pixels_per_point();
-        let side = preview::fit_side(ctx.content_rect().size(), ppp);
+        let fit = preview::fit_side(ctx.content_rect().size(), ppp);
         let e = self.current.clone();
         // The neighbours are prefetched; the item on screen is asked for urgently every frame,
         // so it is decoded before them even if they were queued first (the fitted preview
@@ -726,18 +726,18 @@ impl Viewer {
         let mut wanted = Vec::new();
         for i in [self.index + 1, self.index.wrapping_sub(1)] {
             if i < self.len() {
-                let k = self.entry_at(i).preview_key(side, false);
+                let k = self.entry_at(i).preview_key(fit, false);
                 previews.get(&k);
                 wanted.push(k);
             }
         }
-        let fit_key = e.preview_key(side, false);
+        let fit_key = e.preview_key(fit, false);
         let zoom_key = (self.zoom && e.kind == MediaKind::Image)
             .then(|| {
                 let longest = e.dims().map_or(preview::MAX_ZOOM_SIDE, |(w, h)| w.max(h));
                 longest.min(preview::MAX_ZOOM_SIDE)
             })
-            .filter(|&s| s > side)
+            .filter(|&s| s > fit)
             .map(|s| e.preview_key(s, true));
         let mut tex = None;
         let mut failed = false;
@@ -767,13 +767,13 @@ impl Viewer {
         }
         let painter = ui.painter_at(area);
         if let Some(tex) = tex {
-            let tex_size = tex.size_vec2();
+            let native = tex.size_vec2();
             let size = if self.zoom && !loading {
                 e.dims()
-                    .map_or(tex_size, |(w, h)| Vec2::new(w as f32, h as f32))
+                    .map_or(native, |(w, h)| Vec2::new(w as f32, h as f32))
                     / ppp
             } else {
-                tex_size * (area.width() / tex_size.x).min(area.height() / tex_size.y)
+                native * (area.width() / native.x).min(area.height() / native.y)
             };
             if self.zoom && resp.dragged() {
                 self.pan += resp.drag_delta();
@@ -939,7 +939,7 @@ impl App {
             ui,
             &mut self.previews,
             &mut self.thumbs,
-            ViewerEnv {
+            &ViewerEnv {
                 can_find_similar: can_similar,
                 albums: &self.albums,
                 keys,
@@ -951,36 +951,21 @@ impl App {
                 Action::Close => self.close_viewer(),
                 Action::Favorite(id, fav) => self.set_favorite(id, fav),
                 Action::AddToAlbum(id, c) => self.add_to_album_choice(vec![id], c),
-                Action::Open(p) => {
-                    if let Err(e) = platform::open(&p) {
-                        self.notify_problem(
-                            "Couldn't open that file. It may have been moved or deleted; check \
-                             that it is still in its folder.",
-                            format!("{e:#}"),
-                            None,
-                        );
-                    }
-                }
-                Action::Reveal(p) => {
-                    if let Err(e) = platform::reveal(&p) {
-                        self.notify_problem(
-                            "Couldn't show that file in its folder. It may have been moved or \
-                             deleted.",
-                            format!("{e:#}"),
-                            None,
-                        );
-                    }
-                }
-                Action::PlayAt(p, t) => {
-                    if let Err(e) = platform::open_video_at(&p, t) {
-                        self.notify_problem(
-                            "Couldn't play that video. Install a video player such as VLC, or \
-                             open the file from its folder.",
-                            format!("{e:#}"),
-                            None,
-                        );
-                    }
-                }
+                Action::Open(p) => self.report(
+                    platform::open(&p),
+                    "Couldn't open that file. It may have been moved or deleted; check \
+                     that it is still in its folder.",
+                ),
+                Action::Reveal(p) => self.report(
+                    platform::reveal(&p),
+                    "Couldn't show that file in its folder. It may have been moved or \
+                     deleted.",
+                ),
+                Action::PlayAt(p, t) => self.report(
+                    platform::open_video_at(&p, t),
+                    "Couldn't play that video. Install a video player such as VLC, or \
+                     open the file from its folder.",
+                ),
                 Action::FindSimilar { item_id, label } => {
                     self.end_viewer();
                     self.tl.selected = None;
@@ -988,6 +973,13 @@ impl App {
                     self.submit(Query::Similar { item_id, label });
                 }
             }
+        }
+    }
+
+    /// Shows `message` (with the technical detail behind "details") if `result` failed.
+    fn report<T>(&mut self, result: anyhow::Result<T>, message: &str) {
+        if let Err(e) = result {
+            self.notify_problem(message, format!("{e:#}"), None);
         }
     }
 

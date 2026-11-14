@@ -3,9 +3,9 @@
 /// Architecture family; decides preprocessing and text handling details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
-    /// OpenAI CLIP: shortest side → 224 then center crop; 77 tokens; eos pooling in-graph.
+    /// `OpenAI` CLIP: shortest side → 224 then center crop; 77 tokens; eos pooling in-graph.
     Clip,
-    /// Google SigLIP: squash to 224×224; lowercase; pad to 64 tokens with id 1, no mask.
+    /// Google `SigLIP`: squash to 224×224; lowercase; pad to 64 tokens with id 1, no mask.
     Siglip,
 }
 
@@ -34,7 +34,7 @@ pub struct ModelSpec {
     pub mean: [f32; 3],
     pub std: [f32; 3],
     pub files: &'static [ModelFile],
-    /// Local name of the text tower inside `files` (SigLIP's int8 export has its own name so an
+    /// Local name of the text tower inside `files` (`SigLIP`'s int8 export has its own name so an
     /// older fp32 `text_model.onnx` is never mistaken for it).
     pub text_file: &'static str,
     /// Largest vision batch known to work on the WebGPU execution provider.

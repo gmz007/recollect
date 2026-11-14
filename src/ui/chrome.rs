@@ -196,7 +196,7 @@ impl App {
                 // false when the window itself is not the active one.)
                 has_focus = ui.memory(|m| m.has_focus(id));
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.query_changed_at = Some(Instant::now() - super::DEBOUNCE);
+                    self.search_now();
                 }
                 // Tab moves into the suggestions under the field, when they are showing.
                 if resp.lost_focus()
@@ -283,8 +283,7 @@ impl App {
                     .iter()
                     .zip(labels)
                     .find(|(f, _)| f.id == id)
-                    .map(|(_, l)| l)
-                    .unwrap_or_else(|| "Folder".to_string())
+                    .map_or_else(|| "Folder".to_string(), |(_, l)| l)
             }
             View::Album(id) => {
                 super::albums::short_name(self.album_name(id).unwrap_or("Album"), 60)
@@ -332,7 +331,7 @@ impl App {
                                 .trailing_fill(true),
                         )
                         .on_hover_text("Thumbnail size");
-                    let v = self.tl.tile_size as f64;
+                    let v = f64::from(self.tl.tile_size);
                     r.widget_info(|| egui::WidgetInfo::slider(true, v, "Thumbnail size"));
                 });
                 ui.label(style::icon_text(icons::ICON_IMAGE, 14.0).color(pal.text_secondary));

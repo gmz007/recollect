@@ -14,7 +14,8 @@ pub mod model;
 pub mod search;
 pub mod store;
 pub mod thumbs;
-pub mod ui;
+mod ui;
 mod video_index;
 
 pub use library::Library;
+pub use ui::{run, run_error};

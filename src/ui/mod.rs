@@ -1,5 +1,10 @@
 //! The egui desktop app. All work happens on background threads; this module only renders
 //! state and sends commands to the [`Library`].
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "layout and display math on small floats; saturating conversion is intended"
+)]
 
 mod albums;
 mod chrome;
@@ -303,7 +308,7 @@ impl App {
         lib.set_notifier(move || c.request_repaint());
         let c = ctx.clone();
         let search = SearchWorker::new(Arc::clone(&lib), move || c.request_repaint());
-        let thumbs = ThumbCache::new(ctx, lib.paths().thumbs_dir(), 3);
+        let thumbs = ThumbCache::new(ctx, &lib.paths().thumbs_dir(), 3);
         prune_thumbnails(&lib);
         let tl = TimelineState::new(Arc::clone(&lib), ctx);
         let previews = Previews::new(ctx, Arc::clone(&lib), 2);
@@ -413,6 +418,10 @@ impl App {
 
     /// An error in two parts: what happened and what to do (`msg`), and the technical text
     /// that goes under "Details". `action` adds a "Try again" button.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers pass temporaries such as format!() output or an error"
+    )]
     fn notify_problem(
         &mut self,
         msg: impl Into<String>,
@@ -462,14 +471,20 @@ impl App {
     }
 
     fn poll_snapshot(&mut self) {
-        if let Some(rx) = &self.snapshot_rx
-            && let Ok(s) = rx.try_recv()
-        {
-            self.snapshot = s;
-            self.snapshot_rx = None;
-            if std::mem::take(&mut self.snapshot_again) {
-                self.refresh_snapshot(true);
+        let Some(rx) = &self.snapshot_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(s) => {
+                self.snapshot = s;
+                self.snapshot_rx = None;
             }
+            // The fetching thread died without an answer: ask again next time.
+            Err(crossbeam_channel::TryRecvError::Disconnected) => self.snapshot_rx = None,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+        }
+        if std::mem::take(&mut self.snapshot_again) {
+            self.refresh_snapshot(true);
         }
     }
 
@@ -647,11 +662,16 @@ impl App {
     /// Reads the list of years for the "When" selector in the background, again whenever a job
     /// has finished (files were added, removed or dated).
     fn poll_years(&mut self, jobs: u64) {
-        if let Some(rx) = &self.years_rx
-            && let Ok(years) = rx.try_recv()
-        {
-            self.known_years = years;
-            self.years_rx = None;
+        if let Some(rx) = &self.years_rx {
+            match rx.try_recv() {
+                Ok(years) => {
+                    self.known_years = years;
+                    self.years_rx = None;
+                }
+                // The lookup failed (its thread sent nothing): allow the next change to retry.
+                Err(crossbeam_channel::TryRecvError::Disconnected) => self.years_rx = None,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
         }
         if self.years_rx.is_none() && self.years_seen != Some(jobs) {
             self.years_seen = Some(jobs);
@@ -709,7 +729,7 @@ impl App {
                     let name = hit
                         .path
                         .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
+                        .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     let in_sel = self.result_sel.contains(hit.file_id);
                     let checked = in_sel && (self.result_picking || self.result_sel.is_multi());
@@ -736,7 +756,7 @@ impl App {
                         right_clicked = Some(i);
                     }
                     o.resp.context_menu(|ui| {
-                        menu = albums::tile_menu(ui, &self.albums, false).map(|m| (i, m))
+                        menu = albums::tile_menu(ui, &self.albums, false).map(|m| (i, m));
                     });
                 }
             }
@@ -800,7 +820,7 @@ impl App {
             path: hit.path.clone(),
             mtime: hit.mtime,
             t_ms: if hit.kind == MediaKind::Video {
-                Some((t.or(hit.t_start).unwrap_or(0.0) * 1000.0) as i64)
+                Some(to_millis(t.or(hit.t_start).unwrap_or(0.0)))
             } else {
                 None
             },
@@ -838,6 +858,15 @@ pub fn run_error(message: String) -> anyhow::Result<()> {
         });
     })
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+}
+
+/// A time in seconds as whole milliseconds; a float beyond the integer range saturates.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "saturating float-to-integer conversion is the intent"
+)]
+pub(super) fn to_millis(seconds: f64) -> i64 {
+    (seconds * 1000.0) as i64
 }
 
 fn fmt_time(t: f64) -> String {
@@ -895,7 +924,7 @@ fn consume_plain_key(i: &mut egui::InputState, key: egui::Key) -> usize {
     i.events.retain(|e| {
         let hit = matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. }
             if *k == key && !modifiers.any());
-        count += hit as usize;
+        count += usize::from(hit);
         !hit
     });
     count
@@ -1187,15 +1216,15 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show(ui, |ui| {
-                if !has_folders {
-                    self.no_folders_state(ui);
-                } else {
+                if has_folders {
                     self.search_banner(ui);
                     if self.searching() {
                         self.results_grid(ui);
                     } else {
                         self.timeline_view(ui);
                     }
+                } else {
+                    self.no_folders_state(ui);
                 }
             });
         if self.settings_open {

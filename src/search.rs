@@ -75,6 +75,15 @@ const MAX_MOMENTS: usize = 10;
 /// Upper bound for candidates scanned when widening a search.
 const MAX_CANDIDATES: usize = 50_000;
 
+/// Extra files kept beyond `limit` when trimming candidates.
+const FILE_MARGIN: usize = 20;
+
+/// Candidates fetched by the first scan for a request of `limit` files. Arithmetic saturates
+/// so an absurd `limit` cannot overflow.
+fn first_scan_size(limit: usize) -> usize {
+    limit.saturating_mul(4).saturating_add(100).min(5000)
+}
+
 pub(crate) fn by_vector(
     lib: &Library,
     q: &[f32],
@@ -84,7 +93,7 @@ pub(crate) fn by_vector(
     // Over-fetch: videos contribute many items per file, so the best `limit` files need more than
     // `limit` candidates. If long videos crowd the candidates (few distinct files), widen the scan.
     let t0 = std::time::Instant::now();
-    let mut k = (opts.limit * 4 + 100).min(5000);
+    let mut k = first_scan_size(opts.limit);
     let cands = loop {
         let cands = {
             let index = lib.index.read();
@@ -105,7 +114,7 @@ pub(crate) fn by_vector(
         if files.len() >= opts.limit || cands.len() < k || k >= MAX_CANDIDATES {
             break cands;
         }
-        k = (k * 4).min(MAX_CANDIDATES);
+        k = k.saturating_mul(4).min(MAX_CANDIDATES);
     };
     let t_scan = t0.elapsed();
     if cands.is_empty() {
@@ -113,12 +122,13 @@ pub(crate) fn by_vector(
     }
     // Keep only what can appear: the best few items of the first `limit` + margin files.
     let mut per_file: HashMap<i64, usize> = HashMap::new();
+    let max_files = opts.limit.saturating_add(FILE_MARGIN);
     let cands: Vec<_> = cands
         .into_iter()
         .filter(|c| {
             let n = per_file.len();
             let e = per_file.entry(c.file_id).or_insert(0);
-            if *e == 0 && n >= opts.limit + 20 {
+            if *e == 0 && n >= max_files {
                 return false;
             }
             *e += 1;
@@ -151,8 +161,8 @@ pub(crate) fn by_vector(
     tracing::debug!(
         "search: scan {:?} (k={k}), db lock {:?}, info {:?} ({} rows)",
         t_scan,
-        t_lock - t_scan,
-        t0.elapsed() - t_lock,
+        t_lock.saturating_sub(t_scan),
+        t0.elapsed().saturating_sub(t_lock),
         infos.len()
     );
     let moment_infos = &infos;
@@ -231,6 +241,17 @@ fn group_by_file(sorted: &[(i64, i64, f32)], limit: usize) -> Vec<Group> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absurd_limits_do_not_overflow() {
+        assert_eq!(first_scan_size(0), 100);
+        assert_eq!(first_scan_size(200), 900);
+        assert_eq!(first_scan_size(usize::MAX), 5000);
+        assert_eq!(usize::MAX.saturating_add(FILE_MARGIN), usize::MAX);
+        let sorted = vec![(1, 10, 0.9), (2, 20, 0.8)];
+        assert_eq!(group_by_file(&sorted, usize::MAX).len(), 2);
+        assert!(group_by_file(&sorted, 0).is_empty());
+    }
 
     #[test]
     fn grouping_keeps_best_per_file_and_limit() {

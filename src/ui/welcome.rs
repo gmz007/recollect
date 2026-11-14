@@ -97,7 +97,7 @@ impl Welcome {
                 out.push(p.clone());
             }
         }
-        without_nested(out)
+        without_nested(&out)
     }
 
     #[cfg(test)]
@@ -209,7 +209,7 @@ impl App {
                     ui.allocate_ui_with_layout(
                         Vec2::new(width, 40.0),
                         egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| self.welcome_buttons(ui, &mut w, &mut nav),
+                        |ui| Self::welcome_buttons(ui, &mut w, &mut nav),
                     );
                 });
             });
@@ -233,10 +233,10 @@ impl App {
                         });
                     });
             });
-        self.apply_welcome_nav(w, nav);
+        self.apply_welcome_nav(w, &nav);
     }
 
-    fn apply_welcome_nav(&mut self, mut w: Welcome, nav: Nav) {
+    fn apply_welcome_nav(&mut self, mut w: Welcome, nav: &Nav) {
         if nav.skip_setup {
             self.change_settings(|s| s.welcome_done = true);
             return;
@@ -256,8 +256,7 @@ impl App {
             w.step = match w.step {
                 Step::Intro => Step::Folders,
                 Step::Folders => Step::Search,
-                Step::Search => Step::Done,
-                Step::Done => Step::Done,
+                Step::Search | Step::Done => Step::Done,
             };
             if w.step == Step::Done {
                 w.download = nav.next;
@@ -267,7 +266,7 @@ impl App {
     }
 
     /// Back, the secondary choice and the primary button of the current screen.
-    fn welcome_buttons(&mut self, ui: &mut egui::Ui, w: &mut Welcome, nav: &mut Nav) {
+    fn welcome_buttons(ui: &mut egui::Ui, w: &mut Welcome, nav: &mut Nav) {
         if w.step == Step::Intro {
             nav.skip_setup = ui.button("I'll set it up myself").clicked();
         } else if ui.button("Back").clicked() {
@@ -334,7 +333,7 @@ impl App {
                 });
             }
             Step::Folders => self.welcome_folders(ui, w),
-            Step::Search => self.welcome_search(ui, w),
+            Step::Search => Self::welcome_search(ui, w),
             Step::Done => {
                 ui.add_space(24.0);
                 let text = done_text(!w.folders().is_empty(), w.download);
@@ -409,7 +408,7 @@ impl App {
                     ui.vertical(|ui| {
                         let name = p.file_name().map_or_else(
                             || p.display().to_string(),
-                            |n| n.to_string_lossy().into(),
+                            |n| n.to_string_lossy().into_owned(),
                         );
                         ui.add(egui::Label::new(name).truncate());
                         ui.add(
@@ -485,7 +484,7 @@ impl App {
         }
     }
 
-    fn welcome_search(&mut self, ui: &mut egui::Ui, w: &mut Welcome) {
+    fn welcome_search(ui: &mut egui::Ui, w: &mut Welcome) {
         let pal = Palette::of(ui.ctx());
         ui.label(style::semibold("Turn on smart search").size(28.0));
         ui.add_space(8.0);

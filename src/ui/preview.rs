@@ -11,6 +11,7 @@ use crate::media::image::{self as img, Rgb};
 use crate::store::db::FileDetails;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::{Condvar, Mutex};
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -177,9 +178,9 @@ impl Previews {
         self.frame += 1;
         let done: Vec<_> = std::mem::take(&mut *self.shared.done.lock());
         for (key, rgb) in done {
-            if !self.states.contains_key(&key) {
+            let Some(slot) = self.states.get_mut(&key) else {
                 continue; // no longer wanted
-            }
+            };
             let state = match rgb {
                 Some(rgb) if rgb.width > 0 && rgb.height > 0 => {
                     let img = egui::ColorImage::from_rgb(
@@ -194,8 +195,7 @@ impl Previews {
                 }
                 _ => State::Failed,
             };
-            let used = self.states.get(&key).map_or(self.frame, |s| s.1);
-            self.states.insert(key, (state, used));
+            slot.0 = state;
         }
         while let Ok((id, epoch, d)) = self.details_rx.try_recv() {
             if epoch == self.details_epoch {
@@ -258,18 +258,20 @@ impl Previews {
 
     fn request(&mut self, key: &PreviewKey, urgent: bool) -> Preview<'_> {
         let frame = self.frame;
-        match self.states.get(key) {
-            None => {
+        let entry = match self.states.entry(key.clone()) {
+            Entry::Vacant(v) => {
                 self.shared.queue.lock().push(key.clone());
                 self.shared.cv.notify_one();
-                self.states.insert(key.clone(), (State::Loading, frame));
+                v.insert((State::Loading, frame))
             }
-            Some((State::Loading, _)) if urgent => {
-                promote(&mut self.shared.queue.lock(), key);
+            Entry::Occupied(o) => {
+                let entry = o.into_mut();
+                if urgent && matches!(entry.0, State::Loading) {
+                    promote(&mut self.shared.queue.lock(), key);
+                }
+                entry
             }
-            Some(_) => {}
-        }
-        let entry = self.states.get_mut(key).expect("state exists");
+        };
         entry.1 = frame;
         match &entry.0 {
             State::Ready(t) => Preview::Ready(t),
@@ -306,8 +308,8 @@ impl Previews {
     /// Details of a file once they were read (requested on first use).
     pub fn details(&mut self, file_id: i64) -> Option<&FileDetails> {
         match self.details.entry(file_id) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut().as_ref(),
-            std::collections::hash_map::Entry::Vacant(e) => {
+            Entry::Occupied(e) => e.into_mut().as_ref(),
+            Entry::Vacant(e) => {
                 e.insert(None);
                 let _ = self.details_tx.send((file_id, self.details_epoch));
                 None
@@ -337,6 +339,9 @@ impl Previews {
 
 impl Drop for Previews {
     fn drop(&mut self) {
+        // Under the queue lock: a worker that just checked `stop` is then either still before
+        // its wait (and sees the flag when it rechecks) or already waiting (and is woken).
+        let _queue = self.shared.queue.lock();
         self.shared.stop.store(true, Ordering::Relaxed);
         self.shared.cv.notify_all();
     }
@@ -457,9 +462,11 @@ mod tests {
     fn previews_are_scaled_to_the_requested_side() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("wide.png");
-        image::RgbImage::from_fn(3000, 1500, |x, _| image::Rgb([(x % 256) as u8, 7, 9]))
-            .save(&p)
-            .unwrap();
+        image::RgbImage::from_fn(3000, 1500, |x, _| {
+            image::Rgb([u8::try_from(x % 256).unwrap(), 7, 9])
+        })
+        .save(&p)
+        .unwrap();
         let key = PreviewKey {
             path: p,
             mtime: 1,

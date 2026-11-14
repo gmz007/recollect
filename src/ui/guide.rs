@@ -138,7 +138,7 @@ pub(super) fn empty_state(
     job.halign = egui::Align::Center;
     let mut plain = String::new();
     let body = egui::TextStyle::Body.resolve(ui.style());
-    let font = egui::FontId::new(body.size + 1.5, body.family.clone());
+    let font = egui::FontId::new(body.size + 1.5, body.family);
     for part in sentence {
         match part {
             Part::Text(t) => {
@@ -414,14 +414,25 @@ impl App {
     /// Runs a search the user picked from the help (or any text) right away.
     pub(super) fn search_for(&mut self, text: &str) {
         self.query = text.to_string();
-        self.query_changed_at = Some(Instant::now() - super::DEBOUNCE);
+        self.search_now();
+    }
+
+    /// Makes the typed query count as settled, so the search starts on the next frame instead
+    /// of after the typing pause. (Right after boot the clock may not reach back that far; the
+    /// search then simply waits out the pause.)
+    pub(super) fn search_now(&mut self) {
+        self.query_changed_at = Some(
+            Instant::now()
+                .checked_sub(super::DEBOUNCE)
+                .unwrap_or_else(Instant::now),
+        );
     }
 
     /// Keyboard use of the suggestions: Tab from the field goes to the first one, Up/Down (or
     /// Left/Right) move between them, Enter runs one (a focused button does that itself) and
     /// Escape closes them.
     fn keyboard_in_suggestions(&mut self, ctx: &egui::Context, ids: &[egui::Id]) {
-        let focused = ctx.memory(|m| m.focused());
+        let focused = ctx.memory(egui::Memory::focused);
         let current = focused.and_then(|f| ids.iter().position(|i| *i == f));
         let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k) && !i.modifiers.any());
         let mut target = None;

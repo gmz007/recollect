@@ -1,6 +1,11 @@
 //! `recollect bench`: startup time, memory, search latency and rescan time on synthetic
 //! data.
 //! Always run with `--home <scratch dir>`; it writes a large throwaway library there.
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "statistics over small, non-negative measurements; saturation is intended"
+)]
 
 use crate::Library;
 use crate::config::Paths;
@@ -9,8 +14,8 @@ use crate::model::registry;
 use crate::search::{self, SearchOptions};
 use crate::store::Db;
 use crate::store::db::{FileMeta, NewItem};
-use anyhow::{Result, bail};
-use std::path::{Path, PathBuf};
+use anyhow::{Result, anyhow, bail};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Resident memory of this process in MB (Linux; 0 elsewhere).
@@ -22,8 +27,7 @@ pub fn rss_mb() -> u64 {
                 .find(|l| l.starts_with("VmRSS:"))
                 .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
         })
-        .map(|kb| kb / 1024)
-        .unwrap_or(0)
+        .map_or(0, |kb| kb / 1024)
 }
 
 struct Rng(u64);
@@ -78,8 +82,7 @@ pub fn search(
     }
     let db_mb = std::fs::metadata(paths.db_path())?.len() / 1_000_000
         + std::fs::metadata(paths.db_path().with_extension("db-wal"))
-            .map(|m| m.len() / 1_000_000)
-            .unwrap_or(0);
+            .map_or(0, |m| m.len() / 1_000_000);
 
     let rss0 = rss_mb();
     let t = Instant::now();
@@ -141,7 +144,7 @@ pub fn search(
         "vector search (scan + group + info, limit 200): p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms",
         percentile(&lat, 0.5).as_secs_f64() * 1e3,
         percentile(&lat, 0.95).as_secs_f64() * 1e3,
-        lat.last().unwrap().as_secs_f64() * 1e3
+        lat.last().copied().unwrap_or_default().as_secs_f64() * 1e3
     );
     if lib.model_installed() {
         lib.embed_text("warm up")?;
@@ -302,7 +305,7 @@ pub fn timeline(paths: &Paths, files: usize) -> Result<()> {
         let mut rng = Rng(0xDA7E);
         // Uniform over 2010-01-01 .. 2025-01-01 (wall-clock seconds).
         let (start, span) = (1_262_304_000i64, 15 * 365 * 86_400i64);
-        let when = |rng: &mut Rng| start + ((rng.next_f32() + 0.5) as f64 * span as f64) as i64;
+        let when = |rng: &mut Rng| start + (f64::from(rng.next_f32() + 0.5) * span as f64) as i64;
         let scanned: Vec<ScannedFile> = (0..files)
             .map(|i| {
                 let video = i % 50 == 0;
@@ -360,9 +363,8 @@ pub fn timeline(paths: &Paths, files: usize) -> Result<()> {
 }
 
 /// Default bench home if none given: refuse, to never write GBs into the user's real library.
-pub fn require_scratch_home(home: Option<&PathBuf>) -> Result<()> {
-    if home.is_none() {
-        bail!("benchmarks need --home <scratch dir> (they create a large throwaway library)");
-    }
-    Ok(())
+pub fn require_scratch_home(home: Option<&Path>) -> Result<&Path> {
+    home.ok_or_else(|| {
+        anyhow!("benchmarks need --home <scratch dir> (they create a large throwaway library)")
+    })
 }

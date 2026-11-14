@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: i64 = 2;
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS folders (
     id INTEGER PRIMARY KEY,
@@ -47,10 +47,10 @@ CREATE TABLE IF NOT EXISTS items (
     embedding BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS items_file ON items(file_id);
-"#;
+";
 
 /// Tables and indexes added after the first schema version; also part of a fresh database.
-const SCHEMA_ALBUMS: &str = r#"
+const SCHEMA_ALBUMS: &str = r"
 CREATE TABLE IF NOT EXISTS albums (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -64,20 +64,20 @@ CREATE TABLE IF NOT EXISTS album_items (
 );
 CREATE INDEX IF NOT EXISTS album_items_file ON album_items(file_id);
 CREATE INDEX IF NOT EXISTS files_taken ON files(taken_at);
-"#;
+";
 
 /// Upgrades a version 1 database in place (the caller runs this inside a transaction).
-const MIGRATE_V1_TO_V2: &str = r#"
+const MIGRATE_V1_TO_V2: &str = r"
 ALTER TABLE files ADD COLUMN taken_at INTEGER;
 ALTER TABLE files ADD COLUMN date_source INTEGER;
 ALTER TABLE files ADD COLUMN camera TEXT;
 ALTER TABLE files ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE files ADD COLUMN added_at INTEGER;
-"#;
+";
 
 /// Upgrades a version 1 database inside the caller's transaction. Columns that already exist
 /// (an earlier upgrade that was cut short) are left alone.
-fn migrate_v1(tx: &rusqlite::Transaction) -> Result<()> {
+fn migrate_v1(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     let have: HashSet<String> = tx
         .prepare("SELECT name FROM pragma_table_info('files')")?
         .query_map([], |r| r.get(0))?
@@ -402,7 +402,7 @@ impl TimelineRows {
                     .then(a.1.path.cmp(&b.1.path))
             }),
             TimelineOrder::AddedDesc => {
-                out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.path.cmp(&b.1.path)))
+                out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.path.cmp(&b.1.path)));
             }
         }
         out.into_iter().map(|(_, i)| i).collect()
@@ -413,12 +413,12 @@ pub struct Db {
     conn: Connection,
 }
 
-fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
+fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     Ok(FileRow {
         id: r.get(0)?,
         path: PathBuf::from(r.get::<_, String>(1)?),
         kind: MediaKind::from_i64(r.get(2)?),
-        size: r.get::<_, i64>(3)? as u64,
+        size: unsigned(r.get::<_, i64>(3)?),
         mtime: r.get(4)?,
         status: FileStatus::from_i64(r.get(5)?),
     })
@@ -465,8 +465,7 @@ fn new_library_id() -> String {
     h.write_u128(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_nanos()),
     );
     h.write_u32(std::process::id());
     format!("{:016x}", h.finish())
@@ -477,11 +476,37 @@ fn path_str(p: &Path) -> Result<&str> {
         .with_context(|| format!("path is not valid UTF-8: {}", p.display()))
 }
 
+/// A count read from the database; a corrupt negative value reads as zero.
+fn count_of(v: i64) -> usize {
+    usize::try_from(v).unwrap_or(0)
+}
+
+/// A size read from the database; a corrupt negative value reads as zero.
+fn unsigned(v: i64) -> u64 {
+    u64::try_from(v).unwrap_or(0)
+}
+
+/// A size or limit stored as a SQLite integer, saturating at its maximum.
+fn signed<T: TryInto<i64>>(v: T) -> i64 {
+    v.try_into().unwrap_or(i64::MAX)
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| signed(d.as_secs()))
+}
+
+/// All library folders, ordered by path, read through `conn` (which may be a transaction).
+fn folders_in(conn: &rusqlite::Connection) -> Result<Vec<Folder>> {
+    let mut st = conn.prepare("SELECT id, path FROM folders ORDER BY path")?;
+    let rows = st.query_map([], |r| {
+        Ok(Folder {
+            id: r.get(0)?,
+            path: PathBuf::from(r.get::<_, String>(1)?),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 impl Db {
@@ -636,7 +661,12 @@ impl Db {
     /// Adds a library folder. `path` should be absolute and canonical. A folder inside an
     /// existing one is rejected; adding a parent of existing folders absorbs them.
     pub fn add_folder(&mut self, path: &Path) -> Result<i64> {
-        let existing = self.folders()?;
+        // Immediate: read the existing folders and change them under one write lock, so a
+        // concurrent writer cannot add an overlapping folder in between.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing = folders_in(&tx)?;
         if let Some(f) = existing.iter().find(|f| path.starts_with(&f.path)) {
             if f.path == path {
                 return Ok(f.id);
@@ -647,7 +677,6 @@ impl Db {
                 f.path.display()
             );
         }
-        let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO folders(path, added_at) VALUES (?1, ?2)",
             params![path_str(path)?, now()],
@@ -666,16 +695,7 @@ impl Db {
     }
 
     pub fn folders(&self) -> Result<Vec<Folder>> {
-        let mut st = self
-            .conn
-            .prepare("SELECT id, path FROM folders ORDER BY path")?;
-        let rows = st.query_map([], |r| {
-            Ok(Folder {
-                id: r.get(0)?,
-                path: PathBuf::from(r.get::<_, String>(1)?),
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        folders_in(&self.conn)
     }
 
     /// Removes a folder and everything indexed under it; returns the removed file ids.
@@ -721,7 +741,7 @@ impl Db {
             let rows = st.query_map([folder_id], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    (r.get(1)?, r.get::<_, i64>(2)? as u64, r.get(3)?),
+                    (r.get(1)?, unsigned(r.get::<_, i64>(2)?), r.get(3)?),
                 ))
             })?;
             for row in rows {
@@ -751,13 +771,13 @@ impl Db {
                             folder_id,
                             p,
                             f.kind.as_i64(),
-                            f.size as i64,
+                            signed(f.size),
                             f.mtime,
                             added_at
                         ])?;
                     }
                     Some(&(id, size, mtime)) if size != f.size || mtime != f.mtime => {
-                        upd.execute(params![id, f.size as i64, f.mtime])?;
+                        upd.execute(params![id, signed(f.size), f.mtime])?;
                         del_items.execute([id])?;
                         stats.changed += 1;
                         stats.changed_ids.push(id);
@@ -841,7 +861,7 @@ impl Db {
         {
             let mut upd = tx.prepare("UPDATE files SET favorite = ?2 WHERE id = ?1")?;
             for id in file_ids {
-                upd.execute(params![id, fav as i64])?;
+                upd.execute(params![id, i64::from(fav)])?;
             }
         }
         tx.commit()?;
@@ -924,7 +944,7 @@ impl Db {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     created_at: r.get(2)?,
-                    count: r.get::<_, i64>(3)? as usize,
+                    count: count_of(r.get::<_, i64>(3)?),
                     cover: None,
                 })
             })?
@@ -1016,9 +1036,9 @@ impl Db {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         Ok(DateCounts {
-            exif: exif as usize,
-            video: video as usize,
-            file: file as usize,
+            exif: count_of(exif),
+            video: count_of(video),
+            file: count_of(file),
         })
     }
 
@@ -1184,7 +1204,7 @@ impl Db {
             [model],
             |r| r.get(0),
         )?;
-        Ok(n as usize)
+        Ok(count_of(n))
     }
 
     /// Changes whenever the set of stored items may have changed (guards the index cache).
@@ -1220,7 +1240,7 @@ impl Db {
         &self,
         sql: &str,
         ids: &[i64],
-        mut row: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+        mut row: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>> {
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(500) {
@@ -1244,7 +1264,8 @@ impl Db {
         Ok(rows.into_iter().collect())
     }
 
-    /// Display information for items, in the order of `item_ids` (missing items are skipped).
+    /// Display information for items, in the order of `item_ids`. Missing items are skipped
+    /// and an id listed twice yields one row, at its first position.
     pub fn item_info(&self, item_ids: &[i64]) -> Result<Vec<ItemInfo>> {
         let rows = self.by_ids(
             "SELECT items.id, items.file_id, files.path, files.kind, files.mtime, items.t_start, items.t_end,
@@ -1293,13 +1314,13 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(Stats {
-            folders: folders as usize,
-            images: images as usize,
-            videos: videos as usize,
-            indexed: indexed as usize,
-            pending: pending as usize,
-            errors: errors as usize,
-            items: items as usize,
+            folders: count_of(folders),
+            images: count_of(images),
+            videos: count_of(videos),
+            indexed: count_of(indexed),
+            pending: count_of(pending),
+            errors: count_of(errors),
+            items: count_of(items),
         })
     }
 
@@ -1309,7 +1330,7 @@ impl Db {
             [folder_id],
             |r| r.get(0),
         )?;
-        Ok(n as usize)
+        Ok(count_of(n))
     }
 
     /// Makes every failed file pending again (e.g. after fixing a drive or updating Recollect).
@@ -1337,7 +1358,7 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT path, COALESCE(error, '') FROM files WHERE status = 2 ORDER BY indexed_at DESC LIMIT ?1",
         )?;
-        let rows = st.query_map([limit as i64], |r| {
+        let rows = st.query_map([signed(limit)], |r| {
             Ok((PathBuf::from(r.get::<_, String>(0)?), r.get(1)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1555,7 +1576,7 @@ mod tests {
     }
 
     /// The schema as shipped in version 1, to prove old libraries keep working.
-    const V1_SCHEMA: &str = r#"
+    const V1_SCHEMA: &str = r"
         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, added_at INTEGER NOT NULL);
         CREATE TABLE files (
@@ -1588,7 +1609,7 @@ mod tests {
         INSERT INTO files VALUES (1, 1, '/lib/a.jpg', 0, 5, 1000, 1, 'm', NULL, 640, 480, NULL, 555);
         INSERT INTO files VALUES (2, 1, '/lib/b.mp4', 1, 6, 2000, 0, NULL, NULL, NULL, NULL, NULL, NULL);
         INSERT INTO items VALUES (1, 1, NULL, NULL, x'0000803f');
-    "#;
+    ";
 
     #[test]
     fn v1_database_is_migrated() {
@@ -1854,28 +1875,28 @@ mod tests {
         assert_eq!(
             q(TimelineFilter {
                 folder: Some(f1),
-                ..all.clone()
+                ..all
             }),
             ["a.jpg", "b.mp4"]
         );
         assert_eq!(
             q(TimelineFilter {
                 kind: Some(MediaKind::Video),
-                ..all.clone()
+                ..all
             }),
             ["b.mp4"]
         );
         assert_eq!(
             q(TimelineFilter {
                 favorites_only: true,
-                ..all.clone()
+                ..all
             }),
             ["a.jpg", "c.jpg"]
         );
         assert_eq!(
             q(TimelineFilter {
                 album: Some(7),
-                ..all.clone()
+                ..all
             }),
             ["c.jpg", "d.jpg"]
         );
@@ -1884,7 +1905,7 @@ mod tests {
                 album: Some(7),
                 favorites_only: true,
                 folder: Some(f1),
-                ..all.clone()
+                ..all
             }),
             Vec::<String>::new()
         );
@@ -1895,7 +1916,7 @@ mod tests {
         assert_eq!(
             q(TimelineFilter {
                 album: Some(7),
-                ..all.clone()
+                ..all
             }),
             ["d.jpg"]
         );
@@ -1961,7 +1982,7 @@ mod tests {
         let album = db.create_album("x").unwrap();
         assert_eq!(db.albums().unwrap()[0].cover, None);
         assert_eq!(db.add_to_album(album, &[a, c]).unwrap(), 2);
-        assert_eq!(db.add_to_album(album, &[a, c, 424242]).unwrap(), 0);
+        assert_eq!(db.add_to_album(album, &[a, c, 424_242]).unwrap(), 0);
         let info = &db.albums().unwrap()[0];
         assert_eq!(info.count, 2);
         assert_eq!(info.cover.as_ref().unwrap().file_id, c);
@@ -1995,7 +2016,7 @@ mod tests {
     fn creating_with_items_is_all_or_nothing() {
         let (mut db, _, _) = timeline_db();
         let (a, c) = (id_of(&db, "/one/a.jpg"), id_of(&db, "/two/c.jpg"));
-        let (id, n) = db.create_album_with("Good", &[a, c, 424242]).unwrap();
+        let (id, n) = db.create_album_with("Good", &[a, c, 424_242]).unwrap();
         assert_eq!((n, db.albums().unwrap()[0].count), (2, 2));
         // A failure while adding leaves no album behind.
         db.conn

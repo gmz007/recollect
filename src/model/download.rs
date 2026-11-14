@@ -18,11 +18,9 @@ pub fn model_dir(models_root: &Path, spec: &ModelSpec) -> PathBuf {
 /// (Checksums are verified once, at download time.)
 pub fn is_installed(models_root: &Path, spec: &ModelSpec) -> bool {
     let dir = model_dir(models_root, spec);
-    spec.files.iter().all(|f| {
-        std::fs::metadata(dir.join(f.local))
-            .map(|m| m.len() == f.size)
-            .unwrap_or(false)
-    })
+    spec.files
+        .iter()
+        .all(|f| std::fs::metadata(dir.join(f.local)).is_ok_and(|m| m.len() == f.size))
 }
 
 /// Progress callback: (bytes done across all files, total bytes).
@@ -42,16 +40,13 @@ pub fn download(
     let mut done = 0u64;
     for f in spec.files {
         let dest = dir.join(f.local);
-        if std::fs::metadata(&dest)
-            .map(|m| m.len() == f.size)
-            .unwrap_or(false)
-        {
+        if std::fs::metadata(&dest).is_ok_and(|m| m.len() == f.size) {
             done += f.size;
             progress(done, total);
             continue;
         }
         fetch_file(&spec.url(f), f, &dest, cancel, &mut |n| {
-            progress(done + n, total)
+            progress(done + n, total);
         })?;
         done += f.size;
     }
@@ -60,7 +55,7 @@ pub fn download(
 }
 
 /// Deletes regular files in the model directory that the current spec doesn't list (e.g. the
-/// 441 MB fp32 `text_model.onnx` left by an older SigLIP install). Runs only after a complete,
+/// 441 MB fp32 `text_model.onnx` left by an older `SigLIP` install). Runs only after a complete,
 /// verified download, so a failed update never removes anything. Directories and symlinks are
 /// left alone.
 fn remove_stale_files(dir: &Path, spec: &ModelSpec) {
@@ -99,7 +94,8 @@ fn fetch_file(
         .call()
         .with_context(|| format!("downloading {url}"))?;
     let mut reader = resp.into_body().into_reader();
-    let mut out = std::fs::File::create(&part)?;
+    let mut out =
+        std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     let mut n = 0u64;
@@ -109,12 +105,15 @@ fn fetch_file(
             let _ = std::fs::remove_file(&part);
             bail!("download cancelled");
         }
-        let k = reader.read(&mut buf)?;
+        let k = reader
+            .read(&mut buf)
+            .with_context(|| format!("downloading {url}"))?;
         if k == 0 {
             break;
         }
         hasher.update(&buf[..k]);
-        out.write_all(&buf[..k])?;
+        out.write_all(&buf[..k])
+            .with_context(|| format!("writing {}", part.display()))?;
         n += k as u64;
         if n > f.size {
             drop(out);
@@ -123,10 +122,11 @@ fn fetch_file(
         }
         progress(n);
     }
-    out.sync_all()?;
+    out.sync_all()
+        .with_context(|| format!("writing {}", part.display()))?;
     drop(out);
     verify(&part, f, n, &hex::encode(hasher.finalize()))?;
-    std::fs::rename(&part, dest)?;
+    std::fs::rename(&part, dest).with_context(|| format!("installing {}", dest.display()))?;
     Ok(())
 }
 

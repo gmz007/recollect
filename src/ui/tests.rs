@@ -1,4 +1,5 @@
-//! Headless UI tests (egui_kittest). No model or GPU needed.
+//! Headless UI tests (`egui_kittest`). No model or GPU needed.
+#![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
 
 use super::App;
 use crate::Library;
@@ -204,7 +205,6 @@ fn smart_search_settings_show_status_and_confirm_a_switch() {
             .accesskit_node()
             .description()
             .unwrap_or_default()
-            .to_string()
     };
     assert_eq!(
         described(&h, "Best quality"),
@@ -1048,14 +1048,14 @@ fn f_marks_the_keyboard_selection_as_a_favorite() {
     h.run_steps(3);
     h.key_press(egui::Key::F);
     h.run_steps(3);
-    assert!(
+    assert_eq!(
         app.borrow()
             .tl
             .items
             .iter()
             .filter(|it| it.favorite)
-            .count()
-            == 1
+            .count(),
+        1
     );
     h.key_press(egui::Key::F);
     h.run_steps(3);
@@ -1578,7 +1578,12 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     });
     h.run_steps(3);
     h.get_by_label("This album is empty. Select photos and choose Add to album.");
-    assert_eq!(lib.timeline(&Default::default()).unwrap().len(), 5);
+    assert_eq!(
+        lib.timeline(&crate::store::db::TimelineFilter::default())
+            .unwrap()
+            .len(),
+        5
+    );
 
     // Put one back, then rename.
     let p1 = file_id_of(&lib, "p1.jpg");
@@ -1698,7 +1703,7 @@ fn the_viewer_offers_add_to_album() {
 // ---- Album dialogs, keys, failures, per-file selection ----------------------------------------
 
 fn all_file_ids(lib: &Library) -> Vec<i64> {
-    lib.timeline(&Default::default())
+    lib.timeline(&crate::store::db::TimelineFilter::default())
         .unwrap()
         .iter()
         .map(|t| t.file_id)
@@ -2541,13 +2546,13 @@ fn the_viewer_position_is_plain_text_beside_labelled_buttons_in_a_wide_window() 
         pos: pos_rect.center(),
         button: egui::PointerButton::Primary,
         pressed: true,
-        modifiers: Default::default(),
+        modifiers: egui::Modifiers::default(),
     });
     h.event(egui::Event::PointerButton {
         pos: pos_rect.center(),
         button: egui::PointerButton::Primary,
         pressed: false,
-        modifiers: Default::default(),
+        modifiers: egui::Modifiers::default(),
     });
     h.run_steps(3);
     let a = app.borrow();
@@ -2601,7 +2606,7 @@ fn the_skipped_folders_notice_shows_when_a_run_ends() {
         s.last_run = Some(RunSummary {
             skipped_folders: vec!["/gone".into()],
             ..Default::default()
-        })
+        });
     });
     // The app saw the library busy on the previous frame; now it is idle.
     app.borrow_mut().was_busy = true;
@@ -3244,7 +3249,7 @@ fn a_failed_download_says_what_to_do_and_keeps_the_details_folded() {
         s.set_error_of(
             ErrorKind::Download,
             "Model download failed: dns error: failed to lookup address",
-        )
+        );
     });
     h.run_steps(3);
     h.get_by_label("Couldn't download smart search. Check your internet connection and try again.");
@@ -3306,10 +3311,14 @@ fn errors_are_told_apart_by_kind_not_by_their_text() {
     let d = tempfile::tempdir().unwrap();
     let lib = library(d.path());
     // No model installed.
-    let err = lib.search("dog", &Default::default()).unwrap_err();
+    let err = lib
+        .search("dog", &crate::search::SearchOptions::default())
+        .unwrap_err();
     assert_eq!(SearchError::of(&err), SearchError::ModelMissing);
     // An item that is not there.
-    let err = lib.similar(12345, &Default::default()).unwrap_err();
+    let err = lib
+        .similar(12345, &crate::search::SearchOptions::default())
+        .unwrap_err();
     assert_eq!(SearchError::of(&err), SearchError::ItemGone);
     assert_eq!(check_album_name("", [], None), Err(AlbumError::NameEmpty));
     assert_eq!(
@@ -3496,7 +3505,7 @@ fn nested_choices_keep_the_parent_only() {
     let other = d.path().join("Videos");
     let w = super::welcome::Welcome::with_suggestions(
         vec![
-            ("Pictures".into(), child.clone()),
+            ("Pictures".into(), child),
             ("Videos".into(), other.clone()),
             ("Desktop".into(), parent.clone()),
         ],
@@ -3507,7 +3516,7 @@ fn nested_choices_keep_the_parent_only() {
     assert_eq!(w.chosen_folders(), [other, parent]);
     // The same rule, directly.
     assert_eq!(
-        super::sidebar::without_nested(vec!["/a/b".into(), "/a".into(), "/c".into(), "/a".into()]),
+        super::sidebar::without_nested(&["/a/b".into(), "/a".into(), "/c".into(), "/a".into()]),
         [std::path::PathBuf::from("/a"), "/c".into()]
     );
 }
@@ -3682,4 +3691,34 @@ fn asking_to_check_for_new_photos_while_busy_says_it_will_wait() {
     lib.wait();
     settle(&mut h, || lib.job_log.lock().contains(&"scan"));
     lib.wait();
+}
+
+#[test]
+fn a_lost_background_answer_does_not_stall_the_snapshot_or_the_year_list() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut app = app.borrow_mut();
+    // A snapshot thread that died without answering: the receiver is cleared, and a request
+    // queued behind it goes out.
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    app.snapshot_rx = Some(rx);
+    app.snapshot_again = true;
+    drop(tx);
+    app.poll_snapshot();
+    assert!(!app.snapshot_again, "the queued refresh was started");
+    assert!(app.snapshot_rx.is_some(), "a fresh fetch is running");
+    let fresh = app.snapshot_rx.take().unwrap();
+    drop(fresh);
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    app.snapshot_rx = Some(rx);
+    drop(tx);
+    app.poll_snapshot();
+    assert!(app.snapshot_rx.is_none());
+    // Same for the list of years.
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<i32>>(1);
+    app.years_rx = Some(rx);
+    app.years_seen = Some(7);
+    drop(tx);
+    app.poll_years(7);
+    assert!(app.years_rx.is_none(), "the failed lookup is forgotten");
 }

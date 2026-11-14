@@ -8,7 +8,7 @@ use crate::thumbs::{self, ThumbKey};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -127,7 +127,7 @@ pub struct ThumbCache {
 }
 
 impl ThumbCache {
-    pub fn new(ctx: &egui::Context, cache_dir: PathBuf, workers: usize) -> Self {
+    pub fn new(ctx: &egui::Context, cache_dir: &Path, workers: usize) -> Self {
         let shared = Arc::new(Shared {
             queue: Mutex::new(Vec::new()),
             cv: Condvar::new(),
@@ -137,7 +137,7 @@ impl ThumbCache {
         for i in 0..workers.max(1) {
             let sh = Arc::clone(&shared);
             let ctx = ctx.clone();
-            let dir = cache_dir.clone();
+            let dir = cache_dir.to_path_buf();
             std::thread::Builder::new()
                 .name(format!("recollect-thumb-{i}"))
                 .spawn(move || {
@@ -187,10 +187,9 @@ impl ThumbCache {
                         egui::TextureOptions::LINEAR,
                     ))
                 }
-                Some(_) => ThumbState::Failed,
-                None => ThumbState::Failed,
+                _ => ThumbState::Failed,
             };
-            let used = self.states.get(&key).map(|s| s.1).unwrap_or(self.frame);
+            let used = self.states.get(&key).map_or(self.frame, |s| s.1);
             self.states.insert(key, (state, used));
         }
         if self.states.len() > self.max_textures {
@@ -213,16 +212,16 @@ impl ThumbCache {
     /// The texture for `key` if ready; schedules loading otherwise.
     pub fn get(&mut self, key: &ThumbKey) -> Option<&egui::TextureHandle> {
         let frame = self.frame;
-        if !self.states.contains_key(key) {
+        if let Some(entry) = self.states.get_mut(key) {
+            entry.1 = frame;
+        } else {
             self.request(key.clone());
             self.states
                 .insert(key.clone(), (ThumbState::Loading, frame));
             return None;
         }
-        let entry = self.states.get_mut(key)?;
-        entry.1 = frame;
-        match &entry.0 {
-            ThumbState::Ready(t) => Some(t),
+        match self.states.get(key) {
+            Some((ThumbState::Ready(t), _)) => Some(t),
             _ => None,
         }
     }
@@ -248,6 +247,9 @@ impl ThumbCache {
 
 impl Drop for ThumbCache {
     fn drop(&mut self) {
+        // Under the queue lock: a worker that just checked `stop` is then either still before
+        // its wait (and sees the flag when it rechecks) or already waiting (and is woken).
+        let _queue = self.shared.queue.lock();
         self.shared.stop.store(true, Ordering::Relaxed);
         self.shared.cv.notify_all();
     }

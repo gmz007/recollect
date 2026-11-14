@@ -21,11 +21,37 @@ const TOLERANCE_S: f64 = 2.0;
 #[derive(Debug, Deserialize)]
 struct Query {
     id: String,
-    query: String,
-    kind: String,
+    #[serde(rename = "query")]
+    text: String,
+    kind: Kind,
     #[serde(default)]
     source: String,
-    expected: Vec<serde_json::Value>,
+    expected: Vec<ExpectedSpec>,
+}
+
+/// Which kind of media a query looks for.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Kind {
+    Image,
+    Video,
+}
+
+impl From<Kind> for MediaKind {
+    fn from(k: Kind) -> Self {
+        match k {
+            Kind::Image => Self::Image,
+            Kind::Video => Self::Video,
+        }
+    }
+}
+
+/// An expected answer as written in the query file: a path, or a path with a time range.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExpectedSpec {
+    Image(String),
+    Range { path: String, start: f64, end: f64 },
 }
 
 #[derive(Debug, Clone)]
@@ -85,14 +111,13 @@ fn canon(p: &Path) -> PathBuf {
 fn parse_expected(root: &Path, q: &Query) -> Vec<Expected> {
     q.expected
         .iter()
-        .filter_map(|e| match e {
-            serde_json::Value::String(s) => Some(Expected::Image(canon(&root.join(s)))),
-            serde_json::Value::Object(o) => Some(Expected::Range {
-                path: canon(&root.join(o.get("path")?.as_str()?)),
-                start: o.get("start")?.as_f64()?,
-                end: o.get("end")?.as_f64()?,
-            }),
-            _ => None,
+        .map(|e| match e {
+            ExpectedSpec::Image(s) => Expected::Image(canon(&root.join(s))),
+            ExpectedSpec::Range { path, start, end } => Expected::Range {
+                path: canon(&root.join(path)),
+                start: *start,
+                end: *end,
+            },
         })
         .collect()
 }
@@ -113,17 +138,14 @@ fn matches(hit: &SearchHit, exp: &[Expected]) -> bool {
 pub fn run(lib: &Library, queries: &Path, root: &Path) -> Result<Report> {
     let text = std::fs::read_to_string(queries)
         .with_context(|| format!("reading {}", queries.display()))?;
-    let qs: Vec<Query> = serde_json::from_str(&text).context("parsing queries")?;
+    let qs: Vec<Query> =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", queries.display()))?;
     let mut rep = Report::default();
     let (mut r1, mut r5, mut r10, mut mrr, mut p10, mut h1, mut h5, mut h10) =
         (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     for q in &qs {
         let exp = parse_expected(root, q);
-        let kind = if q.kind == "video" {
-            MediaKind::Video
-        } else {
-            MediaKind::Image
-        };
+        let kind = MediaKind::from(q.kind);
         let present = exp.iter().any(|e| match e {
             Expected::Image(p) | Expected::Range { path: p, .. } => p.exists(),
         });
@@ -132,7 +154,7 @@ pub fn run(lib: &Library, queries: &Path, root: &Path) -> Result<Report> {
             continue;
         }
         let hits = lib.search(
-            &q.query,
+            &q.text,
             &SearchOptions {
                 limit: 10,
                 kind: Some(kind),
@@ -159,7 +181,7 @@ pub fn run(lib: &Library, queries: &Path, root: &Path) -> Result<Report> {
                 r1 += at(1);
                 r5 += at(5);
                 r10 += at(10);
-                mrr += rank.map(|r| 1.0 / (r as f64 + 1.0)).unwrap_or(0.0);
+                mrr += rank.map_or(0.0, |r| 1.0 / (r as f64 + 1.0));
             }
         }
     }
@@ -227,6 +249,19 @@ mod tests {
         .unwrap();
         let e = parse_expected(Path::new("/root"), &q);
         assert_eq!(e.len(), 2);
-        assert!(matches!(&e[0], Expected::Range { start, .. } if *start == 1.0));
+        assert!(matches!(&e[0], Expected::Range { start, .. } if (*start - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn malformed_queries_are_errors() {
+        let parse = |json: &str| serde_json::from_str::<Query>(json);
+        let ok = r#"{"id":"x","query":"q","kind":"image","expected":["a.jpg"]}"#;
+        assert!(parse(ok).is_ok());
+        // Unknown kind, a range without an end, a number where a path belongs.
+        assert!(parse(&ok.replace("image", "audio")).is_err());
+        let range =
+            r#"{"id":"x","query":"q","kind":"video","expected":[{"path":"v.mp4","start":1}]}"#;
+        assert!(parse(range).is_err());
+        assert!(parse(&ok.replace(r#""a.jpg""#, "7")).is_err());
     }
 }

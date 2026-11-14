@@ -1,4 +1,4 @@
-//! Video frame sampling with FFmpeg (see `docs/design.md`).
+//! Video frame sampling with `FFmpeg` (see `docs/design.md`).
 //!
 //! The sampler works at the packet level so it does not depend on the decoder honouring
 //! `skip_frame`: packets are buffered one GOP (keyframe to keyframe) at a time; when the next
@@ -58,6 +58,12 @@ fn init() {
     });
 }
 
+/// Seconds for a stream timestamp: `(ts - start) * tb + offset`. The subtraction saturates, so
+/// a crafted start time cannot overflow.
+fn stream_time(ts: i64, start: i64, tb: f64, offset: f64) -> f64 {
+    ts.saturating_sub(start) as f64 * tb + offset
+}
+
 struct Stream {
     ictx: ff::format::context::Input,
     index: usize,
@@ -75,7 +81,7 @@ struct Stream {
 }
 
 /// Opens a local media file for demuxing. Only the `file` protocol is allowed, so a crafted
-/// file (e.g. a playlist disguised as .mp4) can never make FFmpeg touch the network.
+/// file (e.g. a playlist disguised as .mp4) can never make `FFmpeg` touch the network.
 pub(crate) fn open_input(path: &Path) -> Result<ff::format::context::Input> {
     init();
     let mut opts = ff::Dictionary::new();
@@ -88,7 +94,7 @@ pub(crate) fn open_input(path: &Path) -> Result<ff::format::context::Input> {
 /// container's; 0 if unknown.
 pub(crate) fn header_duration(
     ictx: &ff::format::context::Input,
-    st: &ff::format::stream::Stream,
+    st: &ff::format::stream::Stream<'_>,
 ) -> f64 {
     let tb = f64::from(st.time_base());
     let mut duration = if st.duration() > 0 {
@@ -96,21 +102,36 @@ pub(crate) fn header_duration(
     } else {
         0.0
     };
-    if duration <= 0.0 && ictx.duration() > 0 {
+    if !(duration.is_finite() && duration > 0.0) && ictx.duration() > 0 {
         duration = ictx.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
     }
-    duration
+    finite_positive(duration)
+}
+
+/// `x` if it is a finite number above zero, else 0 (a crafted header can yield NaN or
+/// infinity, which would poison every later time computation).
+pub(crate) fn finite_positive(x: f64) -> f64 {
+    if x.is_finite() && x > 0.0 { x } else { 0.0 }
+}
+
+/// Validates a stream time base (seconds per tick): it must be a finite positive number.
+fn checked_time_base(tb: f64) -> Result<f64> {
+    if tb.is_finite() && tb > 0.0 {
+        Ok(tb)
+    } else {
+        bail!("invalid stream time base")
+    }
 }
 
 /// Opens a local video file and picks its best video stream.
 fn open(path: &Path, threads: usize) -> Result<Stream> {
-    let ictx = open_input(path)?;
+    let mut ictx = open_input(path)?;
     let st = ictx
         .streams()
         .best(ff::media::Type::Video)
         .ok_or_else(|| anyhow!("no video stream"))?;
     let index = st.index();
-    let tb = f64::from(st.time_base());
+    let tb = checked_time_base(f64::from(st.time_base()))?;
     let start = if st.start_time() == ff::ffi::AV_NOPTS_VALUE {
         0
     } else {
@@ -132,16 +153,7 @@ fn open(path: &Path, threads: usize) -> Result<Stream> {
         .decoder()
         .video()
         .context("no decoder for this video codec")?;
-    // Don't spend time demuxing audio/subtitle packets we would drop anyway.
-    for i in 0..ictx.nb_streams() as usize {
-        if i != index {
-            // SAFETY: `i` is a valid stream index of this open input; only a field is written.
-            unsafe {
-                let st = *(*ictx.as_ptr()).streams.add(i);
-                (*st).discard = ff::ffi::AVDiscard::AVDISCARD_ALL;
-            }
-        }
-    }
+    discard_other_streams(&mut ictx, index);
     Ok(Stream {
         ictx,
         index,
@@ -154,6 +166,45 @@ fn open(path: &Path, threads: usize) -> Result<Stream> {
         max_packet_t: 0.0,
         dec,
     })
+}
+
+/// A float rounded to the nearest whole number in `0..=u32::MAX` (NaN gives 0).
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to the u32 range first"
+)]
+fn to_u32(x: f64) -> u32 {
+    x.round().clamp(0.0, f64::from(u32::MAX)) as u32
+}
+
+/// A float as `i64`, saturating at the ends (NaN gives 0).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "saturating float-to-integer conversion is the intent"
+)]
+fn to_i64(x: f64) -> i64 {
+    x as i64
+}
+
+/// Tells the demuxer to drop every stream except `keep`, so no time is spent on audio or
+/// subtitle packets that would be thrown away anyway.
+fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize) {
+    for i in 0..ictx.nb_streams() as usize {
+        if i == keep {
+            continue;
+        }
+        // `stream_mut` checks `i` against the stream count.
+        let Some(mut stream) = ictx.stream_mut(i) else {
+            continue;
+        };
+        // SAFETY: `stream` wraps an index that is below `nb_streams` of the open input, so the
+        // pointer it returns is the valid, non-null `AVStream` at that index.
+        let raw = unsafe { stream.as_mut_ptr() };
+        // SAFETY: `raw` is valid (above) and nothing else can touch the stream: we hold
+        // `&mut Input` through `stream`. Only the plain `discard` field is written.
+        unsafe { (*raw).discard = ff::ffi::AVDiscard::AVDISCARD_ALL };
+    }
 }
 
 /// Converts decoded frames to upright RGB at a requested size.
@@ -198,11 +249,11 @@ impl Converter {
             } else {
                 1.0
             };
-            let (dw, dh) = ((w as f64 * sar).max(1.0), h as f64);
-            self.display = (dw.round() as u32, h);
-            let scale = (self.min_side as f64 / dw.min(dh)).min(1.0);
-            let ow = ((dw * scale).round() as u32).max(2) & !1;
-            let oh = ((dh * scale).round() as u32).max(2) & !1;
+            let (dw, dh) = ((f64::from(w) * sar).max(1.0), f64::from(h));
+            self.display = (to_u32(dw), h);
+            let scale = (f64::from(self.min_side) / dw.min(dh)).min(1.0);
+            let ow = to_u32(dw * scale).max(2) & !1;
+            let oh = to_u32(dh * scale).max(2) & !1;
             let ctx = ff::software::scaling::Context::get(
                 fmt,
                 w,
@@ -230,7 +281,7 @@ impl Converter {
             height: oh,
             data: px,
         };
-        Ok(rotate(rgb, self.rotation))
+        rotate(rgb, self.rotation)
     }
 }
 
@@ -263,35 +314,32 @@ fn rotation_from_matrix(m: &[f64]) -> u32 {
     // av_display_rotation_get = -atan2(m1/s1, m0/s0); the upright transform is its negation.
     let ccw = -(m[1] / s1).atan2(m[0] / s0).to_degrees();
     let cw = (-ccw).rem_euclid(360.0);
-    ((cw / 90.0).round() as u32 % 4) * 90
+    (to_u32(cw / 90.0) % 4) * 90
 }
 
-fn rotate(rgb: Rgb, cw: u32) -> Rgb {
+fn rotate(rgb: Rgb, cw: u32) -> Result<Rgb> {
     if cw == 0 {
-        return rgb;
+        return Ok(rgb);
     }
-    let Some(img) = image::RgbImage::from_raw(rgb.width, rgb.height, rgb.data) else {
-        return Rgb {
-            width: 0,
-            height: 0,
-            data: Vec::new(),
-        };
+    let (width, height) = (rgb.width, rgb.height);
+    let Some(img) = image::RgbImage::from_raw(width, height, rgb.data) else {
+        bail!("frame buffer does not match its {width}x{height} size");
     };
     let r = match cw {
         90 => image::imageops::rotate90(&img),
         180 => image::imageops::rotate180(&img),
         _ => image::imageops::rotate270(&img),
     };
-    Rgb {
+    Ok(Rgb {
         width: r.width(),
         height: r.height(),
         data: r.into_raw(),
-    }
+    })
 }
 
 impl Stream {
     fn time_of(&self, ts: i64) -> f64 {
-        (ts - self.start) as f64 * self.tb + self.offset
+        stream_time(ts, self.start, self.tb, self.offset)
     }
 
     /// Records a packet's time, detecting backwards jumps of more than a few seconds.
@@ -323,7 +371,7 @@ impl Stream {
                 }
                 Ok(()) => {}
                 Err(ff::Error::Eof) => return Ok(None),
-                Err(e) if is_retryable(&e) && again < 1000 => again += 1,
+                Err(e) if is_retryable(e) && again < 1000 => again += 1,
                 Err(e) => return Err(e).context("reading packet"),
             }
         }
@@ -339,7 +387,7 @@ impl Stream {
         for _ in 0..3 {
             match self.dec.send_packet(p) {
                 Ok(()) => return Ok(true),
-                Err(e) if is_retryable(&e) => {
+                Err(e) if is_retryable(e) => {
                     self.drain(f)?;
                 }
                 Err(_) => return Ok(false),
@@ -356,7 +404,7 @@ impl Stream {
             let t = match frame.timestamp() {
                 Some(ts) => self.time_of(ts),
                 // No timestamp: assume constant frame rate after the previous frame.
-                None => self.last_t.map(|l| l + 1.0 / self.fps).unwrap_or(0.0),
+                None => self.last_t.map_or(0.0, |l| l + 1.0 / self.fps),
             };
             self.last_t = Some(t);
             if !f(t, &frame)? {
@@ -451,8 +499,8 @@ pub fn sample(
     Ok(st.info)
 }
 
-fn is_retryable(e: &ff::Error) -> bool {
-    matches!(e, ff::Error::Other { errno } if *errno == ff::ffi::EAGAIN)
+fn is_retryable(e: ff::Error) -> bool {
+    matches!(e, ff::Error::Other { errno } if errno == ff::ffi::EAGAIN)
 }
 
 struct SampleState {
@@ -542,7 +590,9 @@ impl SampleState {
         end: Option<f64>,
         on_frame: &mut dyn FnMut(Frame) -> Result<()>,
     ) -> Result<()> {
-        let first = &gop[0];
+        let [first, ..] = gop else {
+            return Ok(());
+        };
         let start = packet_time(s, first).unwrap_or(self.next_t);
         let short = first.is_key() && end.is_some_and(|e| e - start <= self.cfg.max_gap);
         if short {
@@ -586,15 +636,34 @@ impl SampleState {
 }
 
 /// Decodes the frame shown at time `t` (seconds from the start), scaled so its shorter side is
-/// ≈`min_side`.
+/// ≈`min_side`. A time past the last frame yields the last frame.
 pub fn frame_at(path: &Path, t: f64, min_side: u32) -> Result<Rgb> {
+    match find_frame(path, t, min_side)? {
+        Found::Frame(rgb) => Ok(rgb),
+        // `t` lies past the last frame: one more attempt at the last frame's own time.
+        Found::PastEnd(last) => match find_frame(path, last, min_side)? {
+            Found::Frame(rgb) => Ok(rgb),
+            _ => Err(anyhow!("no frame at {t:.1}s")),
+        },
+        Found::Missing => Err(anyhow!("no frame at {t:.1}s")),
+    }
+}
+
+enum Found {
+    Frame(Rgb),
+    /// No frame at the requested time; the last frame seen was earlier, at this time.
+    PastEnd(f64),
+    Missing,
+}
+
+fn find_frame(path: &Path, t: f64, min_side: u32) -> Result<Found> {
     let mut s = open(path, 2)?;
-    let target = t.max(0.0);
+    let target = if t.is_finite() { t.max(0.0) } else { 0.0 };
     // Seek to the keyframe at or before `t`, in absolute stream time (streams may not start
     // at zero, e.g. MPEG-TS); fall back to decoding from the start if seeking fails.
     let abs = s.start as f64 * s.tb + target;
-    let ts = (abs * f64::from(ff::ffi::AV_TIME_BASE)) as i64;
-    let _ = s.ictx.seek(ts, ..ts + 1);
+    let ts = to_i64(abs * f64::from(ff::ffi::AV_TIME_BASE));
+    let _ = s.ictx.seek(ts, ..ts.saturating_add(1));
     let mut conv = Converter::new(min_side);
     let mut found: Option<Rgb> = None;
     let mut decoded = 0usize;
@@ -629,11 +698,10 @@ pub fn frame_at(path: &Path, t: f64, min_side: u32) -> Result<Rgb> {
         if let Some(f) = last {
             found = Some(conv.convert(&f)?);
         } else if let Some(lt) = last_t.filter(|lt| *lt < target) {
-            // `t` lies past the last frame: return the last frame instead.
-            return frame_at(path, lt, min_side);
+            return Ok(Found::PastEnd(lt));
         }
     }
-    found.ok_or_else(|| anyhow!("no frame at {t:.1}s"))
+    Ok(found.map_or(Found::Missing, Found::Frame))
 }
 
 #[cfg(test)]
@@ -680,6 +748,41 @@ pub(crate) mod tests {
         })
         .unwrap();
         (ts, info)
+    }
+
+    #[test]
+    fn hostile_header_values_are_contained() {
+        // Time bases must be finite and positive.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(checked_time_base(bad).is_err(), "{bad}");
+        }
+        assert_eq!(checked_time_base(1.0 / 90_000.0).unwrap(), 1.0 / 90_000.0);
+        // Durations that are not finite and positive count as unknown.
+        for bad in [0.0, -3.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(finite_positive(bad), 0.0, "{bad}");
+        }
+        assert_eq!(finite_positive(12.5), 12.5);
+        // Extreme timestamps and start times do not overflow.
+        assert!(stream_time(i64::MIN, i64::MAX, 1e-5, 0.0).is_finite());
+        assert!(stream_time(i64::MAX, i64::MIN, 1e-5, 0.0).is_finite());
+        assert_eq!(stream_time(100, 40, 0.5, 1.0), 31.0);
+    }
+
+    #[test]
+    fn a_frame_buffer_that_does_not_match_its_size_is_an_error() {
+        let ok = Rgb {
+            width: 2,
+            height: 1,
+            data: vec![0; 6],
+        };
+        let turned = rotate(ok, 90).unwrap();
+        assert_eq!((turned.width, turned.height), (1, 2));
+        let short = Rgb {
+            width: 2,
+            height: 2,
+            data: vec![0; 5],
+        };
+        assert!(rotate(short, 90).is_err());
     }
 
     #[test]

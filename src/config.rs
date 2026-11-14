@@ -3,10 +3,39 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Environment variable that relocates all application data under one directory.
 /// Used by tests, benchmarks and portable installs.
 pub const HOME_ENV: &str = "RECOLLECT_HOME";
+
+/// A sibling of `path` that is unique to this process and call, for writing a file that is
+/// then renamed into place (two writers never share a temporary file).
+pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        "{name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// Replaces `path` atomically: `write` fills a unique temporary file next to it, which is
+/// then renamed over `path`. The temporary file is removed if anything fails.
+pub(crate) fn replace_file(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let tmp = temp_sibling(path);
+    let res = write(&tmp).and_then(|()| {
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    });
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
 
 /// Where Recollect keeps its files. Nothing is ever written inside library folders.
 #[derive(Debug, Clone)]
@@ -152,20 +181,18 @@ impl Settings {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        let text = toml::to_string_pretty(self).context("serializing settings")?;
+        replace_file(path, |tmp| {
+            std::fs::write(tmp, text).with_context(|| format!("writing {}", tmp.display()))
+        })
     }
 
     pub fn decode_threads(&self) -> usize {
         self.index_threads
             .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|n| n.get().saturating_sub(1))
-                    .unwrap_or(1)
+                std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1))
             })
             .max(1)
     }
@@ -205,6 +232,24 @@ mod tests {
         std::fs::write(&p, "theme = \"Light\"\ntext_size = \"Large\"\n").unwrap();
         let l = Settings::load(&p).unwrap();
         assert_eq!((l.theme, l.text_size), (Theme::Light, TextSize::Large));
+    }
+
+    #[test]
+    fn replace_file_leaves_no_temp_files() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.toml");
+        replace_file(&p, |t| Ok(std::fs::write(t, "one")?)).unwrap();
+        replace_file(&p, |t| Ok(std::fs::write(t, "two")?)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
+        // A failing writer keeps the old content and removes its temp file.
+        let failed = replace_file(&p, |t| {
+            std::fs::write(t, "partial")?;
+            anyhow::bail!("disk full")
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
+        assert_ne!(temp_sibling(&p), temp_sibling(&p));
     }
 
     #[test]

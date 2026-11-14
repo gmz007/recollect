@@ -62,7 +62,7 @@ pub(super) fn folder_suggestions(
 
 /// `paths` without repeats and without those inside another of them (the parent already
 /// covers them), in order.
-pub(super) fn without_nested(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+pub(super) fn without_nested(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
         .enumerate()
@@ -84,8 +84,8 @@ pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
         Activity::Downloading { done, total, .. } => (
             format!(
                 "Downloading smart search… {} of {} MB",
-                thousands(megabytes(*done) as usize),
-                thousands(megabytes(*total) as usize)
+                thousands(usize::try_from(megabytes(*done)).unwrap_or(usize::MAX)),
+                thousands(usize::try_from(megabytes(*total)).unwrap_or(usize::MAX))
             ),
             Some(*done as f32 / (*total).max(1) as f32),
         ),
@@ -114,7 +114,6 @@ pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
 }
 
 /// A full-width sidebar row. Returns the row's rectangle and response.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn nav_row(
     ui: &mut egui::Ui,
     icon: MaterialIcon,
@@ -383,7 +382,7 @@ impl App {
                 for (p, e) in &self.snapshot.errors {
                     let name = p
                         .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
+                        .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     ui.add(egui::Label::new(RichText::new(name).small()).truncate())
                         .on_hover_text(format!("{}\n{e}", p.display()));

@@ -12,8 +12,9 @@ use crate::media::{MediaKind, scan};
 use crate::model::registry::Family;
 use crate::model::{Device, ModelSpec, VisionEncoder};
 use crate::store::db::{FileMeta, FileRow, NewItem};
-use anyhow::Result;
+use anyhow::{Result, anyhow, ensure};
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -90,7 +91,12 @@ fn read_dates(lib: &Library, summary: &mut RunSummary) -> Result<()> {
                             return None;
                         }
                         // `None` inside: unreadable right now, left undated for the next run.
-                        read_capture(&f.path, f.kind, f.mtime).map(|c| (f.id, c))
+                        contain("reading the capture date", || {
+                            read_capture(&f.path, f.kind, f.mtime)
+                                .ok_or_else(|| anyhow!("unreadable right now"))
+                        })
+                        .ok()
+                        .map(|c| (f.id, c))
                     })
                     .collect()
             });
@@ -143,9 +149,7 @@ fn index_pending(lib: &Library, summary: &mut RunSummary) -> Result<()> {
     }
     lib.update_status(|s| s.activity = Activity::LoadingModel);
     let settings = lib.settings();
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let gpu = settings.use_gpu && !crate::gpu::cpu_forced();
     let mut enc = VisionEncoder::load(spec, &lib.model_dir(), gpu, threads)?;
     summary.device = Some(enc.device());
@@ -157,10 +161,45 @@ fn index_pending(lib: &Library, summary: &mut RunSummary) -> Result<()> {
     Ok(())
 }
 
+/// Runs `f`, turning a panic inside it (a decoder bug on one odd file) into an error so it
+/// fails that file instead of the whole run.
+pub(crate) fn contain<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        tracing::warn!("{what} panicked");
+        Err(anyhow!("{what} panicked"))
+    })
+}
+
+/// Fails unless the model returned one embedding per input (`what`), so zipping the two can
+/// never silently drop or mismatch files.
+pub(crate) fn check_count(what: &str, embeddings: usize, inputs: usize) -> Result<()> {
+    ensure!(
+        embeddings == inputs,
+        "the model returned {embeddings} embeddings for {inputs} {what}"
+    );
+    Ok(())
+}
+
+/// What happened to a file that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Failure {
+    /// Looks temporary; the file stays pending and the next run tries it again.
+    Retry,
+    /// The error was stored on the file; it is not retried until it changes.
+    Recorded,
+}
+
+impl Failure {
+    /// Whether the failure counts as an error in the run summary.
+    pub(crate) fn is_error(self) -> bool {
+        self == Self::Recorded
+    }
+}
+
 /// Records a per-file failure. Failures that look temporary (the file or its drive vanished,
 /// I/O errors) leave the file pending so the next run retries it; decode failures are
 /// recorded as errors.
-pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Result<bool> {
+pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Result<Failure> {
     let transient = !f.path.exists()
         || e.chain().any(|c| {
             c.downcast_ref::<std::io::Error>().is_some_and(|io| {
@@ -175,7 +214,11 @@ pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Resu
     } else {
         lib.db.lock().set_error(f.id, &format!("{e:#}"))?;
     }
-    Ok(!transient)
+    Ok(if transient {
+        Failure::Retry
+    } else {
+        Failure::Recorded
+    })
 }
 
 /// Scans every folder and reconciles the files table. Folders whose root is unreachable (e.g.
@@ -196,7 +239,7 @@ fn sync_folders(lib: &Library, summary: &mut RunSummary) -> Result<()> {
                 "library folder {} is not reachable; skipping",
                 f.path.display()
             );
-            summary.skipped_folders.push(f.path.clone());
+            summary.skipped_folders.push(f.path);
             continue;
         }
         // `checkpoint` also honours pause while walking big trees.
@@ -216,7 +259,7 @@ fn sync_folders(lib: &Library, summary: &mut RunSummary) -> Result<()> {
                 "{} looks empty or unmounted; keeping its index",
                 f.path.display()
             );
-            summary.skipped_folders.push(f.path.clone());
+            summary.skipped_folders.push(f.path);
             continue;
         }
         let stats = db.sync_folder(f.id, &res.files, &protected)?;
@@ -291,16 +334,18 @@ pub(crate) fn prepare_image(
     path: &std::path::Path,
     spec: &ModelSpec,
 ) -> Result<(Vec<u8>, FileMeta)> {
-    let d = img::decode(path, spec.image_size)?;
-    let px = img::to_square(&d.rgb, spec.image_size, fit_for(spec))?;
-    Ok((
-        px,
-        FileMeta {
-            width: Some(d.orig_width),
-            height: Some(d.orig_height),
-            duration: None,
-        },
-    ))
+    contain("decoding the image", || {
+        let d = img::decode(path, spec.image_size)?;
+        let px = img::to_square(&d.rgb, spec.image_size, fit_for(spec))?;
+        Ok((
+            px,
+            FileMeta {
+                width: Some(d.orig_width),
+                height: Some(d.orig_height),
+                duration: None,
+            },
+        ))
+    })
 }
 
 type Prepared = (FileRow, Result<(Vec<u8>, FileMeta)>);
@@ -341,15 +386,22 @@ fn index_images(
         let mut ready: Vec<(FileRow, Vec<u8>, FileMeta)> = Vec::with_capacity(batch);
         let mut out: Vec<(FileRow, FileMeta, Vec<NewItem>)> = Vec::new();
         let mut result = Ok(());
-        for (f, r) in rx.iter() {
+        for (f, r) in &rx {
             if result.is_err() || lib.control.is_cancelled() {
                 continue; // drain so producers can finish
             }
             match r {
                 Ok((px, meta)) => ready.push((f, px, meta)),
                 Err(e) => {
-                    let failed = file_failed(lib, &f, &e).unwrap_or(true);
-                    prog.file_done(lib, &f, 0, failed);
+                    let failure = file_failed(lib, &f, &e).unwrap_or_else(|db_err| {
+                        // Not recorded: the file stays pending and is retried next run.
+                        tracing::warn!(
+                            "{}: could not record failure: {db_err:#}",
+                            f.path.display()
+                        );
+                        Failure::Retry
+                    });
+                    prog.file_done(lib, &f, 0, failure.is_error());
                 }
             }
             if ready.len() >= batch {
@@ -384,6 +436,7 @@ fn embed_ready(
     }
     let pixels: Vec<&[u8]> = ready.iter().map(|r| r.1.as_slice()).collect();
     let embs = enc.embed(&pixels)?;
+    check_count("images", embs.len(), ready.len())?;
     for ((f, _, meta), e) in ready.drain(..).zip(embs) {
         prog.file_done(lib, &f, 1, false);
         out.push((
@@ -432,4 +485,33 @@ pub(crate) fn write_items(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_becomes_an_error() {
+        assert_eq!(contain("adding", || Ok(1 + 1)).unwrap(), 2);
+        let err = contain::<()>("decoding", || panic!("odd file")).unwrap_err();
+        assert_eq!(err.to_string(), "decoding panicked");
+        let err = contain::<()>("decoding", || Err(anyhow!("plain failure"))).unwrap_err();
+        assert_eq!(err.to_string(), "plain failure");
+    }
+
+    #[test]
+    fn embedding_counts_must_match() {
+        assert!(check_count("images", 3, 3).is_ok());
+        let err = check_count("frames", 2, 3).unwrap_err().to_string();
+        assert!(err.contains("2 embeddings for 3 frames"), "{err}");
+        assert!(check_count("images", 4, 3).is_err());
+        assert!(check_count("images", 0, 0).is_ok());
+    }
+
+    #[test]
+    fn only_recorded_failures_count_as_errors() {
+        assert!(Failure::Recorded.is_error());
+        assert!(!Failure::Retry.is_error());
+    }
 }

@@ -64,9 +64,9 @@ fn date_of(taken_at: i64) -> NaiveDate {
 pub fn group_key(taken_at: i64, group: Group) -> i64 {
     let d = date_of(taken_at);
     match group {
-        Group::Day => d.num_days_from_ce() as i64,
-        Group::Month => d.year() as i64 * 12 + d.month0() as i64,
-        Group::Year => d.year() as i64,
+        Group::Day => i64::from(d.num_days_from_ce()),
+        Group::Month => i64::from(d.year()) * 12 + i64::from(d.month0()),
+        Group::Year => i64::from(d.year()),
     }
 }
 
@@ -90,10 +90,11 @@ pub fn header_text(group: Group, key: i64, count: usize) -> String {
             .ok()
             .and_then(NaiveDate::from_num_days_from_ce_opt)
             .map(|d| d.format("%A %-d %B %Y").to_string()),
-        Group::Month => {
-            NaiveDate::from_ymd_opt(key.div_euclid(12) as i32, key.rem_euclid(12) as u32 + 1, 1)
-                .map(|d| d.format("%B %Y").to_string())
-        }
+        Group::Month => i32::try_from(key.div_euclid(12))
+            .ok()
+            .zip(u32::try_from(key.rem_euclid(12) + 1).ok())
+            .and_then(|(year, month)| NaiveDate::from_ymd_opt(year, month, 1))
+            .map(|d| d.format("%B %Y").to_string()),
         Group::Year => Some(key.to_string()),
     }
     .unwrap_or_default();
@@ -255,6 +256,12 @@ impl Layout {
     /// column of the previous / next row of tiles in the layout, across section boundaries,
     /// clamped to the last tile of a shorter row; left and right go to the previous / next item.
     pub fn step(&self, cur: usize, len: usize, key: Nav) -> usize {
+        // A layout built for a longer list must not point past the end of this one.
+        self.step_unclamped(cur, len, key)
+            .min(len.saturating_sub(1))
+    }
+
+    fn step_unclamped(&self, cur: usize, len: usize, key: Nav) -> usize {
         match key {
             Nav::Left => cur.saturating_sub(1),
             Nav::Right => (cur + 1).min(len.saturating_sub(1)),
@@ -263,14 +270,14 @@ impl Layout {
                 let Some(Row::Tiles { start, .. }) = self.rows.get(r).copied() else {
                     return cur;
                 };
-                let col = cur - start;
+                let col = cur.saturating_sub(start);
                 let target = if key == Nav::Up {
                     self.rows[..r].iter().rev().find_map(tiles_of)
                 } else {
                     self.rows[r + 1..].iter().find_map(tiles_of)
                 };
                 match target {
-                    Some((s, e)) => (s + col).min(e - 1),
+                    Some((s, e)) => (s + col).min(e.saturating_sub(1)),
                     None => cur,
                 }
             }
@@ -433,7 +440,7 @@ pub fn thumb_key(item: &TimelineItem) -> ThumbKey {
         path: item.path.clone(),
         mtime: item.mtime,
         t_ms: (item.kind == MediaKind::Video)
-            .then(|| ((item.duration.unwrap_or(0.0) * 0.1).clamp(0.0, 5.0) * 1000.0) as i64),
+            .then(|| super::to_millis((item.duration.unwrap_or(0.0) * 0.1).clamp(0.0, 5.0))),
     }
 }
 
@@ -810,7 +817,7 @@ impl TimelineState {
 fn file_name(item: &TimelineItem) -> String {
     item.path
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
+        .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
@@ -969,9 +976,10 @@ impl App {
                             }
                             if self.tl.expanded.contains(&y.year) {
                                 for m in &y.months {
-                                    let name = chrono::Month::try_from(m.month as u8)
-                                        .map(|m| m.name())
-                                        .unwrap_or("");
+                                    let name = u8::try_from(m.month)
+                                        .ok()
+                                        .and_then(|n| chrono::Month::try_from(n).ok())
+                                        .map_or("", |m| m.name());
                                     ui.horizontal(|ui| {
                                         ui.add_space(14.0);
                                         if ui
@@ -1041,7 +1049,9 @@ impl App {
         let tl = &self.tl;
         let marks = &self.fav_marks;
         let thumbs = &mut self.thumbs;
-        let layout = tl.layout.as_ref().expect("layout was just built");
+        let Some(layout) = tl.layout.as_ref() else {
+            return;
+        };
         let albums = &self.albums;
         let in_album = matches!(tl.view, View::Album(_));
         let picking = self.picking;
@@ -1183,6 +1193,10 @@ impl App {
     }
 
     /// Today's date; tests can pin it.
+    #[cfg_attr(
+        not(test),
+        expect(clippy::unused_self, reason = "only tests pin the date")
+    )]
     pub(super) fn today(&self) -> NaiveDate {
         #[cfg(test)]
         if let Some(d) = self.today_override {
@@ -1193,6 +1207,7 @@ impl App {
 
     /// A strip of photos taken on today's date in earlier years, above the timeline.
     fn on_this_day_strip(&mut self, ui: &mut egui::Ui) {
+        const SIZE: f32 = 96.0;
         let today = self.today();
         let entries: Vec<OnThisDay> = self.tl.on_this_day(today).to_vec();
         if entries.is_empty() {
@@ -1200,7 +1215,6 @@ impl App {
         }
         ui.label(RichText::new("On this day").text_style(style::section()));
         ui.add_space(4.0);
-        const SIZE: f32 = 96.0;
         let mut open = None;
         let mut star = None;
         egui::ScrollArea::horizontal()
@@ -1310,6 +1324,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
     use super::*;
 
     fn ts(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
@@ -1319,6 +1334,26 @@ mod tests {
             .unwrap()
             .and_utc()
             .timestamp()
+    }
+
+    #[test]
+    fn stepping_never_leaves_a_shorter_list() {
+        // A layout built for 12 items, used while only 6 remain.
+        let groups = [GroupSpan {
+            start: 0,
+            end: 12,
+            key: 0,
+        }];
+        let l = Layout::build(&groups, 400.0, 100.0, false);
+        assert!(l.cols >= 2);
+        for cur in 0..6 {
+            for key in [Nav::Left, Nav::Right, Nav::Up, Nav::Down] {
+                assert!(l.step(cur, 6, key) < 6, "{cur} {key:?}");
+            }
+        }
+        assert_eq!(l.step(0, 0, Nav::Right), 0);
+        // An out-of-range current item is also tolerated.
+        assert!(l.step(40, 6, Nav::Up) < 6);
     }
 
     fn item(taken_at: i64) -> TimelineItem {
