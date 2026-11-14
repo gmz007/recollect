@@ -6,7 +6,7 @@ use crate::indexer;
 use crate::model::{Device, ModelSpec, TextEncoder, download, registry};
 use crate::search::{self, SearchHit, SearchOptions};
 use crate::store::db::{
-    AlbumInfo, DateCounts, FileDetails, Folder, Stats, TimelineFilter, TimelineItem,
+    AlbumError, AlbumInfo, DateCounts, FileDetails, Folder, Stats, TimelineFilter, TimelineItem,
 };
 use crate::store::{Db, VectorIndex};
 use anyhow::{Context, Result, anyhow, bail};
@@ -110,6 +110,45 @@ impl Status {
     }
 }
 
+/// Why a search could not run, for callers that word the reason themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SearchError {
+    /// The photos are still being indexed with another model, or the query is out of date.
+    #[error("the library is still being prepared for this model; wait for re-indexing to finish")]
+    NotReady,
+    /// Smart search has not been downloaded.
+    #[error("the model is not downloaded yet")]
+    ModelMissing,
+    /// The photo asked about is no longer in the library.
+    #[error("that item is no longer in the library")]
+    ItemGone,
+    #[error("search failed")]
+    Other,
+}
+
+impl SearchError {
+    /// The kind of a failure returned by a search (`Other` when it carries none).
+    pub fn of(e: &anyhow::Error) -> Self {
+        e.downcast_ref::<Self>().copied().unwrap_or(Self::Other)
+    }
+}
+
+/// Work asked for while another job was running; it starts when that job ends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Pending {
+    download: bool,
+    scan: bool,
+}
+
+/// What became of a request that may have to wait for the running job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    /// It is running now.
+    Started,
+    /// Another job is running; this starts when it ends.
+    Queued,
+}
+
 /// Pause / cancel signalling shared with worker threads.
 #[derive(Default)]
 pub struct Control {
@@ -205,6 +244,9 @@ pub struct AlbumWrite {
     pub changed: usize,
     /// Why the write failed; `None` once it is committed.
     pub error: Option<String>,
+    /// The reason when it is one the library refuses on purpose (a bad name, a removed
+    /// album); `None` for any other failure.
+    pub error_kind: Option<AlbumError>,
 }
 
 pub struct Library {
@@ -224,6 +266,8 @@ pub struct Library {
     jobs_finished: Arc<AtomicU64>,
     /// Set when folders change while a job runs; the indexer scans again before finishing.
     pub(crate) rescan_requested: AtomicBool,
+    /// Requests that arrived while a job was running (see [`Library::request_scan`]).
+    pending: Mutex<Pending>,
     /// Weak self-reference so jobs can persist the index cache when they finish.
     self_ref: RwLock<std::sync::Weak<Library>>,
     text: Mutex<Option<TextEncoder>>,
@@ -251,6 +295,12 @@ pub struct Library {
     /// Makes the next album writes fail (tests).
     #[cfg(test)]
     pub(crate) fail_albums: AtomicBool,
+    /// Makes the next downloads fail without touching the network (tests).
+    #[cfg(test)]
+    pub(crate) fail_download: AtomicBool,
+    /// Which jobs started, in order (tests).
+    #[cfg(test)]
+    pub(crate) job_log: Mutex<Vec<&'static str>>,
 }
 
 /// What an applied album change did.
@@ -345,16 +395,17 @@ fn write_album(lib: &Library, ticket: u64, op: AlbumOp) -> AlbumWrite {
     };
     #[cfg(not(test))]
     let outcome = lib.apply_album_op(&op);
-    let (album, changed, error) = match outcome {
+    let (album, changed, error, error_kind) = match outcome {
         Ok(done) => {
             if done.modified {
                 lib.albums_version.fetch_add(1, Ordering::AcqRel);
             }
-            (done.album, done.changed, None)
+            (done.album, done.changed, None, None)
         }
         Err(e) => {
             tracing::warn!("could not save the album change: {e:#}");
-            (None, 0, Some(format!("{e:#}")))
+            let kind = e.downcast_ref::<AlbumError>().cloned();
+            (None, 0, Some(format!("{e:#}")), kind)
         }
     };
     AlbumWrite {
@@ -363,11 +414,18 @@ fn write_album(lib: &Library, ticket: u64, op: AlbumOp) -> AlbumWrite {
         album,
         changed,
         error,
+        error_kind,
     }
 }
 
+/// How often the hardware was asked about (tests check that screens don't do it every frame).
+#[cfg(test)]
+pub(crate) static HARDWARE_CHECKS: AtomicU64 = AtomicU64::new(0);
+
 /// Picks the default model by hardware: a discrete GPU gets the quality model.
 pub fn default_model_for_hardware() -> &'static str {
+    #[cfg(test)]
+    HARDWARE_CHECKS.fetch_add(1, Ordering::Relaxed);
     if crate::gpu::has_discrete_gpu() {
         registry::DEFAULT_GPU_MODEL
     } else {
@@ -442,6 +500,7 @@ impl Library {
             busy: Arc::new(AtomicBool::new(false)),
             jobs_finished: Arc::new(AtomicU64::new(0)),
             rescan_requested: AtomicBool::new(false),
+            pending: Mutex::new(Pending::default()),
             self_ref: RwLock::new(std::sync::Weak::new()),
             text: Mutex::new(None),
             notifier: RwLock::new(None),
@@ -458,6 +517,10 @@ impl Library {
             fail_favorites: AtomicBool::new(false),
             #[cfg(test)]
             fail_albums: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_download: AtomicBool::new(false),
+            #[cfg(test)]
+            job_log: Mutex::new(Vec::new()),
         });
         *lib.self_ref.write() = Arc::downgrade(&lib);
         let weak = Arc::downgrade(&lib);
@@ -787,6 +850,39 @@ impl Library {
         });
     }
 
+    /// Adds several folders one after the other off the calling thread, then looks through them
+    /// (dates, thumbnails) so they can be browsed. With `then_download`, smart search is
+    /// downloaded after that, without cutting the scan short; if the download fails the folders
+    /// are still scanned.
+    pub fn start_add_folders(self: &Arc<Self>, paths: Vec<PathBuf>, then_download: bool) {
+        let lib = Arc::clone(self);
+        std::thread::spawn(move || {
+            let mut added = false;
+            let mut failure = None;
+            for p in &paths {
+                match lib.add_folder(p) {
+                    Ok(()) => added = true,
+                    Err(e) => failure = failure.or(Some(format!("{e:#}"))),
+                }
+            }
+            if added {
+                let _ = lib.request_scan();
+            }
+            if then_download && let Err(e) = lib.request_download() {
+                lib.update_status(|s| {
+                    s.set_error_of(ErrorKind::Download, format!("Model download failed: {e:#}"))
+                });
+            }
+            // After the jobs started: starting one clears the last error.
+            if let Some(e) = failure {
+                lib.update_status(|s| s.set_error_of(ErrorKind::AddFolder, e));
+            }
+            lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
+            lib.notify();
+            lib.save_index_cache();
+        });
+    }
+
     /// Removes a folder and its index entries. Media files are never touched.
     /// Blocks while the database is busy; GUI code should use [`Self::start_remove_folder`].
     pub fn remove_folder(&self, folder_id: i64) -> Result<()> {
@@ -862,6 +958,8 @@ impl Library {
                 s.activity = Activity::Idle;
                 s.last_run = None;
                 if let Err(e) = res {
+                    // A download queued behind the switch would fetch the wrong model.
+                    lib.pending.lock().download = false;
                     s.set_error_of(
                         ErrorKind::SwitchModel,
                         format!("Switching models failed: {e:#}"),
@@ -939,23 +1037,37 @@ impl Library {
         Ok(())
     }
 
+    /// True in tests that make downloads fail without the network.
+    fn simulated_download_failure(&self) -> bool {
+        #[cfg(test)]
+        return self.fail_download.load(Ordering::Acquire);
+        #[cfg(not(test))]
+        false
+    }
+
     fn download_job(lib: Arc<Self>) -> impl FnOnce() + Send + 'static {
         move || {
             let spec = lib.model();
-            let res = download::download(
-                &lib.paths.models_dir(),
-                spec,
-                lib.control.cancel_flag(),
-                &mut |done, total| {
-                    lib.update_status(|s| {
-                        s.activity = Activity::Downloading {
-                            model: spec.id.to_string(),
-                            done,
-                            total,
-                        }
-                    })
-                },
-            );
+            #[cfg(test)]
+            lib.job_log.lock().push("download");
+            let res = if lib.simulated_download_failure() {
+                Err(anyhow!("simulated failure"))
+            } else {
+                download::download(
+                    &lib.paths.models_dir(),
+                    spec,
+                    lib.control.cancel_flag(),
+                    &mut |done, total| {
+                        lib.update_status(|s| {
+                            s.activity = Activity::Downloading {
+                                model: spec.id.to_string(),
+                                done,
+                                total,
+                            }
+                        })
+                    },
+                )
+            };
             let ok = res.is_ok();
             lib.update_status(|s| {
                 s.activity = Activity::Idle;
@@ -971,6 +1083,61 @@ impl Library {
         }
     }
 
+    /// Looks for new photos now, or as soon as the running job ends. Never cuts a job short.
+    pub fn request_scan(self: &Arc<Self>) -> Result<Request> {
+        self.request(|p| p.scan = true, |lib| lib.start_indexing())
+    }
+
+    /// Downloads smart search now, or as soon as the running job ends (the job goes on to scan
+    /// and index). Unlike [`Self::start_download`] it never cancels the running job.
+    pub fn request_download(self: &Arc<Self>) -> Result<Request> {
+        self.request(
+            |p| p.download = true,
+            |lib| {
+                lib.update_status(|s| s.last_run = None);
+                lib.spawn(Self::download_job(Arc::clone(lib)))
+            },
+        )
+    }
+
+    /// Runs `start` unless a job is running, in which case `mark` records the request for
+    /// [`Self::run_pending`]. The check and the record happen under the lock the finishing job
+    /// takes, so a request is never lost between the two.
+    fn request(
+        self: &Arc<Self>,
+        mark: impl Fn(&mut Pending),
+        start: impl Fn(&Arc<Self>) -> Result<()>,
+    ) -> Result<Request> {
+        let mut last = None;
+        for _ in 0..3 {
+            {
+                let mut p = self.pending.lock();
+                if self.busy.load(Ordering::Acquire) {
+                    mark(&mut p);
+                    return Ok(Request::Queued);
+                }
+            }
+            match start(self) {
+                Ok(()) => return Ok(Request::Started),
+                // Lost a race with another job: look again.
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow!("another job is already running")))
+    }
+
+    /// Starts what was asked for while the last job ran (called when a job ends).
+    fn run_pending(self: &Arc<Self>) {
+        let p = std::mem::take(&mut *self.pending.lock());
+        // The scan first: a download requested meanwhile then waits for it.
+        if p.scan {
+            let _ = self.request_scan();
+        }
+        if p.download {
+            let _ = self.request_download();
+        }
+    }
+
     /// Starts a scan + indexing run in the background. Without an installed model it only
     /// scans and reads capture dates (the album works before any model is downloaded).
     pub fn start_indexing(self: &Arc<Self>) -> Result<()> {
@@ -980,6 +1147,8 @@ impl Library {
 
     /// Body of an indexing job: runs on a worker thread and records the outcome in the status.
     fn run_indexing_job(&self) {
+        #[cfg(test)]
+        self.job_log.lock().push("scan");
         self.update_status(|s| s.last_run = None);
         let res = indexer::run(self);
         self.update_status(|s| {
@@ -992,7 +1161,7 @@ impl Library {
         });
     }
 
-    fn spawn(&self, f: impl FnOnce() + Send + 'static) -> Result<()> {
+    pub(crate) fn spawn(&self, f: impl FnOnce() + Send + 'static) -> Result<()> {
         let mut w = self.worker.lock();
         if self.busy.load(Ordering::Acquire) {
             bail!("another job is already running");
@@ -1027,6 +1196,7 @@ impl Library {
             // Release `busy` before the (slow) cache write so new jobs aren't refused meanwhile.
             drop(done);
             if let Some(lib) = weak.upgrade() {
+                lib.run_pending();
                 lib.save_index_cache();
             }
         };
@@ -1049,6 +1219,7 @@ impl Library {
     }
 
     pub fn cancel(&self) {
+        *self.pending.lock() = Pending::default();
         self.control.cancel.store(true, Ordering::Relaxed);
         self.control.set_paused(false);
     }
@@ -1095,7 +1266,7 @@ impl Library {
             .is_none_or(|t| t.spec().id != self.model().id)
         {
             if !self.model_installed() {
-                bail!("the model is not downloaded yet");
+                return Err(SearchError::ModelMissing.into());
             }
             let threads = std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -1123,16 +1294,14 @@ impl Library {
     pub fn similar(&self, item_id: i64, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
         let (v, file_id) = {
             let db = self.db.lock();
-            let (file_id, model) = db
-                .item_owner(item_id)?
-                .ok_or_else(|| anyhow!("that item is no longer in the library"))?;
+            let (file_id, model) = db.item_owner(item_id)?.ok_or(SearchError::ItemGone)?;
             if model.as_deref() != Some(self.model().id) {
-                bail!("that item was indexed with another model; wait for re-indexing to finish");
+                return Err(SearchError::NotReady.into());
             }
             let v = db
                 .embeddings(&[item_id])?
                 .remove(&item_id)
-                .ok_or_else(|| anyhow!("item {item_id} not found"))?;
+                .ok_or(SearchError::ItemGone)?;
             (v, file_id)
         };
         search::by_vector(self, &v, opts, Some(file_id))
@@ -1274,7 +1443,7 @@ mod tests {
         assert_eq!(saved.model.as_deref(), Some(registry::SIGLIP_B16.id));
         // The old 512-d vector must produce an error, not a panic.
         let err = lib.similar(item, &SearchOptions::default()).unwrap_err();
-        assert!(err.to_string().contains("another model"), "{err}");
+        assert_eq!(SearchError::of(&err), SearchError::NotReady, "{err}");
         assert!(search::by_vector(&lib, &[0.0; 512], &SearchOptions::default(), None).is_err());
     }
 
@@ -1643,6 +1812,84 @@ mod tests {
         wait_idle(&lib);
         assert_eq!(lib.status().last_error, None);
         assert!(lib.status().last_run.is_some(), "download, then indexing");
+    }
+
+    /// A folder with one picture, for the tests of the job queue.
+    fn one_photo_folder(d: &Path) -> PathBuf {
+        let photos = d.join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        image::RgbImage::new(4, 4)
+            .save(photos.join("a.png"))
+            .unwrap();
+        photos
+    }
+
+    /// Waits until `cond` holds and no job runs (jobs may follow one another).
+    fn wait_until(lib: &Library, mut cond: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if cond() && !lib.is_busy() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        lib.wait();
+        assert!(cond(), "condition not reached");
+    }
+
+    #[test]
+    fn folders_are_scanned_before_a_download_that_was_asked_for_with_them() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(&d.path().join("home"));
+        fake_install(&lib);
+        // (Empty, so the placeholder model files never have to embed anything.)
+        let empty = d.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        lib.start_add_folders(vec![empty], true);
+        wait_until(&lib, || lib.job_log.lock().len() >= 3);
+        // The scan, then the download, then the scan that follows a download.
+        assert_eq!(*lib.job_log.lock(), ["scan", "download", "scan"]);
+        assert_eq!(lib.folders().unwrap().len(), 1);
+        assert_eq!(lib.status().last_error, None);
+    }
+
+    #[test]
+    fn a_failed_download_still_leaves_the_folders_scanned() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(&d.path().join("home"));
+        lib.fail_download.store(true, Ordering::Release);
+        let photos = one_photo_folder(d.path());
+        lib.start_add_folders(vec![photos], true);
+        wait_until(&lib, || {
+            lib.status().last_error.is_some() && lib.job_log.lock().len() >= 2
+        });
+        assert_eq!(*lib.job_log.lock(), ["scan", "download"]);
+        assert_eq!(lib.status().last_error_kind, ErrorKind::Download);
+        assert_eq!(lib.timeline(&TimelineFilter::default()).unwrap().len(), 1);
+        assert_eq!(lib.date_counts().unwrap().file, 1, "dates were read");
+    }
+
+    #[test]
+    fn a_scan_asked_for_while_busy_waits_instead_of_being_dropped() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = open(&d.path().join("home"));
+        let release = Arc::new(AtomicBool::new(false));
+        let r = Arc::clone(&release);
+        lib.spawn(move || {
+            while !r.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+        .unwrap();
+        assert_eq!(lib.request_scan().unwrap(), Request::Queued);
+        assert_eq!(lib.request_download().unwrap(), Request::Queued);
+        assert!(lib.job_log.lock().is_empty(), "nothing started yet");
+        release.store(true, Ordering::Release);
+        lib.fail_download.store(true, Ordering::Release);
+        wait_until(&lib, || lib.job_log.lock().len() >= 2);
+        assert_eq!(*lib.job_log.lock(), ["scan", "download"]);
+        // With nothing running, a request starts at once.
+        assert_eq!(lib.request_scan().unwrap(), Request::Started);
+        lib.wait();
     }
 
     #[test]

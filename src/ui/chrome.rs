@@ -169,7 +169,6 @@ impl App {
             .inner_margin(Margin::symmetric(10, 2));
         let mut cleared = false;
         let mut has_focus = false;
-        let mut done_typing = false;
         let shown = frame.show(ui, |ui| {
             ui.set_width(width - 20.0);
             ui.horizontal(|ui| {
@@ -199,8 +198,13 @@ impl App {
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.query_changed_at = Some(Instant::now() - super::DEBOUNCE);
                 }
-                // Enter or a click elsewhere: the person is done typing.
-                done_typing = resp.lost_focus();
+                // Tab moves into the suggestions under the field, when they are showing.
+                if resp.lost_focus()
+                    && self.search_help.dropdown.is_some()
+                    && ui.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.any())
+                {
+                    self.search_help.want_chips = true;
+                }
                 if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
                     resp.request_focus();
                 }
@@ -213,9 +217,8 @@ impl App {
         });
         self.search_help.field = Some(shown.response.rect);
         self.search_help.focused = has_focus;
-        if done_typing {
-            let q = self.query.clone();
-            self.remember_search(&q);
+        if has_focus {
+            self.search_help.suppressed = false;
         }
         if cleared {
             self.clear_search();
@@ -311,8 +314,7 @@ impl App {
                 });
                 if !subtitle.is_empty() {
                     ui.label(RichText::new(subtitle).color(pal.text_secondary));
-                } else if let Some(e) = &self.tl.error {
-                    tracing::warn!("could not load the photos: {e}");
+                } else if self.tl.error.is_some() {
                     ui.colored_label(
                         pal.error,
                         "Couldn't load your photos. Please try again in a moment.",
@@ -399,9 +401,14 @@ impl App {
                         ui.spinner();
                     }
                 });
-                if let Some(e) = &self.result_error {
-                    ui.colored_label(pal.error, e);
-                } else if !subtitle.is_empty() {
+                // An empty result list shows the problem itself; don't say it twice.
+                if let Some(e) = self
+                    .result_error
+                    .as_ref()
+                    .filter(|_| !self.results.is_empty())
+                {
+                    ui.colored_label(pal.error, &e.text);
+                } else if self.result_error.is_none() && !subtitle.is_empty() {
                     ui.label(RichText::new(subtitle).color(pal.text_secondary));
                 }
             });

@@ -190,8 +190,9 @@ fn getting_started(ui: &mut egui::Ui) {
         ui,
         2,
         "Turn on smart search",
-        "Open Settings, choose Smart search, then Download and turn on. It is a one-time \
-         download, and afterwards search works without the internet.",
+        "Click the Turn on button at the top of the left panel (or open Settings and choose \
+         Smart search, then Download and turn on). It is a one-time download, and afterwards \
+         search works without the internet.",
     );
     step(
         ui,
@@ -213,7 +214,7 @@ fn searching(ui: &mut egui::Ui) {
     point(
         ui,
         "Narrow the results",
-        "Under the search box, All, Photos and Videos show one kind at a time. After a \
+        "Next to the search box, All, Photos and Videos show one kind at a time. After a \
          search, When limits the results to a year, and Sort puts the best matches, the \
          newest or the oldest first.",
     );

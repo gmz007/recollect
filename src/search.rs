@@ -89,7 +89,7 @@ pub(crate) fn by_vector(
         let cands = {
             let index = lib.index.read();
             if q.len() != index.dim() {
-                anyhow::bail!("the query was made with a different model; please search again");
+                return Err(crate::library::SearchError::NotReady.into());
             }
             index.search_filtered(
                 q,

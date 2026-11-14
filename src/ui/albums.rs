@@ -359,7 +359,7 @@ impl App {
         };
         let name = na.name.trim().to_string();
         if let Err(e) = self.check_album_name(&name, None) {
-            let (text, details) = super::guide::album_problem(&e);
+            let (text, details) = super::guide::album_problem(Some(&e), &e.to_string());
             self.notify_problem(text, details.unwrap_or_default(), None);
             self.new_album = Some(na);
             return;
@@ -369,14 +369,13 @@ impl App {
 
     /// Quick check against the albums we know of with the library's own rules (it has the
     /// final say).
-    fn check_album_name(&self, name: &str, except: Option<i64>) -> Result<(), String> {
+    fn check_album_name(&self, name: &str, except: Option<i64>) -> Result<(), db::AlbumError> {
         db::check_album_name(
             name,
             self.albums.iter().map(|a| (a.id, a.name.as_str())),
             except,
         )
         .map(|_| ())
-        .map_err(|e| e.to_string())
     }
 
     /// Items go to an existing album, or to a new one once it has a name.
@@ -402,7 +401,10 @@ impl App {
     /// True when keys must not reach the views: a text field has focus, Settings is open or an
     /// album dialog is.
     pub(super) fn keys_blocked(&self, ctx: &egui::Context) -> bool {
-        self.settings_open || self.dialog_open() || ctx.text_edit_focused()
+        self.settings_open
+            || self.dialog_open()
+            || ctx.text_edit_focused()
+            || self.search_help.inside
     }
 
     /// Esc: closes the album dialogs (a deletion already sent to the library stays up until
@@ -454,7 +456,7 @@ impl App {
                         self.lib.queue_album(AlbumOp::Rename { id: r.id, name });
                     }
                     Err(e) => {
-                        let (text, details) = super::guide::album_problem(&e);
+                        let (text, details) = super::guide::album_problem(Some(&e), &e.to_string());
                         self.notify_problem(text, details.unwrap_or_default(), None);
                         self.rename_album = Some(r);
                     }
@@ -558,7 +560,7 @@ impl App {
 
     fn report_album_write(&mut self, w: &AlbumWrite) {
         if let Some(e) = &w.error {
-            let (text, details) = super::guide::album_problem(e);
+            let (text, details) = super::guide::album_problem(w.error_kind.as_ref(), e);
             self.notify_problem(text, details.unwrap_or_default(), None);
             // Nothing was changed: put back what the user was working on.
             match &w.op {

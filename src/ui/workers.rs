@@ -1,6 +1,7 @@
 //! Background helpers for the UI thread: a latest-wins search worker and a thumbnail loader.
 
 use crate::Library;
+use crate::library::SearchError;
 use crate::media::image::Rgb;
 use crate::search::{SearchHit, SearchOptions};
 use crate::thumbs::{self, ThumbKey};
@@ -26,10 +27,17 @@ impl Query {
     }
 }
 
+/// A search that could not run: what kind of failure it was, and the technical text (logged).
+#[derive(Debug, Clone)]
+pub struct SearchFailure {
+    pub kind: SearchError,
+    pub detail: String,
+}
+
 pub struct SearchResponse {
     pub id: u64,
     pub query: Query,
-    pub hits: Result<Vec<SearchHit>, String>,
+    pub hits: Result<Vec<SearchHit>, SearchFailure>,
 }
 
 /// Runs searches on a dedicated thread. Only the newest pending request is executed, so typing
@@ -58,8 +66,14 @@ impl SearchWorker {
                         Query::Similar { item_id, .. } => lib.similar(*item_id, &opts),
                     });
                     let hits = match std::panic::catch_unwind(run) {
-                        Ok(r) => r.map_err(|e| format!("{e:#}")),
-                        Err(_) => Err("search failed unexpectedly".to_string()),
+                        Ok(r) => r.map_err(|e| SearchFailure {
+                            kind: SearchError::of(&e),
+                            detail: format!("{e:#}"),
+                        }),
+                        Err(_) => Err(SearchFailure {
+                            kind: SearchError::Other,
+                            detail: "search failed unexpectedly".to_string(),
+                        }),
                     };
                     if resp_tx.send(SearchResponse { id, query, hits }).is_err() {
                         break;

@@ -127,7 +127,18 @@ pub struct Folder {
 /// The longest album name, in characters.
 pub const MAX_ALBUM_NAME_CHARS: usize = 100;
 
-const ALBUM_GONE: &str = "That album no longer exists";
+/// Why an album change was refused, for callers that word the reason themselves.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AlbumError {
+    #[error("An album needs a name")]
+    NameEmpty,
+    #[error("Album names can have at most {MAX_ALBUM_NAME_CHARS} characters")]
+    TooLong,
+    #[error("An album named “{0}” already exists")]
+    NameTaken(String),
+    #[error("That album no longer exists")]
+    Gone,
+}
 
 /// The one place album names are validated (the UI pre-checks with it too): trimmed, not empty,
 /// at most [`MAX_ALBUM_NAME_CHARS`] characters, and not used by another album of `others`
@@ -137,18 +148,18 @@ pub fn check_album_name<'a>(
     name: &str,
     others: impl IntoIterator<Item = (i64, &'a str)>,
     except: Option<i64>,
-) -> Result<String> {
+) -> std::result::Result<String, AlbumError> {
     let name = name.trim();
     if name.is_empty() {
-        bail!("An album needs a name");
+        return Err(AlbumError::NameEmpty);
     }
     if name.chars().count() > MAX_ALBUM_NAME_CHARS {
-        bail!("Album names can have at most {MAX_ALBUM_NAME_CHARS} characters");
+        return Err(AlbumError::TooLong);
     }
     let wanted = name.to_lowercase();
     for (id, other) in others {
         if Some(id) != except && other.to_lowercase() == wanted {
-            bail!("An album named “{other}” already exists");
+            return Err(AlbumError::NameTaken(other.to_string()));
         }
     }
     Ok(name.to_string())
@@ -162,7 +173,7 @@ fn add_items(tx: &Connection, album: i64, file_ids: &[i64]) -> Result<usize> {
         |r| r.get(0),
     )?;
     if !exists {
-        bail!("{ALBUM_GONE}");
+        return Err(AlbumError::Gone.into());
     }
     let mut ins = tx.prepare(
         "INSERT OR IGNORE INTO album_items(album_id, file_id, added_at)
@@ -885,7 +896,7 @@ impl Db {
             params![id, name],
         )?;
         if n == 0 {
-            bail!("{ALBUM_GONE}");
+            return Err(AlbumError::Gone.into());
         }
         Ok(())
     }

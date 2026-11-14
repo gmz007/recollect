@@ -245,7 +245,7 @@ pub struct App {
     /// Shared with the viewer while it is open.
     results: Arc<Vec<SearchHit>>,
     result_label: String,
-    result_error: Option<String>,
+    result_error: Option<guide::SearchProblem>,
     last_search_at: Option<Instant>,
     selected: Option<usize>,
     /// All selected results (by file id); `selected` is the primary one.
@@ -473,10 +473,17 @@ impl App {
         }
     }
 
+    /// Looks for new photos, or as soon as the running task ends; says so when it has to wait.
     fn start_indexing(&mut self) {
-        if let Err(e) = self.lib.start_indexing() {
-            // Only "another task is running", which is not worth a toast of its own.
-            tracing::debug!("could not start looking for photos: {e:#}");
+        match self.lib.request_scan() {
+            Ok(crate::library::Request::Started) => {}
+            Ok(crate::library::Request::Queued) => self
+                .notify("Recollect will check for new photos when it finishes the current task."),
+            Err(e) => self.notify_problem(
+                "Couldn't look for new photos just now. Please try again in a moment.",
+                format!("{e:#}"),
+                Some(NoticeAction::Scan),
+            ),
         }
     }
 
@@ -525,8 +532,8 @@ impl App {
                     self.result_error = None;
                 }
                 Err(e) => {
-                    tracing::warn!("search failed: {e}");
-                    self.result_error = Some(guide::search_problem(&e));
+                    tracing::warn!("search failed: {}", e.detail);
+                    self.result_error = Some(guide::search_problem(e.kind));
                 }
             }
             // Keep the selection on the same file across refreshes.
@@ -548,6 +555,9 @@ impl App {
                 self.results = Arc::default();
                 self.selected = None;
             } else {
+                // A search the person asked for (Enter, or a pause in typing): worth
+                // remembering. Leaving the field or pressing Escape never gets here.
+                self.remember_search(&q);
                 self.submit(Query::Text(q));
             }
         }

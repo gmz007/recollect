@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 
 - A first-run **welcome**: four screens (what Recollect does, where your photos are, turn on
-  smart search, you're all set) with progress dots, Back and Skip. It is shown once, only when the
+  smart search, you're all set) with progress dots and Back (and "I'll set it up myself" on the first screen). It is shown once, only when the
   library has no folders; the `welcome_done` setting remembers it.
 - **Empty states** with an icon, one sentence and one button for a library without folders,
   Photos, Recently added, Favorites, a folder, an album, searches with no results (with a button

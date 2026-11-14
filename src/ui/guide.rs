@@ -4,7 +4,8 @@
 use super::style::{self, Palette, icons};
 use super::timeline::View;
 use super::{App, NoticeAction};
-use crate::library::ErrorKind;
+use crate::library::{ErrorKind, SearchError};
+use crate::store::db::{AlbumError, MAX_ALBUM_NAME_CHARS};
 use egui::{CornerRadius, Margin, Pos2, Rect, RichText, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
 use std::time::Instant;
@@ -59,38 +60,57 @@ pub(super) fn describe_failure(kind: ErrorKind) -> (String, Option<NoticeAction>
     }
 }
 
+/// A search that could not run, in plain words.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SearchProblem {
+    pub text: String,
+    /// Whether trying again can help.
+    pub can_retry: bool,
+}
+
 /// The sentence shown when a search could not run (the reason is only logged).
-pub(super) fn search_problem(reason: &str) -> String {
-    if reason.contains("not downloaded") {
-        "Search isn't ready yet. Turn on smart search first.".into()
-    } else if reason.contains("another model") || reason.contains("re-indexing") {
-        "Recollect is still getting your photos ready. Please try again in a moment.".into()
-    } else {
-        "Couldn't search just now. Please try again in a moment.".into()
+pub(super) fn search_problem(kind: SearchError) -> SearchProblem {
+    let (text, can_retry) = match kind {
+        SearchError::ModelMissing => ("Search isn't ready yet. Turn on smart search first.", true),
+        SearchError::NotReady => (
+            "Recollect is still getting your photos ready. Please try again in a moment.",
+            true,
+        ),
+        SearchError::ItemGone => ("That photo is no longer in your library.", false),
+        SearchError::Other => (
+            "Couldn't search just now. Please try again in a moment.",
+            true,
+        ),
+    };
+    SearchProblem {
+        text: text.into(),
+        can_retry,
     }
 }
 
-/// An album message as a sentence for the toast plus, when it was technical, the text for
-/// "Details".
-pub(super) fn album_problem(reason: &str) -> (String, Option<String>) {
-    const PLAIN: [&str; 3] = ["An album ", "Album names", "That album"];
-    if PLAIN.iter().any(|p| reason.starts_with(p)) {
-        let hint = if reason.starts_with("An album named") {
-            " Choose a different name."
-        } else if reason.starts_with("An album needs") {
-            " Type a name and try again."
-        } else {
-            ""
-        };
-        let mut text = reason.trim_end_matches('.').to_string();
-        text.push('.');
-        text.push_str(hint);
-        (text, None)
-    } else {
-        (
+/// An album problem as a sentence for the toast plus, when it was not one the library
+/// refuses on purpose, the text for "Details".
+pub(super) fn album_problem(kind: Option<&AlbumError>, reason: &str) -> (String, Option<String>) {
+    match kind {
+        Some(AlbumError::NameTaken(other)) => (
+            format!("An album named “{other}” already exists. Choose a different name."),
+            None,
+        ),
+        Some(AlbumError::NameEmpty) => (
+            "An album needs a name. Type a name and try again.".into(),
+            None,
+        ),
+        Some(AlbumError::TooLong) => (
+            format!(
+                "Album names can have at most {MAX_ALBUM_NAME_CHARS} characters. Please shorten it."
+            ),
+            None,
+        ),
+        Some(AlbumError::Gone) => ("That album no longer exists.".into(), None),
+        None => (
             "Couldn't save that album change. Nothing was changed. Please try again.".into(),
             Some(reason.to_string()),
-        )
+        ),
     }
 }
 
@@ -262,8 +282,22 @@ impl App {
                 ) {
                     self.open_settings_at(super::settings::Section::SmartSearch);
                 }
-            } else if empty_state(ui, icons::ICON_SEARCH_OFF, &[Part::Text(&e)], "Try again") {
-                self.rerun();
+            } else if e.can_retry {
+                if empty_state(
+                    ui,
+                    icons::ICON_SEARCH_OFF,
+                    &[Part::Text(&e.text)],
+                    "Try again",
+                ) {
+                    self.rerun();
+                }
+            } else if empty_state(
+                ui,
+                icons::ICON_SEARCH_OFF,
+                &[Part::Text(&e.text)],
+                "Start over",
+            ) {
+                self.clear_search();
             }
             return;
         }
@@ -308,11 +342,23 @@ impl App {
 pub(super) struct SearchHelp {
     pub field: Option<Rect>,
     pub focused: bool,
-    dropdown: Option<Rect>,
+    pub dropdown: Option<Rect>,
+    /// Tab was pressed in the field: move into the suggestions.
+    pub want_chips: bool,
+    /// Keyboard focus is on one of the suggestions (from the previous frame).
+    pub inside: bool,
+    /// Escape closed the suggestions; they stay closed until the field is used again.
+    pub suppressed: bool,
 }
 
 /// One small clickable suggestion.
-fn suggestion_chip(ui: &mut egui::Ui, icon: Option<MaterialIcon>, text: &str, name: &str) -> bool {
+fn suggestion_chip(
+    ui: &mut egui::Ui,
+    icon: Option<MaterialIcon>,
+    text: &str,
+    name: &str,
+    ids: &mut Vec<egui::Id>,
+) -> bool {
     let pal = Palette::of(ui.ctx());
     let mut job = egui::text::LayoutJob::default();
     if let Some(icon) = icon {
@@ -343,6 +389,7 @@ fn suggestion_chip(ui: &mut egui::Ui, icon: Option<MaterialIcon>, text: &str, na
         .min_size(Vec2::new(0.0, 30.0));
     let r = ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    ids.push(r.id);
     r.clicked()
 }
 
@@ -368,7 +415,37 @@ impl App {
     pub(super) fn search_for(&mut self, text: &str) {
         self.query = text.to_string();
         self.query_changed_at = Some(Instant::now() - super::DEBOUNCE);
-        self.remember_search(text);
+    }
+
+    /// Keyboard use of the suggestions: Tab from the field goes to the first one, Up/Down (or
+    /// Left/Right) move between them, Enter runs one (a focused button does that itself) and
+    /// Escape closes them.
+    fn keyboard_in_suggestions(&mut self, ctx: &egui::Context, ids: &[egui::Id]) {
+        let focused = ctx.memory(|m| m.focused());
+        let current = focused.and_then(|f| ids.iter().position(|i| *i == f));
+        let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k) && !i.modifiers.any());
+        let mut target = None;
+        if std::mem::take(&mut self.search_help.want_chips) {
+            target = ids.first().copied();
+        } else if let Some(i) = current {
+            if pressed(egui::Key::ArrowDown) || pressed(egui::Key::ArrowRight) {
+                target = ids.get((i + 1).min(ids.len() - 1)).copied();
+            } else if pressed(egui::Key::ArrowUp) || pressed(egui::Key::ArrowLeft) {
+                target = ids.get(i.saturating_sub(1)).copied();
+            }
+        }
+        if let Some(id) = target {
+            ctx.memory_mut(|m| {
+                // Replaces what the built-in Tab / arrow focus movement chose this frame.
+                m.move_focus(egui::FocusDirection::None);
+                m.request_focus(id);
+            });
+            ctx.request_repaint();
+        }
+        if pressed(egui::Key::Escape) {
+            self.search_help.suppressed = true;
+        }
+        self.search_help.inside = target.is_some() || current.is_some();
     }
 
     /// Examples and recent searches under the search field while it is focused and empty.
@@ -382,11 +459,18 @@ impl App {
             && self.query.is_empty()
             && !self.settings_open
             && !self.dialog_open()
-            && (self.search_help.focused || pointer_inside);
+            && !self.search_help.suppressed
+            && (self.search_help.focused
+                || pointer_inside
+                || self.search_help.inside
+                || self.search_help.want_chips);
         let Some(field) = self.search_help.field.filter(|_| show) else {
             self.search_help.dropdown = None;
+            self.search_help.inside = false;
+            self.search_help.want_chips = false;
             return;
         };
+        let mut ids: Vec<egui::Id> = Vec::new();
         let pal = Palette::of(ctx);
         let recent = self.settings.recent_searches.clone();
         let (mut chosen, mut clear) = (None::<String>, false);
@@ -411,7 +495,7 @@ impl App {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
                             for q in EXAMPLE_SEARCHES {
-                                if suggestion_chip(ui, None, q, q) {
+                                if suggestion_chip(ui, None, q, q, &mut ids) {
                                     chosen = Some(q.to_string());
                                 }
                             }
@@ -428,7 +512,13 @@ impl App {
                                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
                                 for q in &recent {
                                     let name = format!("Recent search: {q}");
-                                    if suggestion_chip(ui, Some(icons::ICON_HISTORY), q, &name) {
+                                    if suggestion_chip(
+                                        ui,
+                                        Some(icons::ICON_HISTORY),
+                                        q,
+                                        &name,
+                                        &mut ids,
+                                    ) {
                                         chosen = Some(q.clone());
                                     }
                                 }
@@ -449,6 +539,7 @@ impl App {
                     });
             });
         self.search_help.dropdown = Some(out.response.rect);
+        self.keyboard_in_suggestions(ctx, &ids);
         if clear {
             self.change_settings(|s| s.recent_searches.clear());
         }

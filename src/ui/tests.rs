@@ -2275,10 +2275,10 @@ fn the_main_screens_use_no_technical_words() {
         h.get_by_label("Get started").click();
         h.run_steps(3);
         check("welcome: folders", &h);
-        h.get_by_label("Skip").click();
+        h.get_by_label("Continue without folders").click();
         h.run_steps(3);
         check("welcome: smart search", &h);
-        h.get_by_label("Skip for now").click();
+        h.get_by_label("Not now").click();
         h.run_steps(3);
         check("welcome: all set", &h);
     }
@@ -2753,6 +2753,14 @@ fn on_this_day_tiles_open_and_have_no_selection_circle() {
 /// A first launch: no folders, welcome not done, no standard folders on offer (so the test does
 /// not depend on this computer's home directory).
 fn fresh_app(d: &std::path::Path) -> Rc<RefCell<App>> {
+    fresh_app_with(d, Vec::new())
+}
+
+/// Like [`fresh_app`], offering these standard folders.
+fn fresh_app_with(
+    d: &std::path::Path,
+    folders: Vec<(String, std::path::PathBuf)>,
+) -> Rc<RefCell<App>> {
     let lib = library(d);
     let mut app = App::new(&egui::Context::default(), Arc::clone(&lib));
     app.frame_stats = None;
@@ -2761,7 +2769,7 @@ fn fresh_app(d: &std::path::Path) -> Rc<RefCell<App>> {
         "a new library starts with the welcome"
     );
     app.welcome = Some(super::welcome::Welcome::with_suggestions(
-        Vec::new(),
+        folders,
         lib.model().id,
     ));
     Rc::new(RefCell::new(app))
@@ -2784,15 +2792,29 @@ fn the_welcome_leads_to_photos_in_four_clicks() {
     h.get_by_label("Get started").click();
     clicks += 1;
     h.run_steps(3);
-    // Second: Continue waits for a folder; typing a path adds one (not a "primary" click).
+    // Second: with nothing chosen the button says so; typing a path (under More options)
+    // adds one (not a "primary" click).
     h.get_by_label("Where are your photos?");
     h.get_by_label("Step 2 of 4");
-    assert!(h.get_by_label("Continue").accesskit_node().is_disabled());
-    h.get_by_label_contains("skip this and add folders later");
+    assert!(
+        !h.get_by_label("Continue without folders")
+            .accesskit_node()
+            .is_disabled()
+    );
+    h.get_by_label("You can add folders later from the sidebar.");
+    assert!(
+        h.query_by_label_contains("/home/").is_none(),
+        "no raw paths"
+    );
+    h.get_by_label("We didn't find a Pictures folder. Choose where your photos are.");
+    assert!(h.query_by_label("Skip").is_none(), "no separate Skip");
     h.get_by_label("Back").click();
     h.run_steps(3);
     h.get_by_label("Find any photo by describing it");
     h.get_by_label("Get started").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Folder path").is_none(), "folded away");
+    h.get_by_label("More options").click();
     h.run_steps(3);
     h.get_by_label("Folder path").click();
     h.run_steps(2);
@@ -2802,6 +2824,7 @@ fn the_welcome_leads_to_photos_in_four_clicks() {
     h.get_by_label("Add this folder").click();
     h.run_steps(3);
     assert!(!h.get_by_label("Continue").accesskit_node().is_disabled());
+    assert!(h.query_by_label("Continue without folders").is_none());
     assert_eq!(
         app.borrow().welcome.as_ref().unwrap().chosen_folders(),
         [photos.path().to_path_buf()]
@@ -2815,12 +2838,14 @@ fn the_welcome_leads_to_photos_in_four_clicks() {
     h.get_by_label("Faster");
     h.get_by_label_contains("never leave this computer");
     h.get_by_label("Download and turn on");
-    h.get_by_label("Skip for now").click();
+    assert!(h.query_by_label("Skip for now").is_none() && h.query_by_label("Skip setup").is_none());
+    h.get_by_label("Not now").click();
     clicks += 1;
     h.run_steps(3);
     // Fourth: what happens next.
     h.get_by_label("You're all set");
-    h.get_by_label_contains("You can start browsing right away");
+    h.get_by_label_contains("After you press Start, Recollect gets your photos ready.");
+    h.get_by_label_contains("you can browse right away");
     assert!(
         app.borrow().welcome.is_some(),
         "nothing is added before Start"
@@ -2846,7 +2871,7 @@ fn the_welcome_can_be_skipped_and_existing_users_never_see_it() {
     let app = fresh_app(d.path());
     let lib = Arc::clone(&app.borrow().lib);
     let mut h = album_harness(&app);
-    h.get_by_label("Skip setup").click();
+    h.get_by_label("I'll set it up myself").click();
     h.run_steps(3);
     assert!(!app.borrow().welcome_active());
     // The empty library invites adding a folder instead.
@@ -2919,8 +2944,9 @@ fn empty_view(d: &std::path::Path, which: EmptyView) -> (Rc<RefCell<App>>, Harne
                 };
             }
             if matches!(which, EmptyView::SearchOff) {
-                app.result_error =
-                    Some(super::guide::search_problem("the model is not downloaded"));
+                app.result_error = Some(super::guide::search_problem(
+                    crate::library::SearchError::ModelMissing,
+                ));
             }
         }
         _ => {}
@@ -3244,24 +3270,416 @@ fn a_failed_download_says_what_to_do_and_keeps_the_details_folded() {
 
 #[test]
 fn other_messages_say_what_happened_and_what_to_do() {
-    let (text, details) = super::guide::album_problem("An album named “Trip” already exists");
+    use crate::library::SearchError;
+    use crate::store::db::AlbumError;
+    let (text, details) = super::guide::album_problem(
+        Some(&AlbumError::NameTaken("Trip".into())),
+        "An album named “Trip” already exists",
+    );
     assert_eq!(
         text,
         "An album named “Trip” already exists. Choose a different name."
     );
     assert_eq!(details, None);
-    let (text, details) = super::guide::album_problem("An album needs a name");
+    let (text, details) = super::guide::album_problem(Some(&AlbumError::NameEmpty), "");
     assert_eq!(text, "An album needs a name. Type a name and try again.");
     assert_eq!(details, None);
-    let (text, details) = super::guide::album_problem("database is locked");
+    let (text, details) = super::guide::album_problem(None, "database is locked");
     assert_eq!(
         text,
         "Couldn't save that album change. Nothing was changed. Please try again."
     );
     assert_eq!(details.as_deref(), Some("database is locked"));
-    assert!(
-        super::guide::search_problem("the model is not downloaded yet")
-            .starts_with("Search isn't ready yet.")
+    let p = super::guide::search_problem(SearchError::ModelMissing);
+    assert!(p.text.starts_with("Search isn't ready yet.") && p.can_retry);
+    let p = super::guide::search_problem(SearchError::Other);
+    assert!(p.text.starts_with("Couldn't search just now.") && p.can_retry);
+    let p = super::guide::search_problem(SearchError::ItemGone);
+    assert_eq!(p.text, "That photo is no longer in your library.");
+    assert!(!p.can_retry);
+}
+
+#[test]
+fn errors_are_told_apart_by_kind_not_by_their_text() {
+    use crate::library::SearchError;
+    use crate::store::db::{AlbumError, check_album_name};
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    // No model installed.
+    let err = lib.search("dog", &Default::default()).unwrap_err();
+    assert_eq!(SearchError::of(&err), SearchError::ModelMissing);
+    // An item that is not there.
+    let err = lib.similar(12345, &Default::default()).unwrap_err();
+    assert_eq!(SearchError::of(&err), SearchError::ItemGone);
+    assert_eq!(check_album_name("", [], None), Err(AlbumError::NameEmpty));
+    assert_eq!(
+        check_album_name("Trip", [(1, "trip")], None),
+        Err(AlbumError::NameTaken("trip".into()))
     );
-    assert!(super::guide::search_problem("boom").starts_with("Couldn't search just now."));
+    assert_eq!(
+        check_album_name(&"x".repeat(500), [], None),
+        Err(AlbumError::TooLong)
+    );
+    // Through the writer thread, the kind arrives with the failure.
+    lib.create_album("Trip", &[]).unwrap();
+    let t = lib.queue_album(crate::library::AlbumOp::Create {
+        name: "trip".into(),
+        add: vec![],
+    });
+    lib.wait_writes();
+    let w = lib
+        .take_album_results()
+        .into_iter()
+        .find(|w| w.ticket == t)
+        .unwrap();
+    assert!(matches!(w.error_kind, Some(AlbumError::NameTaken(_))));
+}
+
+#[test]
+fn a_removed_photo_in_find_similar_has_no_try_again() {
+    let d = tempfile::tempdir().unwrap();
+    let app = searchable_app(d.path());
+    app.borrow_mut().current = Some(super::Query::Similar {
+        item_id: 999,
+        label: "a.jpg".into(),
+    });
+    app.borrow_mut().result_label = "similar to a.jpg".into();
+    app.borrow_mut().result_error = Some(super::guide::search_problem(
+        crate::library::SearchError::ItemGone,
+    ));
+    let mut h = album_harness(&app);
+    h.run_steps(2);
+    // Said once: in the empty state, not also in the header.
+    assert_eq!(
+        h.query_all_by_label("That photo is no longer in your library.")
+            .count(),
+        1
+    );
+    assert!(h.query_by_label("Try again").is_none());
+    h.get_by_label("Start over");
+}
+
+#[test]
+fn a_search_error_is_not_shown_twice() {
+    let d = tempfile::tempdir().unwrap();
+    let app = searchable_app(d.path());
+    app.borrow_mut().current = Some(super::Query::Text("snow".into()));
+    app.borrow_mut().result_label = "snow".into();
+    app.borrow_mut().result_error = Some(super::guide::search_problem(
+        crate::library::SearchError::Other,
+    ));
+    let mut h = album_harness(&app);
+    h.run_steps(2);
+    let text = "Couldn't search just now. Please try again in a moment.";
+    assert_eq!(h.query_all_by_label(text).count(), 1);
+    h.get_by_label("Try again");
+}
+
+// --- Welcome: folders, ordering, wording --------------------------------------------------
+
+#[test]
+fn continuing_without_ticks_adds_nothing_and_ticked_folders_are_added_exactly() {
+    let d = tempfile::tempdir().unwrap();
+    let pictures = tempfile::tempdir().unwrap();
+    let desktop = tempfile::tempdir().unwrap();
+    let offered = || {
+        vec![
+            ("Pictures".to_string(), pictures.path().to_path_buf()),
+            ("Desktop".to_string(), desktop.path().to_path_buf()),
+        ]
+    };
+    // Untick Pictures: nothing is chosen, the button says so, and nothing is added.
+    let app = fresh_app_with(d.path(), offered());
+    let lib = Arc::clone(&app.borrow().lib);
+    let mut h = album_harness(&app);
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    // Friendly names only, never the path.
+    h.get_by_label("Pictures");
+    h.get_by_label("Desktop");
+    assert!(
+        h.query_by_label_contains(&pictures.path().display().to_string())
+            .is_none()
+    );
+    h.get_by_label("Continue");
+    h.get_by_label("Pictures").click();
+    h.run_steps(3);
+    assert!(
+        app.borrow()
+            .welcome
+            .as_ref()
+            .unwrap()
+            .chosen_folders()
+            .is_empty()
+    );
+    h.get_by_label("Continue without folders");
+    h.get_by_label("You can add folders later from the sidebar.");
+    h.get_by_label("Continue without folders").click();
+    h.run_steps(3);
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
+    h.get_by_label("Start").click();
+    settle(&mut h, || lib.settings().welcome_done);
+    settle(&mut h, || lib.jobs_finished() > 0);
+    lib.wait();
+    assert!(lib.folders().unwrap().is_empty());
+    drop(h);
+
+    // Pictures and Desktop ticked: exactly those two.
+    let d2 = tempfile::tempdir().unwrap();
+    let app = fresh_app_with(d2.path(), offered());
+    let lib = Arc::clone(&app.borrow().lib);
+    let mut h = album_harness(&app);
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    h.get_by_label("Desktop").click();
+    h.run_steps(3);
+    h.get_by_label("Continue").click();
+    h.run_steps(3);
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
+    h.get_by_label("Start").click();
+    settle(&mut h, || lib.folders().unwrap().len() == 2);
+    lib.wait();
+    let mut got: Vec<_> = lib.folders().unwrap().into_iter().map(|f| f.path).collect();
+    got.sort();
+    let mut want = vec![
+        std::fs::canonicalize(pictures.path()).unwrap(),
+        std::fs::canonicalize(desktop.path()).unwrap(),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn the_folders_screen_explains_a_missing_pictures_folder_and_names_added_folders() {
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let mut h = album_harness(&app);
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    h.get_by_label("We didn't find a Pictures folder. Choose where your photos are.");
+    h.get_by_label("Add another folder…");
+    // With a Pictures folder the sentence is not shown.
+    let d2 = tempfile::tempdir().unwrap();
+    let pics = tempfile::tempdir().unwrap();
+    let app = fresh_app_with(
+        d2.path(),
+        vec![("Pictures".into(), pics.path().to_path_buf())],
+    );
+    let mut h2 = album_harness(&app);
+    h2.get_by_label("Get started").click();
+    h2.run_steps(3);
+    assert!(
+        h2.query_by_label_contains("didn't find a Pictures")
+            .is_none()
+    );
+    // A folder the person added shows its name, with the path as small text under it.
+    let added = pics.path().join("Holiday 2024");
+    std::fs::create_dir_all(&added).unwrap();
+    app.borrow_mut()
+        .welcome
+        .as_mut()
+        .unwrap()
+        .add_folder_for_test(added.clone());
+    h2.run_steps(3);
+    h2.get_by_label("Holiday 2024");
+    h2.get_by_label(&added.display().to_string());
+    drop(h);
+}
+
+#[test]
+fn nested_choices_keep_the_parent_only() {
+    let d = tempfile::tempdir().unwrap();
+    let parent = d.path().join("Photos");
+    let child = parent.join("2024");
+    let other = d.path().join("Videos");
+    let w = super::welcome::Welcome::with_suggestions(
+        vec![
+            ("Pictures".into(), child.clone()),
+            ("Videos".into(), other.clone()),
+            ("Desktop".into(), parent.clone()),
+        ],
+        registry::CLIP_B32.id,
+    );
+    let mut w = w;
+    w.add_folder_for_test(parent.clone());
+    assert_eq!(w.chosen_folders(), [other, parent]);
+    // The same rule, directly.
+    assert_eq!(
+        super::sidebar::without_nested(vec!["/a/b".into(), "/a".into(), "/c".into(), "/a".into()]),
+        [std::path::PathBuf::from("/a"), "/c".into()]
+    );
+}
+
+#[test]
+fn the_computers_hardware_is_asked_once_not_every_frame() {
+    use std::sync::atomic::Ordering;
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let mut h = album_harness(&app);
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Continue").click();
+    h.run_steps(3);
+    h.get_by_label("Turn on smart search");
+    let asked = crate::library::HARDWARE_CHECKS.load(Ordering::Relaxed);
+    h.run_steps(30);
+    assert_eq!(
+        crate::library::HARDWARE_CHECKS.load(Ordering::Relaxed),
+        asked
+    );
+}
+
+#[test]
+fn every_step_after_the_first_has_back_and_the_first_can_be_skipped_in_one_way() {
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let mut h = album_harness(&app);
+    assert!(h.query_by_label("Back").is_none());
+    h.get_by_label("I'll set it up myself");
+    assert!(h.query_by_label("Skip setup").is_none());
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    h.get_by_label("Back");
+    assert!(h.query_by_label("I'll set it up myself").is_none());
+    h.get_by_label_contains("Continue").click();
+    h.run_steps(3);
+    h.get_by_label("Back");
+    h.get_by_label("Not now");
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
+    h.get_by_label("Back");
+    h.get_by_label_contains("After you press Start");
+    assert!(h.query_by_label_contains("Search works once").is_none());
+    // After choosing the download the same screen adds one sentence.
+    h.get_by_label("Back").click();
+    h.run_steps(3);
+    h.get_by_label("Download and turn on").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Search works once the download finishes.");
+}
+
+#[test]
+fn a_failed_model_switch_at_start_keeps_the_welcome_and_says_so() {
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let lib = Arc::clone(&app.borrow().lib);
+    // A choice the library does not know makes the switch fail at once.
+    app.borrow_mut()
+        .welcome
+        .as_mut()
+        .unwrap()
+        .choose_for_test("no-such-model");
+    let mut h = album_harness(&app);
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Continue").click();
+    h.run_steps(3);
+    h.get_by_label("Download and turn on").click();
+    h.run_steps(3);
+    h.get_by_label("Start").click();
+    h.run_steps(3);
+    h.get_by_label("Couldn't set up smart search. Please try again in a moment.");
+    assert!(app.borrow().welcome_active(), "still on the last screen");
+    assert!(!lib.settings().welcome_done);
+}
+
+// --- Search suggestions with the keyboard; recent searches; waiting for a busy library ---
+
+#[test]
+fn leaving_the_search_field_without_searching_records_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let app = searchable_app(d.path());
+    let lib = Arc::clone(&app.borrow().lib);
+    let mut h = album_harness(&app);
+    h.get_by_label("Search your photos").click();
+    h.run_steps(2);
+    h.get_by_label("Search your photos").type_text("sunset");
+    h.run_steps(2);
+    // Before the pause in typing ends, Escape ends the typing.
+    app.borrow_mut().query_changed_at = None;
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(lib.settings().recent_searches.is_empty());
+    // So does clicking elsewhere.
+    h.get_by_label("Search your photos").click();
+    h.run_steps(2);
+    app.borrow_mut().query_changed_at = None;
+    h.get_by_label("Settings").click();
+    h.run_steps(3);
+    assert!(lib.settings().recent_searches.is_empty());
+    // Enter does record.
+    h.get_by_label("Close settings").click();
+    h.run_steps(3);
+    h.get_by_label("Search your photos").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(lib.settings().recent_searches, ["sunset"]);
+}
+
+#[test]
+fn the_search_suggestions_work_with_the_keyboard() {
+    let d = tempfile::tempdir().unwrap();
+    let app = searchable_app(d.path());
+    let mut h = album_harness(&app);
+    let (first, second) = (
+        super::guide::EXAMPLE_SEARCHES[0],
+        super::guide::EXAMPLE_SEARCHES[1],
+    );
+    h.get_by_label("Search your photos").click();
+    h.run_steps(3);
+    h.get_by_label("Try searching for");
+    // Tab goes into the suggestions, which stay open.
+    h.key_press(egui::Key::Tab);
+    h.run_steps(4);
+    h.get_by_label("Try searching for");
+    assert!(h.get_by_label(first).accesskit_node().is_focused());
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(3);
+    assert!(h.get_by_label(second).accesskit_node().is_focused());
+    h.key_press(egui::Key::ArrowUp);
+    h.run_steps(3);
+    assert!(h.get_by_label(first).accesskit_node().is_focused());
+    h.get_by_label("Try searching for");
+    // Enter runs the one that has focus.
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app.borrow().query, first);
+    // Escape closes them.
+    app.borrow_mut().clear_search();
+    h.run_steps(2);
+    h.get_by_label("Search your photos").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Tab);
+    h.run_steps(4);
+    h.get_by_label("Try searching for");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.query_by_label("Try searching for").is_none());
+}
+
+#[test]
+fn asking_to_check_for_new_photos_while_busy_says_it_will_wait() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let lib = Arc::clone(&app.borrow().lib);
+    let release = Arc::new(AtomicBool::new(false));
+    let r = Arc::clone(&release);
+    lib.spawn(move || {
+        while !r.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    })
+    .unwrap();
+    let mut h = album_harness(&app);
+    app.borrow_mut().start_indexing();
+    h.run_steps(3);
+    h.get_by_label("Recollect will check for new photos when it finishes the current task.");
+    release.store(true, Ordering::Release);
+    lib.wait();
+    settle(&mut h, || lib.job_log.lock().contains(&"scan"));
+    lib.wait();
 }

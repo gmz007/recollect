@@ -887,6 +887,7 @@ impl App {
                         self.tl.loaded_filter = Some(r.filter.clone());
                         self.tl.set_items(Vec::new());
                     }
+                    tracing::warn!("could not load the photos: {e}");
                     self.tl.error = Some(e);
                     self.tl.loaded = true;
                     self.tl.failed = Some((r.filter, Instant::now()));

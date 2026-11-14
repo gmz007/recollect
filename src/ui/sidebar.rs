@@ -60,6 +60,22 @@ pub(super) fn folder_suggestions(
         .collect()
 }
 
+/// `paths` without repeats and without those inside another of them (the parent already
+/// covers them), in order.
+pub(super) fn without_nested(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| !paths[..*i].contains(p))
+        .map(|(_, p)| p)
+        .filter(|p| {
+            let others: Vec<PathBuf> = paths.iter().filter(|q| q != p).cloned().collect();
+            !folder_suggestions(vec![(String::new(), (*p).clone())], &others).is_empty()
+        })
+        .cloned()
+        .collect()
+}
+
 /// One line of the activity card: what is happening in plain words and, when it is known, how
 /// far along it is (0 to 1).
 pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
