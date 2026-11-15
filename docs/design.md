@@ -127,7 +127,7 @@ more than a few hundred lines of code.
 | `media/` | `scan`, `image`, `metadata` (capture dates), `video/` (`stream`, `convert`, `sample`, `still`) |
 | `model/` | `registry`, `download`, `embedder` |
 | `search.rs` | turning index candidates into hits |
-| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `timeline/`, `viewer/`, `settings/`, and one file per remaining screen or widget |
+| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/`, `viewer/`, `settings/`, and one file per remaining screen or widget |
 | `cli.rs`, `bench.rs`, `eval.rs` | command-line entry points |
 
 Functions are kept to 50 lines of code (a clippy threshold); longer scenario tests are the

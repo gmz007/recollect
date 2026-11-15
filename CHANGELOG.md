@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-15
+
+### Fixed
+
+- A video on a drive that drops out while it is being read is retried later instead of being
+  kept as fully looked at with only its first minutes; such drive and network errors are no
+  longer recorded as unreadable files. A damaged video is still kept as far as it could be read.
+  Files left for the next run are counted separately in the run summary.
+- A video whose header declares an absurd pixel shape no longer asks for an enormous frame.
+- The camera of a photo or video is kept when its clock was never set.
+- Saving the search data to disk no longer stalls a running scan, browsing and searches.
+- Searches that take longer than a few seconds while photos are being looked at show their
+  results instead of restarting forever, and pause between refreshes; emptying the search field
+  clears the search for good.
+- A photo that makes a decoder crash no longer stops thumbnails and previews from loading, and
+  a thumbnail that failed (say, while a drive was offline) is tried again.
+- Keyboard: Enter goes to the button that has focus; keys go to an open menu instead of the
+  photos or the viewer behind it; the remove button of a folder row is visible when it has
+  focus; a refused album name leaves the field ready for typing.
+- The note that some folders could not be reached is shown after every run that skipped a
+  folder, also a very short one.
+- A slider drag cut short by closing Settings is not applied later; a typed folder must be a
+  full path; a failed download always removes its partial file.
+
+### Changed
+
+- Internal restructuring: the largest source files are split by concern (see "Code layout" in
+  `docs/design.md`) and functions are kept to 50 lines of code, enforced by the lint
+  configuration. Folder and album changes in the library database are single transactions.
+
 ## [0.6.1] - 2026-11-15
 
 ### Fixed
