@@ -141,14 +141,26 @@ fn matches(hit: &SearchHit, exp: &[Expected]) -> bool {
     })
 }
 
+/// Running totals of the per-query scores, averaged once all queries are done.
+#[derive(Default)]
+struct Sums {
+    r1: f64,
+    r5: f64,
+    r10: f64,
+    mrr: f64,
+    p10: f64,
+    h1: f64,
+    h5: f64,
+    h10: f64,
+}
+
 pub fn run(lib: &Library, queries: &Path, root: &Path) -> Result<Report> {
     let text = std::fs::read_to_string(queries)
         .with_context(|| format!("reading {}", queries.display()))?;
     let qs: Vec<Query> =
         serde_json::from_str(&text).with_context(|| format!("parsing {}", queries.display()))?;
     let mut rep = Report::default();
-    let (mut r1, mut r5, mut r10, mut mrr, mut p10, mut h1, mut h5, mut h10) =
-        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut sums = Sums::default();
     for q in &qs {
         let exp = parse_expected(root, q);
         let kind = MediaKind::from(q.kind);
@@ -169,38 +181,56 @@ pub fn run(lib: &Library, queries: &Path, root: &Path) -> Result<Report> {
         )?;
         let rank = hits.iter().position(|h| matches(h, &exp));
         rep.ranks.push((q.id.clone(), rank));
-        let at = |k: usize| f64::from(u8::from(rank.is_some_and(|r| r < k)));
-        match (kind, q.source.as_str()) {
-            (MediaKind::Video, _) => {
-                rep.videos += 1;
-                h1 += at(1);
-                h5 += at(5);
-                h10 += at(10);
-            }
-            (_, "coco-category") => {
-                rep.categories += 1;
-                let good = hits.iter().filter(|h| matches(h, &exp)).count() as f64;
-                p10 += good / (exp.len().min(10) as f64);
-            }
-            _ => {
-                rep.captions += 1;
-                r1 += at(1);
-                r5 += at(5);
-                r10 += at(10);
-                mrr += rank.map_or(0.0, |r| 1.0 / (r as f64 + 1.0));
-            }
+        tally(&mut rep, &mut sums, (kind, q.source.as_str()), &hits, &exp);
+    }
+    fill_averages(&mut rep, &sums);
+    Ok(rep)
+}
+
+/// Adds one answered query to the report counts and the running totals. Videos count towards
+/// Hit@k, category queries towards precision, everything else towards recall and MRR.
+fn tally(
+    rep: &mut Report,
+    sums: &mut Sums,
+    (kind, source): (MediaKind, &str),
+    hits: &[SearchHit],
+    exp: &[Expected],
+) {
+    let rank = hits.iter().position(|h| matches(h, exp));
+    let at = |k: usize| f64::from(u8::from(rank.is_some_and(|r| r < k)));
+    match (kind, source) {
+        (MediaKind::Video, _) => {
+            rep.videos += 1;
+            sums.h1 += at(1);
+            sums.h5 += at(5);
+            sums.h10 += at(10);
+        }
+        (_, "coco-category") => {
+            rep.categories += 1;
+            let good = hits.iter().filter(|h| matches(h, exp)).count() as f64;
+            sums.p10 += good / (exp.len().min(10) as f64);
+        }
+        _ => {
+            rep.captions += 1;
+            sums.r1 += at(1);
+            sums.r5 += at(5);
+            sums.r10 += at(10);
+            sums.mrr += rank.map_or(0.0, |r| 1.0 / (r as f64 + 1.0));
         }
     }
+}
+
+/// Turns the running totals into averages over the queries of each group.
+fn fill_averages(rep: &mut Report, sums: &Sums) {
     let div = |a: f64, n: usize| if n == 0 { 0.0 } else { a / n as f64 };
-    rep.caption_r1 = div(r1, rep.captions);
-    rep.caption_r5 = div(r5, rep.captions);
-    rep.caption_r10 = div(r10, rep.captions);
-    rep.caption_mrr = div(mrr, rep.captions);
-    rep.category_p10 = div(p10, rep.categories);
-    rep.video_hit1 = div(h1, rep.videos);
-    rep.video_hit5 = div(h5, rep.videos);
-    rep.video_hit10 = div(h10, rep.videos);
-    Ok(rep)
+    rep.caption_r1 = div(sums.r1, rep.captions);
+    rep.caption_r5 = div(sums.r5, rep.captions);
+    rep.caption_r10 = div(sums.r10, rep.captions);
+    rep.caption_mrr = div(sums.mrr, rep.captions);
+    rep.category_p10 = div(sums.p10, rep.categories);
+    rep.video_hit1 = div(sums.h1, rep.videos);
+    rep.video_hit5 = div(sums.h5, rep.videos);
+    rep.video_hit10 = div(sums.h10, rep.videos);
 }
 
 #[cfg(test)]

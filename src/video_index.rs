@@ -54,6 +54,34 @@ struct FileState {
     ended: Option<Result<VideoInfo>>,
 }
 
+impl FileState {
+    fn new(interval: f64) -> Self {
+        Self {
+            merger: Merger::new(segment_tau(), interval),
+            outstanding: 0,
+            ended: None,
+        }
+    }
+}
+
+/// Records a sampler message: a frame waits in `pending` for the next embedding batch, an end
+/// marks its file as fully sampled.
+fn note_message(
+    msg: Msg,
+    states: &mut HashMap<usize, FileState>,
+    pending: &mut Vec<(usize, f64, Vec<u8>)>,
+    interval: f64,
+) {
+    let new_state = || FileState::new(interval);
+    match msg {
+        Msg::Frame(i, t, px) => {
+            states.entry(i).or_insert_with(new_state).outstanding += 1;
+            pending.push((i, t, px));
+        }
+        Msg::End(i, res) => states.entry(i).or_insert_with(new_state).ended = Some(res),
+    }
+}
+
 pub(crate) fn index_videos(
     lib: &Library,
     enc: &mut VisionEncoder,
@@ -63,8 +91,6 @@ pub(crate) fn index_videos(
     if files.is_empty() {
         return Ok(());
     }
-    let spec = lib.model();
-    let fit = fit_for(spec);
     let cfg = SamplerConfig::default();
     let batch = enc.batch_size();
     let next = AtomicUsize::new(0);
@@ -76,35 +102,10 @@ pub(crate) fn index_videos(
             let (next, stop) = (&next, &stop);
             std::thread::Builder::new()
                 .name(format!("recollect-video-{n}"))
-                .spawn_scoped(s, move || {
-                    let halt = || stop.load(Ordering::Relaxed) || lib.control.checkpoint();
-                    loop {
-                        if halt() {
-                            return;
-                        }
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(f) = files.get(i) else { return };
-                        // A decoder bug on one odd file must fail that file, not the whole run.
-                        let res = contain("the video decoder", || {
-                            video::sample(&f.path, cfg, spec.image_size, &halt, &mut |fr| {
-                                let px = img::to_square(&fr.rgb, spec.image_size, fit)?;
-                                tx.send(Msg::Frame(i, fr.t, px))
-                                    .map_err(|_| anyhow!("embedding stopped"))
-                            })
-                        });
-                        if tx.send(Msg::End(i, res)).is_err() {
-                            return;
-                        }
-                    }
-                })
+                .spawn_scoped(s, move || run_sampler(lib, files, cfg, next, stop, &tx))
                 .context("spawning a video sampler thread")?;
         }
         drop(tx);
-        let new_state = || FileState {
-            merger: Merger::new(segment_tau(), cfg.interval),
-            outstanding: 0,
-            ended: None,
-        };
         let mut states: HashMap<usize, FileState> = HashMap::new();
         let mut pending: Vec<(usize, f64, Vec<u8>)> = Vec::with_capacity(batch);
         let mut result: Result<()> = Ok(());
@@ -112,15 +113,9 @@ pub(crate) fn index_videos(
             if lib.control.is_cancelled() {
                 break;
             }
-            match msg {
-                Msg::Frame(i, t, px) => {
-                    states.entry(i).or_insert_with(new_state).outstanding += 1;
-                    pending.push((i, t, px));
-                    if pending.len() >= batch {
-                        result = embed_pending(lib, enc, &mut pending, &mut states, prog);
-                    }
-                }
-                Msg::End(i, res) => states.entry(i).or_insert_with(new_state).ended = Some(res),
+            note_message(msg, &mut states, &mut pending, cfg.interval);
+            if pending.len() >= batch {
+                result = embed_pending(lib, enc, &mut pending, &mut states, prog);
             }
             if result.is_ok() {
                 result = finalize_ready(lib, files, &mut states, prog);
@@ -138,6 +133,39 @@ pub(crate) fn index_videos(
         }
         result
     })
+}
+
+/// A sampler thread: takes the next unclaimed video, samples its frames and sends them (then
+/// an end message) to the embedder, until the videos run out or a stop is requested.
+fn run_sampler(
+    lib: &Library,
+    files: &[FileRow],
+    cfg: SamplerConfig,
+    next: &AtomicUsize,
+    stop: &AtomicBool,
+    tx: &crossbeam_channel::Sender<Msg>,
+) {
+    let spec = lib.model();
+    let fit = fit_for(spec);
+    let halt = || stop.load(Ordering::Relaxed) || lib.control.checkpoint();
+    loop {
+        if halt() {
+            return;
+        }
+        let i = next.fetch_add(1, Ordering::Relaxed);
+        let Some(f) = files.get(i) else { return };
+        // A decoder bug on one odd file must fail that file, not the whole run.
+        let res = contain("the video decoder", || {
+            video::sample(&f.path, cfg, spec.image_size, &halt, &mut |fr| {
+                let px = img::to_square(&fr.rgb, spec.image_size, fit)?;
+                tx.send(Msg::Frame(i, fr.t, px))
+                    .map_err(|_| anyhow!("embedding stopped"))
+            })
+        });
+        if tx.send(Msg::End(i, res)).is_err() {
+            return;
+        }
+    }
 }
 
 fn embed_pending(

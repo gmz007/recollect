@@ -182,42 +182,49 @@ pub(crate) fn by_vector(
         t0.elapsed().saturating_sub(t_lock),
         infos.len()
     );
-    let moment_infos = &infos;
     let mut hits: Vec<SearchHit> = grouped
         .into_iter()
-        .filter_map(|(id, score, moments)| {
-            let i = infos.get(&id)?;
-            Some(SearchHit {
-                item_id: id,
-                file_id: i.file_id,
-                path: i.path.clone(),
-                kind: i.kind,
-                mtime: i.mtime,
-                taken_at: taken.get(&i.file_id).copied().unwrap_or(i.taken_at),
-                favorite: i.favorite,
-                score,
-                t_start: i.t_start,
-                t_end: i.t_end,
-                width: i.width,
-                height: i.height,
-                duration: i.duration,
-                moments: moments
-                    .iter()
-                    .filter_map(|&(mid, s)| {
-                        let m = moment_infos.get(&mid)?;
-                        Some(Moment {
-                            item_id: mid,
-                            t_start: m.t_start?,
-                            t_end: m.t_end.or(m.t_start)?,
-                            score: s,
-                        })
-                    })
-                    .collect(),
-            })
-        })
+        .filter_map(|group| build_hit(group, &infos, &taken))
         .collect();
     sort_hits(&mut hits, opts.sort);
     Ok(hits)
+}
+
+/// Turns one group into a hit, or `None` if the best item has no row any more. `taken` holds the
+/// capture times the index used, which win over the database's.
+fn build_hit(
+    (id, score, moments): Group,
+    infos: &HashMap<i64, ItemInfo>,
+    taken: &HashMap<i64, i64>,
+) -> Option<SearchHit> {
+    let i = infos.get(&id)?;
+    Some(SearchHit {
+        item_id: id,
+        file_id: i.file_id,
+        path: i.path.clone(),
+        kind: i.kind,
+        mtime: i.mtime,
+        taken_at: taken.get(&i.file_id).copied().unwrap_or(i.taken_at),
+        favorite: i.favorite,
+        score,
+        t_start: i.t_start,
+        t_end: i.t_end,
+        width: i.width,
+        height: i.height,
+        duration: i.duration,
+        moments: moments
+            .iter()
+            .filter_map(|&(mid, s)| {
+                let m = infos.get(&mid)?;
+                Some(Moment {
+                    item_id: mid,
+                    t_start: m.t_start?,
+                    t_end: m.t_end.or(m.t_start)?,
+                    score: s,
+                })
+            })
+            .collect(),
+    })
 }
 
 /// Orders hits by capture time (stable: equal times keep their relevance order).

@@ -109,56 +109,67 @@ pub fn scan(root: &Path, cancel: &dyn Fn() -> bool) -> ScanResult {
             }
         };
         for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    // Protects the whole directory from being treated as emptied.
-                    out.problems.push((dir.clone(), e.to_string()));
-                    continue;
-                }
-            };
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            let ft = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(e) => {
-                    out.problems.push((path, e.to_string()));
-                    continue;
-                }
-            };
-            if ft.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !ft.is_file() {
-                continue;
-            }
-            let Some(kind) = kind_of(&path) else { continue };
-            if path.to_str().is_none() {
-                out.problems
-                    .push((path, "file name is not valid UTF-8".into()));
-                continue;
-            }
-            match entry.metadata() {
-                Ok(m) => out.files.push(ScannedFile {
-                    kind,
-                    size: m.len(),
-                    mtime: m
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
-                    path,
-                }),
-                Err(e) => out.problems.push((path, e.to_string())),
-            }
+            scan_entry(entry, &dir, &mut stack, &mut out);
         }
     }
     out.files.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Handles one directory entry: queues sub-directories, collects media files and records
+/// whatever could not be read.
+fn scan_entry(
+    entry: std::io::Result<std::fs::DirEntry>,
+    dir: &Path,
+    stack: &mut Vec<PathBuf>,
+    out: &mut ScanResult,
+) {
+    let entry = match entry {
+        Ok(e) => e,
+        Err(e) => {
+            // Protects the whole directory from being treated as emptied.
+            out.problems.push((dir.to_path_buf(), e.to_string()));
+            return;
+        }
+    };
+    let name = entry.file_name();
+    if name.to_string_lossy().starts_with('.') {
+        return;
+    }
+    let path = entry.path();
+    let ft = match entry.file_type() {
+        Ok(ft) => ft,
+        Err(e) => {
+            out.problems.push((path, e.to_string()));
+            return;
+        }
+    };
+    if ft.is_dir() {
+        stack.push(path);
+        return;
+    }
+    if !ft.is_file() {
+        return;
+    }
+    let Some(kind) = kind_of(&path) else { return };
+    if path.to_str().is_none() {
+        out.problems
+            .push((path, "file name is not valid UTF-8".into()));
+        return;
+    }
+    match entry.metadata() {
+        Ok(m) => out.files.push(ScannedFile {
+            kind,
+            size: m.len(),
+            mtime: m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+            path,
+        }),
+        Err(e) => out.problems.push((path, e.to_string())),
+    }
 }
 
 #[cfg(test)]

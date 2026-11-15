@@ -276,10 +276,24 @@ impl VectorIndex {
         scale: f32,
         epoch: u64,
     ) -> Option<Self> {
-        use std::io::Read;
         let file = std::fs::File::open(path).ok()?;
         let file_len = file.metadata().ok()?.len();
         let mut r = std::io::BufReader::with_capacity(1 << 20, file);
+        let n = Self::read_cache_header(&mut r, file_len, model, library_id, dim, scale, epoch)?;
+        Self::read_cache_arrays(&mut r, n, dim, scale)
+    }
+
+    /// Reads the header of a cache, checks it against what the caller expects and against the
+    /// file length, and returns the item count.
+    fn read_cache_header(
+        r: &mut impl std::io::Read,
+        file_len: u64,
+        model: &str,
+        library_id: &str,
+        dim: usize,
+        scale: f32,
+        epoch: u64,
+    ) -> Option<usize> {
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic).ok()?;
         if &magic != CACHE_MAGIC {
@@ -328,6 +342,16 @@ impl VectorIndex {
         if expected as u64 != file_len {
             return None;
         }
+        Some(n)
+    }
+
+    /// Reads the item arrays of a cache whose header promised `n` items.
+    fn read_cache_arrays(
+        r: &mut impl std::io::Read,
+        n: usize,
+        dim: usize,
+        scale: f32,
+    ) -> Option<Self> {
         let mut read_i64s = |n: usize| -> Option<Vec<i64>> {
             let mut buf = vec![0u8; n * 8];
             r.read_exact(&mut buf).ok()?;
@@ -410,11 +434,6 @@ impl VectorIndex {
 
     /// Like [`Self::search`] with a [`ScanFilter`]; the filter is applied inside the scan.
     pub fn search_filtered(&self, q: &[f32], k: usize, filter: &ScanFilter) -> Vec<Candidate> {
-        let ScanFilter {
-            kind,
-            exclude_file,
-            taken_range,
-        } = *filter;
         if k == 0 || self.is_empty() || q.len() != self.dim {
             return Vec::new();
         }
@@ -422,32 +441,11 @@ impl VectorIndex {
         let qmax = q.iter().fold(0f32, |m, x| m.max(x.abs())).max(1e-12);
         let qscale = 127.0 / qmax;
         let qq: Vec<i8> = quantize(q, qscale).collect();
-        let dim = self.dim;
-        let n = self.len();
         let dot = pick_dot();
-        let blocks: Vec<usize> = (0..n.div_ceil(BLOCK)).collect();
+        let blocks: Vec<usize> = (0..self.len().div_ceil(BLOCK)).collect();
         let heaps: Vec<BinaryHeap<Entry>> = blocks
             .par_iter()
-            .map(|&b| {
-                let mut heap = BinaryHeap::with_capacity(k.min(BLOCK) + 1);
-                let end = ((b + 1) * BLOCK).min(n);
-                for r in b * BLOCK..end {
-                    if kind.is_some_and(|kd| self.kinds[r] != kd)
-                        || exclude_file == Some(self.file_ids[r])
-                        || taken_range.is_some_and(|(a, b)| self.taken[r] < a || self.taken[r] > b)
-                    {
-                        continue;
-                    }
-                    let s = dot(&self.data[r * dim..(r + 1) * dim], &qq);
-                    if heap.len() < k {
-                        heap.push(Entry(s, r));
-                    } else if heap.peek().is_some_and(|e| s > e.0) {
-                        heap.pop();
-                        heap.push(Entry(s, r));
-                    }
-                }
-                heap
-            })
+            .map(|&b| self.scan_block(b, k, &qq, filter, dot))
             .collect();
         let mut all: Vec<Entry> = heaps
             .into_iter()
@@ -465,6 +463,42 @@ impl VectorIndex {
                 taken_at: self.taken[r],
             })
             .collect()
+    }
+
+    /// The best `k` rows of block `b` that pass `filter`, scored against the quantized query.
+    fn scan_block(
+        &self,
+        b: usize,
+        k: usize,
+        qq: &[i8],
+        filter: &ScanFilter,
+        dot: DotFn,
+    ) -> BinaryHeap<Entry> {
+        let ScanFilter {
+            kind,
+            exclude_file,
+            taken_range,
+        } = *filter;
+        let dim = self.dim;
+        let n = self.len();
+        let mut heap = BinaryHeap::with_capacity(k.min(BLOCK) + 1);
+        let end = ((b + 1) * BLOCK).min(n);
+        for r in b * BLOCK..end {
+            if kind.is_some_and(|kd| self.kinds[r] != kd)
+                || exclude_file == Some(self.file_ids[r])
+                || taken_range.is_some_and(|(a, b)| self.taken[r] < a || self.taken[r] > b)
+            {
+                continue;
+            }
+            let s = dot(&self.data[r * dim..(r + 1) * dim], qq);
+            if heap.len() < k {
+                heap.push(Entry(s, r));
+            } else if heap.peek().is_some_and(|e| s > e.0) {
+                heap.pop();
+                heap.push(Entry(s, r));
+            }
+        }
+        heap
     }
 }
 

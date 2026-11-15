@@ -96,6 +96,89 @@ fn folders_in(conn: &rusqlite::Connection) -> Result<Vec<Folder>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// What the database holds for a folder: path to (file id, size, mtime).
+type ExistingFiles = HashMap<String, (i64, u64, i64)>;
+
+fn existing_files(tx: &rusqlite::Transaction<'_>, folder_id: i64) -> Result<ExistingFiles> {
+    let mut existing = ExistingFiles::new();
+    let mut st = tx.prepare("SELECT path, id, size, mtime FROM files WHERE folder_id = ?1")?;
+    let rows = st.query_map([folder_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            (r.get(1)?, unsigned(r.get::<_, i64>(2)?), r.get(3)?),
+        ))
+    })?;
+    for row in rows {
+        let (p, v) = row?;
+        existing.insert(p, v);
+    }
+    Ok(existing)
+}
+
+/// Inserts the new files and resets the changed ones (dropping their items). Returns the counts
+/// and the set of scanned paths.
+fn apply_scan(
+    tx: &rusqlite::Transaction<'_>,
+    folder_id: i64,
+    scanned: &[ScannedFile],
+    existing: &ExistingFiles,
+) -> Result<(SyncStats, HashSet<String>)> {
+    let mut stats = SyncStats::default();
+    let mut seen = HashSet::new();
+    let mut ins = tx.prepare(
+        "INSERT INTO files(folder_id, path, kind, size, mtime, status, added_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+         ON CONFLICT(path) DO NOTHING",
+    )?;
+    let mut upd = tx.prepare(
+        "UPDATE files SET size = ?2, mtime = ?3, status = 0, error = NULL, model = NULL,
+         taken_at = NULL, date_source = NULL, camera = NULL WHERE id = ?1",
+    )?;
+    let mut del_items = tx.prepare("DELETE FROM items WHERE file_id = ?1")?;
+    let added_at = now();
+    for f in scanned {
+        let p = path_str(&f.path)?;
+        seen.insert(p.to_string());
+        match existing.get(p) {
+            None => {
+                stats.added += ins.execute(params![
+                    folder_id,
+                    p,
+                    i64::from(f.kind),
+                    signed(f.size),
+                    f.mtime,
+                    added_at
+                ])?;
+            }
+            Some(&(id, size, mtime)) if size != f.size || mtime != f.mtime => {
+                upd.execute(params![id, signed(f.size), f.mtime])?;
+                del_items.execute([id])?;
+                stats.changed += 1;
+                stats.changed_ids.push(id);
+            }
+            Some(_) => stats.unchanged += 1,
+        }
+    }
+    Ok((stats, seen))
+}
+
+/// Deletes the files that were not seen in the scan, except those under `protected` paths.
+fn delete_vanished(
+    tx: &rusqlite::Transaction<'_>,
+    existing: &ExistingFiles,
+    seen: &HashSet<String>,
+    protected: &[PathBuf],
+    stats: &mut SyncStats,
+) -> Result<()> {
+    let mut del = tx.prepare("DELETE FROM files WHERE id = ?1")?;
+    for (p, &(id, _, _)) in existing {
+        if !seen.contains(p) && !protected.iter().any(|d| Path::new(p).starts_with(d)) {
+            del.execute([id])?;
+            stats.removed.push(id);
+        }
+    }
+    Ok(())
+}
+
 impl Db {
     /// Adds a library folder. `path` should be absolute and canonical. A folder inside an
     /// existing one is rejected; adding a parent of existing folders absorbs them.
@@ -180,65 +263,9 @@ impl Db {
         if !present {
             return Ok(SyncStats::default());
         }
-        let mut existing: HashMap<String, (i64, u64, i64)> = HashMap::new();
-        {
-            let mut st =
-                tx.prepare("SELECT path, id, size, mtime FROM files WHERE folder_id = ?1")?;
-            let rows = st.query_map([folder_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    (r.get(1)?, unsigned(r.get::<_, i64>(2)?), r.get(3)?),
-                ))
-            })?;
-            for row in rows {
-                let (p, v) = row?;
-                existing.insert(p, v);
-            }
-        }
-        let mut stats = SyncStats::default();
-        let mut seen = HashSet::new();
-        {
-            let mut ins = tx.prepare(
-                "INSERT INTO files(folder_id, path, kind, size, mtime, status, added_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
-                 ON CONFLICT(path) DO NOTHING",
-            )?;
-            let mut upd = tx.prepare(
-                "UPDATE files SET size = ?2, mtime = ?3, status = 0, error = NULL, model = NULL,
-                 taken_at = NULL, date_source = NULL, camera = NULL WHERE id = ?1",
-            )?;
-            let mut del_items = tx.prepare("DELETE FROM items WHERE file_id = ?1")?;
-            let added_at = now();
-            for f in scanned {
-                let p = path_str(&f.path)?;
-                seen.insert(p.to_string());
-                match existing.get(p) {
-                    None => {
-                        stats.added += ins.execute(params![
-                            folder_id,
-                            p,
-                            i64::from(f.kind),
-                            signed(f.size),
-                            f.mtime,
-                            added_at
-                        ])?;
-                    }
-                    Some(&(id, size, mtime)) if size != f.size || mtime != f.mtime => {
-                        upd.execute(params![id, signed(f.size), f.mtime])?;
-                        del_items.execute([id])?;
-                        stats.changed += 1;
-                        stats.changed_ids.push(id);
-                    }
-                    Some(_) => stats.unchanged += 1,
-                }
-            }
-            let mut del = tx.prepare("DELETE FROM files WHERE id = ?1")?;
-            for (p, &(id, _, _)) in &existing {
-                if !seen.contains(p) && !protected.iter().any(|d| Path::new(p).starts_with(d)) {
-                    del.execute([id])?;
-                    stats.removed.push(id);
-                }
-            }
-        }
+        let existing = existing_files(&tx, folder_id)?;
+        let (mut stats, seen) = apply_scan(&tx, folder_id, scanned, &existing)?;
+        delete_vanished(&tx, &existing, &seen, protected, &mut stats)?;
         // A scan that found nothing new must not invalidate the index cache.
         if stats.added + stats.changed + stats.removed.len() > 0 {
             bump_epoch(&tx)?;

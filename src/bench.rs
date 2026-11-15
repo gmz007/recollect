@@ -94,20 +94,7 @@ pub fn search(
     }
     let spec =
         registry::get(model_id).ok_or_else(|| anyhow::anyhow!("unknown model {model_id}"))?;
-    let marker = paths.data.join("bench-library.txt");
-    let wanted = format!("{model_id} {images} {videos} {segments}");
-    if std::fs::read_to_string(&marker).ok().as_deref() != Some(wanted.as_str()) {
-        if Db::open(&paths.db_path())?.stats(model_id)?.folders > 0 {
-            bail!(
-                "{} already holds a different library; use an empty --home",
-                paths.data.display()
-            );
-        }
-        generate(paths, spec, images, videos, segments)?;
-        std::fs::write(&marker, &wanted)?;
-        // Write the cache now so no search is measured while a save is running.
-        Library::open(paths.clone(), Some(model_id))?.save_index_cache();
-    }
+    ensure_search_library(paths, spec, model_id, images, videos, segments)?;
     let db_mb = std::fs::metadata(paths.db_path())?.len() / 1_000_000
         + std::fs::metadata(paths.db_path().with_extension("db-wal"))
             .map_or(0, |m| m.len() / 1_000_000);
@@ -138,18 +125,61 @@ pub fn search(
     println!("RSS after load: {rss} MB (process baseline before open {rss0} MB)");
     println!("database size: {db_mb} MB");
 
+    let lat = measure_vector_search(&lib, spec, queries)?;
+    if lib.model_installed() {
+        report_text_encoding(&lib, &lat)?;
+    } else {
+        println!("(model not installed in this home: text encoding not measured)");
+    }
+    println!("RSS after searches: {} MB", rss_mb());
+    Ok(())
+}
+
+/// Generates the synthetic library for these parameters unless this home already holds it.
+fn ensure_search_library(
+    paths: &Paths,
+    spec: &registry::ModelSpec,
+    model_id: &str,
+    images: usize,
+    videos: usize,
+    segments: usize,
+) -> Result<()> {
+    let marker = paths.data.join("bench-library.txt");
+    let wanted = format!("{model_id} {images} {videos} {segments}");
+    if std::fs::read_to_string(&marker).ok().as_deref() != Some(wanted.as_str()) {
+        if Db::open(&paths.db_path())?.stats(model_id)?.folders > 0 {
+            bail!(
+                "{} already holds a different library; use an empty --home",
+                paths.data.display()
+            );
+        }
+        generate(paths, spec, images, videos, segments)?;
+        std::fs::write(&marker, &wanted)?;
+        // Write the cache now so no search is measured while a save is running.
+        Library::open(paths.clone(), Some(model_id))?.save_index_cache();
+    }
+    Ok(())
+}
+
+/// Times `queries` vector searches (and the bare i8 scan), prints the percentiles and returns
+/// the sorted search latencies.
+fn measure_vector_search(
+    lib: &Library,
+    spec: &registry::ModelSpec,
+    queries: usize,
+) -> Result<Vec<Duration>> {
     let mut rng = Rng(0x5EED);
     let opts = SearchOptions {
         limit: 200,
         kind: None,
         ..Default::default()
     };
-    search::by_vector(&lib, &rng.unit(spec.dim), &opts, None)?; // warm caches
+    search::by_vector(lib, &rng.unit(spec.dim), &opts, None)?; // warm caches
     let mut lat = Vec::with_capacity(queries);
     for _ in 0..queries {
         let q = rng.unit(spec.dim);
         let t = Instant::now();
-        let hits = search::by_vector(&lib, &q, &opts, None)?;
+        let hits = search::by_vector(lib, &q, &opts, None)?;
         lat.push(t.elapsed());
         assert!(!hits.is_empty());
     }
@@ -174,27 +204,11 @@ pub fn search(
         percentile(&lat, 0.95).as_secs_f64() * 1e3,
         lat.last().copied().unwrap_or_default().as_secs_f64() * 1e3
     );
-    if lib.model_installed() {
-        report_text_encoding(&lib, &lat)?;
-    } else {
-        println!("(model not installed in this home: text encoding not measured)");
-    }
-    println!("RSS after searches: {} MB", rss_mb());
-    Ok(())
+    Ok(lat)
 }
 
-fn generate(
-    paths: &Paths,
-    spec: &registry::ModelSpec,
-    images: usize,
-    videos: usize,
-    segments: usize,
-) -> Result<()> {
-    let t = Instant::now();
-    paths.create_all()?;
-    let mut db = Db::open(&paths.db_path())?;
-    let root = Path::new("/bench-library");
-    let folder = db.add_folder(root)?;
+/// The synthetic photo and video files of the throwaway library.
+fn bench_files(root: &Path, images: usize, videos: usize) -> Vec<ScannedFile> {
     let mut files: Vec<ScannedFile> = (0..images)
         .map(|i| ScannedFile {
             path: root.join(format!("photos/{:03}/img_{i:07}.jpg", i / 1000)),
@@ -209,6 +223,41 @@ fn generate(
         size: 500_000_000,
         mtime: 1,
     }));
+    files
+}
+
+/// Random unit vectors for one file: one per segment for a video, a single one for an image.
+fn random_items(rng: &mut Rng, dim: usize, kind: MediaKind, segments: usize) -> Vec<NewItem> {
+    if kind == MediaKind::Video {
+        (0..segments)
+            .map(|s| NewItem {
+                t_start: Some(s as f64 * 6.0),
+                t_end: Some(s as f64 * 6.0 + 6.0),
+                embedding: rng.unit(dim),
+            })
+            .collect()
+    } else {
+        vec![NewItem {
+            t_start: None,
+            t_end: None,
+            embedding: rng.unit(dim),
+        }]
+    }
+}
+
+fn generate(
+    paths: &Paths,
+    spec: &registry::ModelSpec,
+    images: usize,
+    videos: usize,
+    segments: usize,
+) -> Result<()> {
+    let t = Instant::now();
+    paths.create_all()?;
+    let mut db = Db::open(&paths.db_path())?;
+    let root = Path::new("/bench-library");
+    let folder = db.add_folder(root)?;
+    let files = bench_files(root, images, videos);
     db.sync_folder(folder, &files, &[])?;
     drop(files);
     let pending = db.pending(spec.id)?;
@@ -216,21 +265,7 @@ fn generate(
     let mut batch = Vec::new();
     let mut done = 0usize;
     for f in pending {
-        let items: Vec<NewItem> = if f.kind == MediaKind::Video {
-            (0..segments)
-                .map(|s| NewItem {
-                    t_start: Some(s as f64 * 6.0),
-                    t_end: Some(s as f64 * 6.0 + 6.0),
-                    embedding: rng.unit(spec.dim),
-                })
-                .collect()
-        } else {
-            vec![NewItem {
-                t_start: None,
-                t_end: None,
-                embedding: rng.unit(spec.dim),
-            }]
-        };
+        let items = random_items(&mut rng, spec.dim, f.kind, segments);
         done += items.len();
         let meta = FileMeta {
             width: Some(4000),
@@ -292,65 +327,12 @@ pub fn rescan(paths: &Paths, dir: &Path, files: usize) -> Result<()> {
 /// Builds (if needed) a synthetic library of `files` files with capture dates spread over 15
 /// years (no vectors), then measures loading the whole timeline.
 pub fn timeline(paths: &Paths, files: usize) -> Result<()> {
-    use crate::media::metadata::{Capture, DateSource};
     use crate::store::db::TimelineFilter;
     let marker = paths.data.join("bench-timeline.txt");
     let wanted = files.to_string();
     if std::fs::read_to_string(&marker).ok().as_deref() != Some(wanted.as_str()) {
         let t = Instant::now();
-        paths.create_all()?;
-        let mut db = Db::open(&paths.db_path())?;
-        if db.stats("")?.folders > 0 {
-            bail!(
-                "{} already holds a different library; use an empty --home",
-                paths.data.display()
-            );
-        }
-        let root = Path::new("/bench-timeline");
-        let folder = db.add_folder(root)?;
-        let mut rng = Rng(0xDA7E);
-        // Uniform over 2010-01-01 .. 2025-01-01 (wall-clock seconds).
-        let (start, span) = (1_262_304_000i64, 15 * 365 * 86_400i64);
-        let when = |rng: &mut Rng| start + (f64::from(rng.next_f32() + 0.5) * span as f64) as i64;
-        let scanned: Vec<ScannedFile> = (0..files)
-            .map(|i| {
-                let video = i % 50 == 0;
-                ScannedFile {
-                    path: root.join(format!(
-                        "{:03}/f{i:07}.{}",
-                        i / 1000,
-                        if video { "mp4" } else { "jpg" }
-                    )),
-                    kind: if video {
-                        MediaKind::Video
-                    } else {
-                        MediaKind::Image
-                    },
-                    size: 3_000_000,
-                    mtime: when(&mut rng),
-                }
-            })
-            .collect();
-        db.sync_folder(folder, &scanned, &[])?;
-        drop(scanned);
-        let pending = db.pending_dates()?;
-        for chunk in pending.chunks(5000) {
-            let batch: Vec<(i64, Capture)> = chunk
-                .iter()
-                .map(|f| {
-                    (
-                        f.id,
-                        Capture {
-                            taken_at: when(&mut rng),
-                            source: DateSource::Exif,
-                            camera: Some("Bench Camera".into()),
-                            duration: None,
-                        },
-                    )
-                })
-                .collect();
-            db.set_captures(&batch)?;
-        }
+        generate_timeline_library(paths, files)?;
         std::fs::write(&marker, &wanted)?;
         eprintln!(
             "generated {files} files in {:.1} s",
@@ -365,6 +347,73 @@ pub fn timeline(paths: &Paths, files: usize) -> Result<()> {
     let rss1 = rss_mb();
     println!("timeline load: {ms:.0} ms, {} items", items.len());
     println!("timeline memory: +{} MB", rss1.saturating_sub(rss0));
+    Ok(())
+}
+
+/// A random capture time, uniform over 2010-01-01 .. 2025-01-01 (wall-clock seconds).
+fn random_capture_time(rng: &mut Rng) -> i64 {
+    let (start, span) = (1_262_304_000i64, 15 * 365 * 86_400i64);
+    start + (f64::from(rng.next_f32() + 0.5) * span as f64) as i64
+}
+
+/// The synthetic files of the timeline library: every 50th is a video, with random mtimes.
+fn timeline_files(root: &Path, files: usize, rng: &mut Rng) -> Vec<ScannedFile> {
+    (0..files)
+        .map(|i| {
+            let video = i % 50 == 0;
+            ScannedFile {
+                path: root.join(format!(
+                    "{:03}/f{i:07}.{}",
+                    i / 1000,
+                    if video { "mp4" } else { "jpg" }
+                )),
+                kind: if video {
+                    MediaKind::Video
+                } else {
+                    MediaKind::Image
+                },
+                size: 3_000_000,
+                mtime: random_capture_time(rng),
+            }
+        })
+        .collect()
+}
+
+/// Fills an empty home with `files` synthetic files and random capture dates (no vectors).
+fn generate_timeline_library(paths: &Paths, files: usize) -> Result<()> {
+    use crate::media::metadata::{Capture, DateSource};
+    paths.create_all()?;
+    let mut db = Db::open(&paths.db_path())?;
+    if db.stats("")?.folders > 0 {
+        bail!(
+            "{} already holds a different library; use an empty --home",
+            paths.data.display()
+        );
+    }
+    let root = Path::new("/bench-timeline");
+    let folder = db.add_folder(root)?;
+    let mut rng = Rng(0xDA7E);
+    let scanned = timeline_files(root, files, &mut rng);
+    db.sync_folder(folder, &scanned, &[])?;
+    drop(scanned);
+    let pending = db.pending_dates()?;
+    for chunk in pending.chunks(5000) {
+        let batch: Vec<(i64, Capture)> = chunk
+            .iter()
+            .map(|f| {
+                (
+                    f.id,
+                    Capture {
+                        taken_at: random_capture_time(&mut rng),
+                        source: DateSource::Exif,
+                        camera: Some("Bench Camera".into()),
+                        duration: None,
+                    },
+                )
+            })
+            .collect();
+        db.set_captures(&batch)?;
+    }
     Ok(())
 }
 

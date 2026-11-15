@@ -231,21 +231,7 @@ pub fn run(lib: &Arc<Library>, command: &LibCommand) -> Result<()> {
         LibCommand::Models {
             cmd: ModelsCmd::Download { yes },
         } => download_model(lib, *yes)?,
-        LibCommand::Folders { cmd } => match cmd {
-            FoldersCmd::Add { paths } => {
-                for p in paths {
-                    lib.add_folder(p)?;
-                }
-            }
-            FoldersCmd::List => {
-                for f in lib.folders()? {
-                    println!("{}", f.path.display());
-                }
-            }
-            FoldersCmd::Remove { path } => {
-                remove_folder(lib, path)?;
-            }
-        },
+        LibCommand::Folders { cmd } => folders_command(lib, cmd)?,
         LibCommand::Index { paths } => {
             for p in paths {
                 lib.add_folder(p)?;
@@ -257,30 +243,61 @@ pub fn run(lib: &Arc<Library>, command: &LibCommand) -> Result<()> {
             limit,
             kind,
             json,
-        } => {
-            let opts = SearchOptions {
-                limit: *limit,
-                kind: kind.map(Into::into),
-                ..Default::default()
-            };
-            let hits = lib.search(query, &opts)?;
-            print_hits(&hits, *json);
-        }
+        } => search_command(lib, query, *limit, *kind, *json)?,
         LibCommand::Eval {
             queries,
             root,
             json,
-        } => {
-            let rep = crate::eval::run(lib, queries, root)?;
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&rep)?);
-            } else {
-                println!("model {}\n{rep}", lib.model().id);
-            }
-        }
+        } => eval_command(lib, queries, root, *json)?,
         LibCommand::Status => {
             print_status(lib)?;
         }
+    }
+    Ok(())
+}
+
+fn folders_command(lib: &Library, cmd: &FoldersCmd) -> Result<()> {
+    match cmd {
+        FoldersCmd::Add { paths } => {
+            for p in paths {
+                lib.add_folder(p)?;
+            }
+        }
+        FoldersCmd::List => {
+            for f in lib.folders()? {
+                println!("{}", f.path.display());
+            }
+        }
+        FoldersCmd::Remove { path } => {
+            remove_folder(lib, path)?;
+        }
+    }
+    Ok(())
+}
+
+fn search_command(
+    lib: &Library,
+    query: &str,
+    limit: usize,
+    kind: Option<KindArg>,
+    json: bool,
+) -> Result<()> {
+    let opts = SearchOptions {
+        limit,
+        kind: kind.map(Into::into),
+        ..Default::default()
+    };
+    let hits = lib.search(query, &opts)?;
+    print_hits(&hits, json);
+    Ok(())
+}
+
+fn eval_command(lib: &Library, queries: &Path, root: &Path, json: bool) -> Result<()> {
+    let rep = crate::eval::run(lib, queries, root)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rep)?);
+    } else {
+        println!("model {}\n{rep}", lib.model().id);
     }
     Ok(())
 }

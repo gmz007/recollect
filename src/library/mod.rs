@@ -125,58 +125,117 @@ impl std::fmt::Debug for Library {
     }
 }
 
+/// The receiving and sending ends the writer thread works with.
+struct WriterEnds {
+    requests: Receiver<WriteMsg>,
+    favorites: Sender<FavoriteWrite>,
+    albums: Sender<AlbumWrite>,
+}
+
+/// Loads the settings; a file that cannot be read is kept aside and replaced by
+/// defaults. A model id the app does not know is dropped.
+fn load_settings_or_default(paths: &Paths) -> Settings {
+    let mut settings = match Settings::load(&paths.settings_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            // Keep the broken file for inspection and start with defaults.
+            tracing::warn!("{e:#}; using default settings");
+            let bad = paths.settings_path().with_extension("toml.broken");
+            let _ = std::fs::rename(paths.settings_path(), bad);
+            Settings::default()
+        }
+    };
+    if settings
+        .model
+        .as_deref()
+        .is_some_and(|id| registry::get(id).is_none())
+    {
+        tracing::warn!("unknown model in settings; choosing a default");
+        settings.model = None;
+    }
+    settings
+}
+
+/// The override if given, else the model in the settings, else a default for
+/// this hardware (which is saved into the settings).
+fn choose_model_id(
+    paths: &Paths,
+    settings: &mut Settings,
+    model_override: Option<&str>,
+) -> Result<String> {
+    if let Some(id) = model_override {
+        return Ok(id.to_string());
+    }
+    if let Some(id) = &settings.model {
+        return Ok(id.clone());
+    }
+    let id = default_model_for_hardware().to_string();
+    settings.model = Some(id.clone());
+    settings.save(&paths.settings_path())?;
+    Ok(id)
+}
+
+/// The saved index if it is still current, else one rebuilt from the database.
+/// The flag says whether it came from the saved copy.
+fn load_or_rebuild_index(
+    paths: &Paths,
+    db: &Db,
+    spec: &ModelSpec,
+    epoch: u64,
+) -> Result<(VectorIndex, bool)> {
+    let library_id = db.library_id()?;
+    let cache = index_cache_path(paths, spec);
+    match VectorIndex::load(
+        &cache,
+        spec.id,
+        &library_id,
+        spec.dim,
+        spec.quant_scale,
+        epoch,
+    ) {
+        Some(i) => Ok((i, true)),
+        None => Ok((load_index(db, spec)?, false)),
+    }
+}
+
 impl Library {
     /// Opens (or creates) the library under `paths`. `model_override` forces a model id.
     pub fn open(paths: Paths, model_override: Option<&str>) -> Result<Arc<Self>> {
         paths.create_all()?;
-        let mut settings = match Settings::load(&paths.settings_path()) {
-            Ok(s) => s,
-            Err(e) => {
-                // Keep the broken file for inspection and start with defaults.
-                tracing::warn!("{e:#}; using default settings");
-                let bad = paths.settings_path().with_extension("toml.broken");
-                let _ = std::fs::rename(paths.settings_path(), bad);
-                Settings::default()
-            }
-        };
-        if settings
-            .model
-            .as_deref()
-            .is_some_and(|id| registry::get(id).is_none())
-        {
-            tracing::warn!("unknown model in settings; choosing a default");
-            settings.model = None;
-        }
-        let id = match model_override {
-            Some(id) => id.to_string(),
-            None => {
-                if let Some(id) = &settings.model {
-                    id.clone()
-                } else {
-                    let id = default_model_for_hardware().to_string();
-                    settings.model = Some(id.clone());
-                    settings.save(&paths.settings_path())?;
-                    id
-                }
-            }
-        };
+        let mut settings = load_settings_or_default(&paths);
+        let id = choose_model_id(&paths, &mut settings, model_override)?;
         let spec = registry::get(&id).ok_or_else(|| anyhow!("unknown model '{id}'"))?;
         let db = Db::open(&paths.db_path())?;
         remove_stale_temp_files(&paths.data);
         let epoch = db.items_epoch()?;
-        let library_id = db.library_id()?;
-        let cache = index_cache_path(&paths, spec);
-        let (index, from_cache) = match VectorIndex::load(
-            &cache,
-            spec.id,
-            &library_id,
-            spec.dim,
-            spec.quant_scale,
-            epoch,
-        ) {
-            Some(i) => (i, true),
-            None => (load_index(&db, spec)?, false),
-        };
+        let (index, from_cache) = load_or_rebuild_index(&paths, &db, spec, epoch)?;
+        let (lib, writer_ends) = Self::new(paths, settings, spec, db, (index, from_cache), epoch);
+        *lib.self_ref.write() = Arc::downgrade(&lib);
+        let weak = Arc::downgrade(&lib);
+        std::thread::Builder::new()
+            .name("recollect-writer".into())
+            .spawn(move || {
+                library_writer(
+                    &weak,
+                    &writer_ends.requests,
+                    &writer_ends.favorites,
+                    &writer_ends.albums,
+                );
+            })
+            .context("starting the library writer")?;
+        Ok(lib)
+    }
+
+    /// Assembles the library around an opened database and index, with the
+    /// channels to its writer thread (whose ends are returned).
+    fn new(
+        paths: Paths,
+        settings: Settings,
+        spec: &'static ModelSpec,
+        db: Db,
+        (index, from_cache): (VectorIndex, bool),
+        epoch: u64,
+    ) -> (Arc<Self>, WriterEnds) {
         let (write_tx, write_rx) = crossbeam_channel::unbounded();
         let (favorite_tx, favorite_results) = crossbeam_channel::unbounded();
         let (album_tx, album_results) = crossbeam_channel::unbounded();
@@ -215,13 +274,12 @@ impl Library {
             #[cfg(test)]
             job_log: Mutex::new(Vec::new()),
         });
-        *lib.self_ref.write() = Arc::downgrade(&lib);
-        let weak = Arc::downgrade(&lib);
-        std::thread::Builder::new()
-            .name("recollect-writer".into())
-            .spawn(move || library_writer(&weak, &write_rx, &favorite_tx, &album_tx))
-            .context("starting the library writer")?;
-        Ok(lib)
+        let ends = WriterEnds {
+            requests: write_rx,
+            favorites: favorite_tx,
+            albums: album_tx,
+        };
+        (lib, ends)
     }
 
     pub fn paths(&self) -> &Paths {

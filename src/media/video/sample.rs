@@ -32,16 +32,8 @@ pub fn sample(
     // True while decoding an oversized GOP packet by packet (decoder state must be kept).
     let mut streaming = false;
     loop {
-        let pkt = match s.next_packet() {
-            Ok(Some(p)) => p,
-            Ok(None) => break,
-            Err(e) if st.emitted > 0 && !chain_is_io_failure(&e) => {
-                // A damaged region late in a long file shouldn't discard everything before it.
-                // A vanished drive is different: fail the file so it is retried in full.
-                tracing::warn!("{}: stopping at a read error: {e:#}", path.display());
-                break;
-            }
-            Err(e) => return Err(e),
+        let Some(pkt) = next_packet_or_stop(&mut s, st.emitted, path)? else {
+            break;
         };
         if cancel() {
             bail!("cancelled");
@@ -72,12 +64,40 @@ pub fn sample(
             streaming = true;
         }
     }
+    finish_sampling(&mut st, &mut s, &gop, streaming, on_frame)
+}
+
+/// The next packet, or `None` at the end of the stream. A read error after some frames were
+/// emitted also ends the stream, unless the cause is an I/O failure.
+fn next_packet_or_stop(s: &mut Stream, emitted: usize, path: &Path) -> Result<Option<ff::Packet>> {
+    match s.next_packet() {
+        Ok(Some(p)) => Ok(Some(p)),
+        Ok(None) => Ok(None),
+        Err(e) if emitted > 0 && !chain_is_io_failure(&e) => {
+            // A damaged region late in a long file shouldn't discard everything before it.
+            // A vanished drive is different: fail the file so it is retried in full.
+            tracing::warn!("{}: stopping at a read error: {e:#}", path.display());
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Handles what is left once the packets run out: the oversized GOP being streamed, or the
+/// last GOP. Fails if nothing was decoded.
+fn finish_sampling(
+    st: &mut SampleState,
+    s: &mut Stream,
+    gop: &[ff::Packet],
+    streaming: bool,
+    on_frame: &mut dyn FnMut(Frame) -> Result<()>,
+) -> Result<VideoInfo> {
     if streaming {
-        st.finish_stream(&mut s, on_frame)?;
+        st.finish_stream(s, on_frame)?;
     } else if !gop.is_empty() {
         // The last GOP ends at the known duration; if that is unknown, decode it in order.
         let end = (s.duration > 0.0).then_some(s.duration);
-        st.process_gop(&mut s, &gop, end, on_frame)?;
+        st.process_gop(s, gop, end, on_frame)?;
     }
     if st.emitted == 0 {
         bail!("no frames could be decoded");

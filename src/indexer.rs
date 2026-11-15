@@ -421,37 +421,50 @@ fn index_images(
                 });
             });
         });
-        let mut ready: Vec<(FileRow, Vec<u8>, FileMeta)> = Vec::with_capacity(batch);
-        let mut out: Vec<Embedded> = Vec::new();
-        let mut result = Ok(());
-        for (f, r) in &rx {
-            if result.is_err() || lib.control.is_cancelled() {
-                continue; // drain so producers can finish
-            }
-            match r {
-                Ok((px, meta)) => ready.push((f, px, meta)),
-                Err(e) => {
-                    fail_file(lib, prog, &f, &e);
-                }
-            }
-            if ready.len() >= batch {
-                result = embed_ready(lib, enc, &mut ready, &mut out, prog);
-            }
-            if out.len() >= WRITE_BATCH && result.is_ok() {
-                result = write_items(lib, std::mem::take(&mut out));
-            }
-            if result.is_err() {
-                abort.store(true, std::sync::atomic::Ordering::Relaxed);
+        embed_prepared(lib, enc, &rx, batch, abort, prog)
+    })
+}
+
+/// Embeds the decoded images as they arrive on `rx`, in batches of `batch`, and writes the
+/// results in groups. On failure `abort` is set so the decoders stop.
+fn embed_prepared(
+    lib: &Library,
+    enc: &mut VisionEncoder,
+    rx: &crossbeam_channel::Receiver<Prepared>,
+    batch: usize,
+    abort: &std::sync::atomic::AtomicBool,
+    prog: &mut Progress,
+) -> Result<()> {
+    let mut ready: Vec<(FileRow, Vec<u8>, FileMeta)> = Vec::with_capacity(batch);
+    let mut out: Vec<Embedded> = Vec::new();
+    let mut result = Ok(());
+    for (f, r) in rx {
+        if result.is_err() || lib.control.is_cancelled() {
+            continue; // drain so producers can finish
+        }
+        match r {
+            Ok((px, meta)) => ready.push((f, px, meta)),
+            Err(e) => {
+                fail_file(lib, prog, &f, &e);
             }
         }
-        if result.is_ok() && !lib.control.is_cancelled() {
+        if ready.len() >= batch {
             result = embed_ready(lib, enc, &mut ready, &mut out, prog);
         }
-        if result.is_ok() {
+        if out.len() >= WRITE_BATCH && result.is_ok() {
             result = write_items(lib, std::mem::take(&mut out));
         }
-        result
-    })
+        if result.is_err() {
+            abort.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    if result.is_ok() && !lib.control.is_cancelled() {
+        result = embed_ready(lib, enc, &mut ready, &mut out, prog);
+    }
+    if result.is_ok() {
+        result = write_items(lib, std::mem::take(&mut out));
+    }
+    result
 }
 
 fn embed_ready(
