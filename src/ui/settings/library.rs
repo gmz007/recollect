@@ -81,7 +81,7 @@ impl App {
         self.settings_advanced(ui);
     }
 
-    pub(super) fn settings_folders(&mut self, ui: &mut egui::Ui) {
+    fn settings_folders(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         heading(ui, "Folders");
         if self.snapshot.folders.is_empty() {
@@ -108,7 +108,7 @@ impl App {
         }
     }
 
-    pub(super) fn settings_library_summary(&mut self, ui: &mut egui::Ui) {
+    fn settings_library_summary(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let busy = self.lib.is_busy();
         heading(ui, "Your library");
@@ -154,7 +154,7 @@ impl App {
         );
     }
 
-    pub(super) fn settings_advanced(&mut self, ui: &mut egui::Ui) {
+    fn settings_advanced(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Advanced")
             .id_salt("settings-advanced")
             .show(ui, |ui| {

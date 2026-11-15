@@ -364,11 +364,7 @@ impl TextEncoder {
     }
 }
 
-pub(crate) fn tokenize(
-    spec: &ModelSpec,
-    tok: &tokenizers::Tokenizer,
-    text: &str,
-) -> Result<Vec<i64>> {
+fn tokenize(spec: &ModelSpec, tok: &tokenizers::Tokenizer, text: &str) -> Result<Vec<i64>> {
     let text = match spec.family {
         Family::Siglip => text.to_lowercase(),
         Family::Clip => text.to_string(),

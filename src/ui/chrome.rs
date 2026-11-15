@@ -10,15 +10,15 @@ use egui_material_icons::MaterialIcon;
 use std::time::Instant;
 
 /// Placeholder of the search field.
-pub(super) const SEARCH_HINT: &str = "Search your photos — try “dog on the beach”";
+const SEARCH_HINT: &str = "Search your photos — try “dog on the beach”";
 /// What assistive technology reads for the search field while smart search is off.
 pub(super) const SEARCH_OFF_LABEL: &str =
     "Search your photos (smart search is off, press to turn it on)";
 /// Shown in place of the search field while smart search is not on.
-pub(super) const SEARCH_OFF_HINT: &str = "Turn on smart search to find photos by describing them";
+const SEARCH_OFF_HINT: &str = "Turn on smart search to find photos by describing them";
 
 /// "1,204 photos and 37 videos", "1 photo", "12 videos"; empty when there is nothing.
-pub(super) fn count_text(photos: usize, videos: usize) -> String {
+fn count_text(photos: usize, videos: usize) -> String {
     let p = |n: usize| {
         format!(
             "{} {}",

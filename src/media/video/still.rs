@@ -22,14 +22,14 @@ pub fn frame_at(path: &Path, t: f64, min_side: u32) -> Result<Rgb> {
     }
 }
 
-pub(super) enum Found {
+enum Found {
     Frame(Rgb),
     /// No frame at the requested time; the last frame seen was earlier, at this time.
     PastEnd(f64),
     Missing,
 }
 
-pub(super) fn find_frame(path: &Path, t: f64, min_side: u32) -> Result<Found> {
+fn find_frame(path: &Path, t: f64, min_side: u32) -> Result<Found> {
     let mut s = open(path, 2)?;
     let target = if t.is_finite() { t.max(0.0) } else { 0.0 };
     // Seek to the keyframe at or before `t`, in absolute stream time (streams may not start

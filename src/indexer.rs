@@ -343,10 +343,7 @@ pub(crate) fn fit_for(spec: &ModelSpec) -> Fit {
 }
 
 /// Decodes an image file into the model's square RGB input.
-pub(crate) fn prepare_image(
-    path: &std::path::Path,
-    spec: &ModelSpec,
-) -> Result<(Vec<u8>, FileMeta)> {
+fn prepare_image(path: &std::path::Path, spec: &ModelSpec) -> Result<(Vec<u8>, FileMeta)> {
     contain("decoding the image", || {
         let d = img::decode(path, spec.image_size)?;
         let px = img::to_square(&d.rgb, spec.image_size, fit_for(spec))?;

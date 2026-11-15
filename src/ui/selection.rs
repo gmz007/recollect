@@ -214,7 +214,7 @@ impl Selection {
 
 /// The selection-related keys pressed this frame.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct NavInput {
+struct NavInput {
     /// Arrow presses without modifiers, in order.
     pub plain: Vec<Nav>,
     /// Arrow presses with Shift only.
@@ -226,7 +226,7 @@ pub(super) struct NavInput {
 /// Reads (and consumes) this frame's arrows, Shift+arrows, Enter (unless a widget has focus)
 /// and Ctrl/Cmd+A. A focused
 /// button would otherwise move with the arrows, so focus is dropped when one was used.
-pub(super) fn read_nav_keys(ctx: &egui::Context) -> NavInput {
+fn read_nav_keys(ctx: &egui::Context) -> NavInput {
     use egui::Key;
     let mut out = NavInput::default();
     // Enter belongs to whatever widget has keyboard focus (a button, a filter chip, a tile);
@@ -333,7 +333,7 @@ pub(super) fn apply_grid_keys(
 /// Applies this frame's keys to the selection of a list and returns the new primary index.
 /// Plain arrows move a single selection (a multi-selection collapses to the new primary, even
 /// at the edge of the list); Shift+arrows extend from the anchor; Ctrl/Cmd+A selects all.
-pub(super) fn apply_keys(
+fn apply_keys(
     input: &NavInput,
     sel: &mut Selection,
     primary: Option<usize>,

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What the visible rows of the timeline need to be drawn.
-pub(super) struct RowsView<'a> {
+struct RowsView<'a> {
     pub(super) tl: &'a TimelineState,
     pub(super) layout: &'a Layout,
     pub(super) marks: &'a HashMap<i64, FavMark>,
@@ -262,7 +262,7 @@ impl App {
     }
 
     /// Scrolls so that an item the keyboard moved to is in view.
-    pub(super) fn follow_keyboard_selection<R>(
+    fn follow_keyboard_selection<R>(
         &mut self,
         ui: &egui::Ui,
         out: &egui::scroll_area::ScrollAreaOutput<R>,
@@ -291,7 +291,7 @@ impl App {
     }
 
     /// What a click on tile `i` does: favorite it, change the selection or open it.
-    pub(super) fn click_timeline_item(&mut self, i: usize, ev: TileEvent, mods: ClickMods) {
+    fn click_timeline_item(&mut self, i: usize, ev: TileEvent, mods: ClickMods) {
         let items = Arc::clone(&self.tl.items);
         match self
             .tl
@@ -307,7 +307,7 @@ impl App {
         }
     }
 
-    pub(super) fn open_timeline_item(&mut self, i: usize) {
+    fn open_timeline_item(&mut self, i: usize) {
         if i < self.tl.items.len() {
             self.open_viewer_timeline(i);
         }

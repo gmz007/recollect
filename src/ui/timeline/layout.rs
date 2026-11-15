@@ -171,7 +171,7 @@ impl Layout {
             .min(len.saturating_sub(1))
     }
 
-    pub(super) fn step_unclamped(&self, cur: usize, len: usize, key: Nav) -> usize {
+    fn step_unclamped(&self, cur: usize, len: usize, key: Nav) -> usize {
         match key {
             Nav::Left => cur.saturating_sub(1),
             Nav::Right => (cur + 1).min(len.saturating_sub(1)),
@@ -195,7 +195,7 @@ impl Layout {
     }
 }
 
-pub(super) fn tiles_of(r: &Row) -> Option<(usize, usize)> {
+fn tiles_of(r: &Row) -> Option<(usize, usize)> {
     match *r {
         Row::Tiles { start, end } => Some((start, end)),
         Row::Header { .. } => None,

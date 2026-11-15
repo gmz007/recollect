@@ -117,7 +117,7 @@ pub(super) fn open(path: &Path, threads: usize) -> Result<Stream> {
 
 /// Tells the demuxer to drop every stream except `keep`, so no time is spent on audio or
 /// subtitle packets that would be thrown away anyway.
-pub(super) fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize) {
+fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize) {
     for i in 0..ictx.nb_streams() as usize {
         if i == keep {
             continue;
@@ -136,12 +136,12 @@ pub(super) fn discard_other_streams(ictx: &mut ff::format::context::Input, keep:
 }
 
 impl Stream {
-    pub(super) fn time_of(&self, ts: i64) -> f64 {
+    fn time_of(&self, ts: i64) -> f64 {
         stream_time(ts, self.start, self.tb, self.offset)
     }
 
     /// Records a packet's time, detecting backwards jumps of more than a few seconds.
-    pub(super) fn note_packet_time(&mut self, p: &ff::Packet) {
+    fn note_packet_time(&mut self, p: &ff::Packet) {
         let Some(ts) = p.pts().or(p.dts()) else {
             return;
         };
@@ -220,7 +220,7 @@ pub(super) fn packet_time(s: &Stream, p: &ff::Packet) -> Option<f64> {
     p.pts().or(p.dts()).map(|t| s.time_of(t))
 }
 
-pub(super) fn is_retryable(e: ff::Error) -> bool {
+fn is_retryable(e: ff::Error) -> bool {
     matches!(e, ff::Error::Other { errno } if errno == ff::ffi::EAGAIN)
 }
 

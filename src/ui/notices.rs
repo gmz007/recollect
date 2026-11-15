@@ -28,12 +28,12 @@ pub(super) enum NoticeAction {
 }
 
 impl Notices {
-    pub(super) const INFO_FOR: Duration = Duration::from_secs(5);
-    pub(super) const ERROR_FOR: Duration = Duration::from_secs(10);
+    const INFO_FOR: Duration = Duration::from_secs(5);
+    const ERROR_FOR: Duration = Duration::from_secs(10);
     /// More than this many pending messages are never useful.
     pub(super) const MAX: usize = 6;
 
-    pub(super) fn ttl(n: &Notice) -> Duration {
+    fn ttl(n: &Notice) -> Duration {
         if n.error {
             Self::ERROR_FOR
         } else {
@@ -45,7 +45,7 @@ impl Notices {
         self.push_with(text, error, now, None, None);
     }
 
-    pub(super) fn push_with(
+    fn push_with(
         &mut self,
         text: String,
         error: bool,
@@ -70,7 +70,7 @@ impl Notices {
         }
     }
 
-    pub(super) fn expire(&mut self, now: Instant) {
+    fn expire(&mut self, now: Instant) {
         self.items
             .retain(|n| now.saturating_duration_since(n.at) < Self::ttl(n));
     }
@@ -91,7 +91,7 @@ impl Notices {
     }
 
     /// Time until the next message disappears (to schedule a repaint).
-    pub(super) fn next_expiry(&self, now: Instant) -> Option<Duration> {
+    fn next_expiry(&self, now: Instant) -> Option<Duration> {
         self.items
             .iter()
             .map(|n| Self::ttl(n).saturating_sub(now.saturating_duration_since(n.at)))
@@ -153,7 +153,7 @@ impl App {
     /// Turns what the library reports into toasts: each failure once (also when the same
     /// message comes again), and folders that could not be reached once per finished run (by
     /// its counter, so a run too short to be seen running is reported too).
-    pub(super) fn report_status(&mut self) {
+    fn report_status(&mut self) {
         if self.status.error_seq != self.error_seq_seen {
             self.error_seq_seen = self.status.error_seq;
             if let Some(e) = self.status.last_error.clone() {

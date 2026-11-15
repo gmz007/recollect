@@ -234,7 +234,7 @@ pub(super) fn tile_menu(
 impl App {
     /// A right-click on tile `i` of the shown grid: a tile outside the selection becomes the
     /// selection; one inside it leaves the selection alone (the menu then acts on all of it).
-    pub(super) fn select_for_menu(&mut self, i: usize) {
+    fn select_for_menu(&mut self, i: usize) {
         let Some(id) = self.file_id_at(i) else {
             return;
         };
@@ -246,7 +246,7 @@ impl App {
     }
 
     /// Applies a choice from a tile's right-click menu to the selection it was opened on.
-    pub(super) fn apply_tile_menu(&mut self, i: usize, menu: TileMenu) {
+    fn apply_tile_menu(&mut self, i: usize, menu: TileMenu) {
         self.select_for_menu(i);
         self.bulk_action(match menu {
             TileMenu::Add(c) => BulkAction::AddToAlbum(c),
@@ -289,7 +289,7 @@ impl App {
     }
 
     /// The file id of item `i` of the shown list.
-    pub(super) fn file_id_at(&self, i: usize) -> Option<i64> {
+    fn file_id_at(&self, i: usize) -> Option<i64> {
         if self.searching() {
             self.res.hits.get(i).map(|h| h.file_id)
         } else {

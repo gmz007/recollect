@@ -164,7 +164,7 @@ pub(super) fn click_plan(event: TileEvent, mods: ClickMods, picking: bool) -> Cl
 }
 
 /// UV rectangle that crops a texture of `size` to its centred square.
-pub(super) fn square_uv(size: Vec2) -> Rect {
+fn square_uv(size: Vec2) -> Rect {
     let (w, h) = (size.x.max(1.0), size.y.max(1.0));
     let (u, v) = if w > h {
         ((1.0 - h / w) / 2.0, 0.0)

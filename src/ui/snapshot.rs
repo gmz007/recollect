@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// How old the cached library facts may get before a non-urgent refresh replaces them.
-pub(super) const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(500);
+const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(500);
 
 /// Cached library facts, refreshed a few times per second rather than every frame.
 #[derive(Default)]

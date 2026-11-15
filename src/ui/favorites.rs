@@ -33,7 +33,7 @@ pub(super) enum FavoriteKey {
 impl App {
     /// F with several items selected: favorite them all, or unfavorite them all if they
     /// already are.
-    pub(super) fn toggle_favorite_of_selection(&mut self) {
+    fn toggle_favorite_of_selection(&mut self) {
         let ids = self.selected_file_ids();
         let all_fav = self
             .listed()
@@ -92,7 +92,7 @@ impl App {
     /// Writes the marks into the lists. A list the viewer holds a snapshot of is left alone
     /// (copying it just for a flag could mean hundreds of thousands of items); the grids draw
     /// marks over their lists anyway, and the list is patched once the viewer is gone.
-    pub(super) fn patch_lists(&mut self) {
+    fn patch_lists(&mut self) {
         let marks = &self.fav_marks;
         if marks.is_empty() {
             return;

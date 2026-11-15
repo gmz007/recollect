@@ -18,7 +18,7 @@ pub(super) enum BulkAction {
 }
 
 /// Buttons on the accent colour: light text on a faint veil.
-pub(super) fn veil_buttons(ui: &mut egui::Ui, pal: Palette) {
+fn veil_buttons(ui: &mut egui::Ui, pal: Palette) {
     let v = ui.visuals_mut();
     for w in [
         &mut v.widgets.inactive,

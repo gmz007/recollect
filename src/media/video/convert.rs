@@ -83,7 +83,7 @@ impl Converter {
 /// Largest sample aspect ratio (and its inverse) taken at face value. Real anamorphic video
 /// stays within about 0.5 to 2.7; anything beyond is a damaged or hostile header and would
 /// ask the scaler for an enormous frame.
-pub(super) const MAX_SAMPLE_ASPECT: f64 = 4.0;
+const MAX_SAMPLE_ASPECT: f64 = 4.0;
 
 /// Display size (sample aspect ratio applied) and even output size whose shorter side is at
 /// most `min_side`, for a `w`x`h` frame. An implausible ratio is treated as square pixels.
@@ -102,7 +102,7 @@ pub(super) fn frame_sizes(w: u32, h: u32, sar: f64, min_side: u32) -> ((u32, u32
 
 /// Clockwise rotation (0/90/180/270) needed to display the frame upright, from the
 /// display matrix (same math as libavutil's `av_display_rotation_get`).
-pub(super) fn rotation_of(f: &ff::frame::Video) -> u32 {
+fn rotation_of(f: &ff::frame::Video) -> u32 {
     let Some(sd) = f.side_data(ff::frame::side_data::Type::DisplayMatrix) else {
         return 0;
     };

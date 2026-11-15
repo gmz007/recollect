@@ -8,9 +8,9 @@ use crate::ui::App;
 use std::time::{Duration, Instant};
 
 /// Reload interval while a scan or indexing run keeps adding files.
-pub(super) const LIVE_RELOAD: Duration = Duration::from_secs(10);
+const LIVE_RELOAD: Duration = Duration::from_secs(10);
 /// Wait before loading the same view again after a failed load.
-pub(super) const RETRY_AFTER: Duration = Duration::from_secs(5);
+const RETRY_AFTER: Duration = Duration::from_secs(5);
 
 impl App {
     /// Per-frame: starts reloads when what is shown or the library changed, applies results.

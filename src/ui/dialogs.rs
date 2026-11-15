@@ -23,7 +23,7 @@ pub(super) struct Dialogs {
 impl Dialogs {
     /// Whether a question or the help sheet is open (the Settings sheet is not counted: it
     /// closes after them).
-    pub(super) fn any_open(&self) -> bool {
+    fn any_open(&self) -> bool {
         self.new_album.is_some()
             || self.rename_album.is_some()
             || self.delete_album.is_some()

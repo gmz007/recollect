@@ -90,7 +90,7 @@ pub(super) struct RenameAlbum {
 }
 
 /// "1 item" / "3 items".
-pub(super) fn items_text(n: usize) -> String {
+fn items_text(n: usize) -> String {
     if n == 1 {
         "1 item".to_string()
     } else {

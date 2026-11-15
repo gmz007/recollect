@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 pub(super) const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Files asked for by one search.
-pub(super) const SEARCH_LIMIT: usize = 300;
+const SEARCH_LIMIT: usize = 300;
 
 /// Where the tiles of the results grid go at the current width.
 struct ResultsMetrics {
@@ -266,7 +266,7 @@ impl App {
     }
 
     /// Draws one search result and records what the user did to it.
-    pub(super) fn result_tile(
+    fn result_tile(
         &mut self,
         ui: &mut egui::Ui,
         hit: &SearchHit,
@@ -302,7 +302,7 @@ impl App {
     }
 
     /// What a click on result `i` does: favorite it, change the selection or open it.
-    pub(super) fn click_result(
+    fn click_result(
         &mut self,
         results: &[SearchHit],
         i: usize,

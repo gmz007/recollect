@@ -8,7 +8,7 @@ use crate::ui::style::{self, icons};
 use egui::{Pos2, Rect, RichText, Sense, Vec2};
 
 /// Height of the viewer's toolbar row.
-pub(super) const BAR_H: f32 = 34.0;
+const BAR_H: f32 = 34.0;
 
 /// Whether the toolbar buttons carry a word next to their icon: only when the window is wide
 /// enough (narrower windows show the icons alone, with tooltips).
@@ -139,7 +139,7 @@ impl Viewer {
 
     /// The buttons on the right of the toolbar, laid out right to left. With `text`, each has a
     /// short word next to its icon.
-    pub(super) fn right_buttons(
+    fn right_buttons(
         &mut self,
         ui: &mut egui::Ui,
         albums: &[AlbumInfo],
@@ -230,7 +230,7 @@ impl Viewer {
     }
 
     /// The accent button that plays the current video from the chosen moment.
-    pub(super) fn play_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    fn play_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let pal = style::Palette::of(ui.ctx());
         let e = self.current().clone();
         ui.add_space(8.0);
@@ -252,7 +252,7 @@ impl Viewer {
         }
     }
 
-    pub(super) fn favorite_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>, text: bool) {
+    fn favorite_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>, text: bool) {
         let e = self.current();
         let pal = style::Palette::of(ui.ctx());
         let (icon, label, short, color) = if e.favorite {

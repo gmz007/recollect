@@ -46,7 +46,7 @@ pub(super) fn standard_folders() -> Vec<(String, PathBuf)> {
 
 /// The `candidates` that are not in the library yet: not added themselves and not inside a
 /// folder that is.
-pub(super) fn folder_suggestions(
+fn folder_suggestions(
     candidates: Vec<(String, PathBuf)>,
     added: &[PathBuf],
 ) -> Vec<(String, PathBuf)> {
@@ -143,7 +143,7 @@ impl App {
         }
     }
 
-    pub(super) fn stop_folder_dialog(&mut self, ctx: &egui::Context) {
+    fn stop_folder_dialog(&mut self, ctx: &egui::Context) {
         let Some(s) = self.dialogs.stop_folder.clone() else {
             return;
         };
@@ -176,7 +176,7 @@ impl App {
 
 /// What the "Add a folder" dialog asked for in one frame.
 #[derive(Debug, Default)]
-pub(super) struct AddFolderOutcome {
+struct AddFolderOutcome {
     pub(super) chosen: Option<PathBuf>,
     /// The typed text is not a usable folder path.
     pub(super) bad_path: bool,
@@ -191,7 +191,7 @@ enum TypedFolder {
 }
 
 /// The contents of the "Add a folder" window.
-pub(super) fn add_folder_body(
+fn add_folder_body(
     ui: &mut egui::Ui,
     typed: &mut String,
     suggestions: &[(String, PathBuf)],

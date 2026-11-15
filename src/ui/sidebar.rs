@@ -12,7 +12,7 @@ use egui_material_icons::MaterialIcon;
 
 /// One line of the activity card: what is happening in plain words and, when it is known, how
 /// far along it is (0 to 1).
-pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
+fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
     Some(match a {
         Activity::Idle => return None,
         Activity::Downloading { done, total, .. } => (
@@ -429,7 +429,7 @@ impl App {
     }
 
     /// Marks the files that couldn't be opened for another try and starts looking at them.
-    pub(super) fn retry_failed(&mut self) {
+    fn retry_failed(&mut self) {
         match self.lib.retry_errors() {
             Ok(_) => self.start_indexing(),
             Err(_) => self.notify_error("Couldn't try those files again. Please try in a moment."),

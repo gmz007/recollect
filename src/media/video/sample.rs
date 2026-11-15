@@ -109,7 +109,7 @@ fn finish_sampling(
     Ok(st.info)
 }
 
-pub(super) struct SampleState {
+struct SampleState {
     pub(super) conv: Converter,
     pub(super) cfg: SamplerConfig,
     pub(super) next_t: f64,
@@ -122,7 +122,7 @@ impl SampleState {
         t + 1e-6 >= self.next_t || self.emitted == 0
     }
 
-    pub(super) fn emit(
+    fn emit(
         &mut self,
         t: f64,
         f: &ff::frame::Video,
@@ -143,7 +143,7 @@ impl SampleState {
     }
 
     /// Sends one packet and emits whichever decoded frames are due (and before `end`).
-    pub(super) fn decode_due_until(
+    fn decode_due_until(
         &mut self,
         s: &mut Stream,
         p: Option<&ff::Packet>,
@@ -170,7 +170,7 @@ impl SampleState {
         Ok(())
     }
 
-    pub(super) fn decode_due(
+    fn decode_due(
         &mut self,
         s: &mut Stream,
         p: &ff::Packet,
@@ -179,7 +179,7 @@ impl SampleState {
         self.decode_due_until(s, Some(p), None, on_frame)
     }
 
-    pub(super) fn finish_stream(
+    fn finish_stream(
         &mut self,
         s: &mut Stream,
         on_frame: &mut dyn FnMut(Frame) -> Result<()>,
@@ -189,7 +189,7 @@ impl SampleState {
         Ok(())
     }
 
-    pub(super) fn process_gop(
+    fn process_gop(
         &mut self,
         s: &mut Stream,
         gop: &[ff::Packet],

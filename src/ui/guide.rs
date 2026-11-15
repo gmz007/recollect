@@ -176,12 +176,7 @@ fn empty_text(ui: &mut egui::Ui, icon: MaterialIcon, text: &str, button: &str) -
 
 /// The screen for a view with nothing in it: an icon, one sentence and one main button.
 /// Returns true when the button was clicked.
-pub(super) fn empty_state(
-    ui: &mut egui::Ui,
-    icon: MaterialIcon,
-    sentence: &[Part<'_>],
-    button: &str,
-) -> bool {
+fn empty_state(ui: &mut egui::Ui, icon: MaterialIcon, sentence: &[Part<'_>], button: &str) -> bool {
     let pal = Palette::of(ui.ctx());
     let (job, plain) = sentence_job(ui, sentence, &pal);
     let mut clicked = false;
@@ -465,7 +460,7 @@ impl App {
     }
 
     /// Runs a search the user picked from the help (or any text) right away.
-    pub(super) fn search_for(&mut self, text: &str) {
+    fn search_for(&mut self, text: &str) {
         self.query = text.to_string();
         self.search_now();
     }
@@ -596,7 +591,7 @@ impl Tip {
 
 impl App {
     /// The tip to show now, if any. Only one at a time, and only on a grid with photos in it.
-    pub(super) fn pending_tip(&self) -> Option<Tip> {
+    fn pending_tip(&self) -> Option<Tip> {
         if self.tl.grid.picking || !self.tl.loaded || self.tl.items.is_empty() {
             return None;
         }
@@ -640,7 +635,7 @@ impl App {
         }
     }
 
-    pub(super) fn dismiss_tip(&mut self, tip: Tip) {
+    fn dismiss_tip(&mut self, tip: Tip) {
         let id = tip.id().to_string();
         self.change_settings(|s| {
             if !s.tips_dismissed.contains(&id) {

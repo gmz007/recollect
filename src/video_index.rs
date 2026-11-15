@@ -254,7 +254,7 @@ struct OpenSegment {
     sum: Vec<f32>,
 }
 
-pub(crate) struct Merger {
+struct Merger {
     tau: f32,
     interval: f64,
     open: Option<OpenSegment>,
@@ -322,7 +322,7 @@ impl Merger {
 
 /// Merges a complete list of frames.
 #[cfg(test)]
-pub(crate) fn merge_segments(
+fn merge_segments(
     frames: &[(f64, Vec<f32>)],
     duration: f64,
     interval: f64,

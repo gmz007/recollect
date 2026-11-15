@@ -18,12 +18,7 @@ pub(super) struct Shown {
 impl Viewer {
     /// Asks for what the canvas needs (and forgets what it no longer wants) and picks the
     /// texture to draw.
-    pub(super) fn pick_texture(
-        &self,
-        previews: &mut Previews,
-        thumbs: &mut ThumbCache,
-        fit: u32,
-    ) -> Shown {
+    fn pick_texture(&self, previews: &mut Previews, thumbs: &mut ThumbCache, fit: u32) -> Shown {
         let e = &self.current;
         // The neighbours are prefetched; the item on screen is asked for urgently every frame,
         // so it is decoded before them even if they were queued first (the fitted preview
@@ -165,7 +160,7 @@ impl Viewer {
 /// moved by `pan`, which is clamped so no more than the overflow can be dragged past the
 /// centre. Without it the picture is fitted to the area (never larger than the area) and
 /// `pan` is clamped too, so only `zoomed` decides whether it moves the picture.
-pub(super) fn picture_rect(
+fn picture_rect(
     area: Rect,
     native: Vec2,
     full: Option<Vec2>,
@@ -209,7 +204,7 @@ fn paint_status(ui: &mut egui::Ui, area: Rect, loading: bool, failed: bool) {
 }
 
 /// A round button with a chevron; `dir` is -1 for "previous" and 1 for "next".
-pub(super) fn nav_button(ui: &mut egui::Ui, rect: Rect, label: &str, dir: f32) -> bool {
+fn nav_button(ui: &mut egui::Ui, rect: Rect, label: &str, dir: f32) -> bool {
     let resp = ui.interact(
         rect,
         ui.make_persistent_id(("viewer-nav", label)),
