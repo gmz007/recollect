@@ -90,6 +90,20 @@ fn segment(
         .clicked()
 }
 
+/// What happened in the search field's text box this frame.
+#[derive(Default)]
+struct SearchEdit {
+    has_focus: bool,
+    cleared: bool,
+}
+
+/// What was clicked on a toast.
+#[derive(Default)]
+struct ToastClicks {
+    dismiss: bool,
+    retry: Option<NoticeAction>,
+}
+
 impl App {
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
@@ -172,61 +186,71 @@ impl App {
             })
             .corner_radius(radius)
             .inner_margin(Margin::symmetric(10, 2));
-        let mut cleared = false;
-        let mut has_focus = false;
+        let mut edit = SearchEdit::default();
         let shown = frame.show(ui, |ui| {
             ui.set_width(width - 20.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(style::icon_text(icons::ICON_SEARCH, 20.0).color(pal.text_secondary));
-                let edit_w = width - 20.0 - 28.0 - if self.query.is_empty() { 0.0 } else { 30.0 };
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .id(id)
-                        .frame(egui::Frame::NONE)
-                        .hint_text(SEARCH_HINT)
-                        // Typed text, placeholder and cursor share one vertical centre
-                        // with the search icon.
-                        .align(egui::Align2::LEFT_CENTER)
-                        .min_size(Vec2::new(0.0, 30.0))
-                        .desired_width(edit_w),
-                );
-                resp.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Search your photos")
-                });
-                if resp.changed() {
-                    self.query_changed_at = Some(Instant::now());
-                }
-                // (Asked of the memory, like the frame's border: `Response::has_focus` is also
-                // false when the window itself is not the active one.)
-                has_focus = ui.memory(|m| m.has_focus(id));
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.search_now();
-                }
-                // Tab moves into the suggestions under the field, when they are showing.
-                if resp.lost_focus()
-                    && self.search_help.dropdown.is_some()
-                    && ui.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.any())
-                {
-                    self.search_help.want_chips = true;
-                }
-                if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
-                    resp.request_focus();
-                }
-                if !self.query.is_empty()
-                    && style::icon_button(ui, icons::ICON_CLOSE, "Clear search").clicked()
-                {
-                    cleared = true;
-                }
-            });
+            ui.horizontal(|ui| edit = self.search_edit_row(ui, id, width));
         });
         self.search_help.field = Some(shown.response.rect);
-        self.search_help.focused = has_focus;
-        if has_focus {
+        self.search_help.focused = edit.has_focus;
+        if edit.has_focus {
             self.search_help.suppressed = false;
         }
-        if cleared {
+        if edit.cleared {
             self.clear_search();
+        }
+    }
+
+    /// The icon, the text box and the clear button inside the search field's frame.
+    fn search_edit_row(&mut self, ui: &mut egui::Ui, id: egui::Id, width: f32) -> SearchEdit {
+        let pal = Palette::of(ui.ctx());
+        let mut edit = SearchEdit::default();
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(style::icon_text(icons::ICON_SEARCH, 20.0).color(pal.text_secondary));
+        let edit_w = width - 20.0 - 28.0 - if self.query.is_empty() { 0.0 } else { 30.0 };
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut self.query)
+                .id(id)
+                .frame(egui::Frame::NONE)
+                .hint_text(SEARCH_HINT)
+                // Typed text, placeholder and cursor share one vertical centre
+                // with the search icon.
+                .align(egui::Align2::LEFT_CENTER)
+                .min_size(Vec2::new(0.0, 30.0))
+                .desired_width(edit_w),
+        );
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Search your photos")
+        });
+        if resp.changed() {
+            self.query_changed_at = Some(Instant::now());
+        }
+        // (Asked of the memory, like the frame's border: `Response::has_focus` is also
+        // false when the window itself is not the active one.)
+        edit.has_focus = ui.memory(|m| m.has_focus(id));
+        self.search_field_keys(ui, &resp);
+        if !self.query.is_empty()
+            && style::icon_button(ui, icons::ICON_CLOSE, "Clear search").clicked()
+        {
+            edit.cleared = true;
+        }
+        edit
+    }
+
+    /// Enter searches now, Tab moves to the suggestions and Ctrl/Cmd+F focuses the field.
+    fn search_field_keys(&mut self, ui: &egui::Ui, resp: &egui::Response) {
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.search_now();
+        }
+        // Tab moves into the suggestions under the field, when they are showing.
+        if resp.lost_focus()
+            && self.search_help.dropdown.is_some()
+            && ui.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.any())
+        {
+            self.search_help.want_chips = true;
+        }
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+            resp.request_focus();
         }
     }
 
@@ -298,7 +322,6 @@ impl App {
 
     /// Title, count and the compact controls above the grid of a timeline view.
     pub(super) fn view_header(&mut self, ui: &mut egui::Ui) {
-        let pal = Palette::of(ui.ctx());
         let title = self.view_title();
         let subtitle = count_text(self.tl.n_photos, self.tl.n_videos);
         let album = match self.tl.view {
@@ -306,93 +329,119 @@ impl App {
             _ => None,
         };
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&title).text_style(egui::TextStyle::Heading));
-                    if let Some(id) = album {
-                        self.album_actions(ui, id);
-                    }
-                    if self.tl.awaiting.is_some() {
-                        ui.spinner();
-                    }
-                });
-                if !subtitle.is_empty() {
-                    ui.label(RichText::new(subtitle).color(pal.text_secondary));
-                } else if self.tl.error.is_some() {
-                    ui.colored_label(
-                        pal.error,
-                        "Couldn't load your photos. Please try again in a moment.",
-                    );
-                }
-            });
+            self.view_heading(ui, &title, &subtitle, album);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(style::icon_text(icons::ICON_IMAGE, 22.0).color(pal.text_secondary));
-                style::slider_scope(ui, |ui| {
-                    let r = ui
-                        .add(
-                            egui::Slider::new(&mut self.tl.tile_size, 96.0..=320.0)
-                                .show_value(false)
-                                .trailing_fill(true),
-                        )
-                        .on_hover_text("Thumbnail size");
-                    let v = f64::from(self.tl.tile_size);
-                    r.widget_info(|| egui::WidgetInfo::slider(true, v, "Thumbnail size"));
-                });
-                ui.label(style::icon_text(icons::ICON_IMAGE, 14.0).color(pal.text_secondary));
-                ui.label(RichText::new("Size").color(pal.text_secondary));
-                ui.add_space(8.0);
-                if self.tl.headers() {
-                    let label = if self.tl.newest_first {
-                        "Newest first"
-                    } else {
-                        "Oldest first"
-                    };
-                    style::chip(ui, &format!("Sort: {label}"), label, |ui| {
-                        ui.selectable_value(&mut self.tl.newest_first, true, "Newest first");
-                        ui.selectable_value(&mut self.tl.newest_first, false, "Oldest first");
-                    });
-                    let current = match self.tl.group {
-                        Group::Day => "Days",
-                        Group::Month => "Months",
-                        Group::Year => "Years",
-                    };
-                    let job = style::dropdown_job(ui, current);
-                    let r = ui.menu_button(job, |ui| {
-                        for (g, name) in [
-                            (Group::Day, "Days"),
-                            (Group::Month, "Months"),
-                            (Group::Year, "Years"),
-                        ] {
-                            ui.selectable_value(&mut self.tl.group, g, name);
-                        }
-                    });
-                    r.response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::Button, true, current)
-                    });
-                }
+                self.view_controls(ui);
             });
         });
         ui.add_space(8.0);
     }
 
-    /// Header of the search results: what was asked, how many were found, and chips that
-    /// narrow and order them. (The photo/video filter lives in the top bar.)
-    pub(super) fn results_header(&mut self, ui: &mut egui::Ui) {
+    /// The view's title with its actions, and under it the count (or the load error).
+    fn view_heading(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str, album: Option<i64>) {
         let pal = Palette::of(ui.ctx());
-        let title = match &self.res.current {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
+                if let Some(id) = album {
+                    self.album_actions(ui, id);
+                }
+                if self.tl.awaiting.is_some() {
+                    ui.spinner();
+                }
+            });
+            if !subtitle.is_empty() {
+                ui.label(RichText::new(subtitle).color(pal.text_secondary));
+            } else if self.tl.error.is_some() {
+                ui.colored_label(
+                    pal.error,
+                    "Couldn't load your photos. Please try again in a moment.",
+                );
+            }
+        });
+    }
+
+    /// The thumbnail size slider and, where the view has date headers, the sort and grouping
+    /// choices (laid out right to left).
+    fn view_controls(&mut self, ui: &mut egui::Ui) {
+        let pal = Palette::of(ui.ctx());
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(style::icon_text(icons::ICON_IMAGE, 22.0).color(pal.text_secondary));
+        style::slider_scope(ui, |ui| {
+            let r = ui
+                .add(
+                    egui::Slider::new(&mut self.tl.tile_size, 96.0..=320.0)
+                        .show_value(false)
+                        .trailing_fill(true),
+                )
+                .on_hover_text("Thumbnail size");
+            let v = f64::from(self.tl.tile_size);
+            r.widget_info(|| egui::WidgetInfo::slider(true, v, "Thumbnail size"));
+        });
+        ui.label(style::icon_text(icons::ICON_IMAGE, 14.0).color(pal.text_secondary));
+        ui.label(RichText::new("Size").color(pal.text_secondary));
+        ui.add_space(8.0);
+        if self.tl.headers() {
+            self.sort_and_group_choices(ui);
+        }
+    }
+
+    /// The "Sort" chip and the grouping menu of a view with date headers.
+    fn sort_and_group_choices(&mut self, ui: &mut egui::Ui) {
+        let label = if self.tl.newest_first {
+            "Newest first"
+        } else {
+            "Oldest first"
+        };
+        style::chip(ui, &format!("Sort: {label}"), label, |ui| {
+            ui.selectable_value(&mut self.tl.newest_first, true, "Newest first");
+            ui.selectable_value(&mut self.tl.newest_first, false, "Oldest first");
+        });
+        let current = match self.tl.group {
+            Group::Day => "Days",
+            Group::Month => "Months",
+            Group::Year => "Years",
+        };
+        let job = style::dropdown_job(ui, current);
+        let r = ui.menu_button(job, |ui| {
+            for (g, name) in [
+                (Group::Day, "Days"),
+                (Group::Month, "Months"),
+                (Group::Year, "Years"),
+            ] {
+                ui.selectable_value(&mut self.tl.group, g, name);
+            }
+        });
+        r.response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, current));
+    }
+
+    /// What was asked, as the heading of the results.
+    fn results_title(&self) -> String {
+        match &self.res.current {
             Some(super::Query::Similar { label, .. }) => format!("Photos similar to {label}"),
             Some(super::Query::Text(q)) => format!("Results for “{q}”"),
             None => format!("Results for “{}”", self.query.trim()),
-        };
+        }
+    }
+
+    /// "12 photos and 3 videos" for the current results.
+    fn results_count_text(&self) -> String {
         let photos = self
             .res
             .hits
             .iter()
             .filter(|h| h.kind == MediaKind::Image)
             .count();
-        let videos = self.res.hits.len() - photos;
-        let subtitle = count_text(photos, videos);
+        count_text(photos, self.res.hits.len() - photos)
+    }
+
+    /// Header of the search results: what was asked, how many were found, and chips that
+    /// narrow and order them. (The photo/video filter lives in the top bar.)
+    pub(super) fn results_header(&mut self, ui: &mut egui::Ui) {
+        let pal = Palette::of(ui.ctx());
+        let title = self.results_title();
+        let subtitle = self.results_count_text();
         let year = chrono::Datelike::year(&self.today());
         let mut changed = false;
         ui.horizontal(|ui| {
@@ -505,8 +554,7 @@ impl App {
             return;
         };
         let pal = Palette::of(ctx);
-        let mut dismiss = false;
-        let mut retry = None;
+        let mut clicks = ToastClicks::default();
         egui::Area::new(egui::Id::unique("toast"))
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
             .order(egui::Order::Foreground)
@@ -519,41 +567,55 @@ impl App {
                     .shadow(ctx.global_style().visuals.popup_shadow)
                     .show(ui, |ui| {
                         ui.set_max_width(520.0);
-                        ui.horizontal(|ui| {
-                            let (icon, color) = if error {
-                                (icons::ICON_ERROR, pal.error)
-                            } else {
-                                (icons::ICON_CHECK_CIRCLE, pal.accent)
-                            };
-                            ui.label(style::icon_text(icon, 22.0).color(color));
-                            ui.vertical(|ui| {
-                                ui.label(&text);
-                                if let Some(a) = action
-                                    && ui.button("Try again").clicked()
-                                {
-                                    retry = Some(a);
-                                }
-                                if let Some(d) = &details {
-                                    egui::CollapsingHeader::new("Details")
-                                        .id_salt("toast-details")
-                                        .show(ui, |ui| {
-                                            ui.label(RichText::new(d).small());
-                                        });
-                                }
-                            });
-                            if style::icon_button(ui, icons::ICON_CLOSE, "Dismiss").clicked() {
-                                dismiss = true;
-                            }
-                        });
+                        clicks = toast_contents(ui, &pal, &text, error, details.as_deref(), action);
                     });
             });
-        if dismiss || retry.is_some() {
+        if clicks.dismiss || clicks.retry.is_some() {
             self.notices.dismiss_current();
         }
-        if let Some(a) = retry {
+        if let Some(a) = clicks.retry {
             self.retry(a);
         }
     }
+}
+
+/// The icon, message, "Try again" button, details and close button of a toast.
+fn toast_contents(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    text: &str,
+    error: bool,
+    details: Option<&str>,
+    action: Option<NoticeAction>,
+) -> ToastClicks {
+    let mut clicks = ToastClicks::default();
+    ui.horizontal(|ui| {
+        let (icon, color) = if error {
+            (icons::ICON_ERROR, pal.error)
+        } else {
+            (icons::ICON_CHECK_CIRCLE, pal.accent)
+        };
+        ui.label(style::icon_text(icon, 22.0).color(color));
+        ui.vertical(|ui| {
+            ui.label(text);
+            if let Some(a) = action
+                && ui.button("Try again").clicked()
+            {
+                clicks.retry = Some(a);
+            }
+            if let Some(d) = details {
+                egui::CollapsingHeader::new("Details")
+                    .id_salt("toast-details")
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(d).small());
+                    });
+            }
+        });
+        if style::icon_button(ui, icons::ICON_CLOSE, "Dismiss").clicked() {
+            clicks.dismiss = true;
+        }
+    });
+    clicks
 }
 
 impl Notices {

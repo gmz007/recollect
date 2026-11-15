@@ -1,15 +1,16 @@
 //! Drawing the grid of the current view and handling clicks and keys in it.
 
-use super::dates::{date_of, fmt_taken, header_text, thousands, until_next_midnight};
+use super::dates::{MonthEntry, date_of, fmt_taken, header_text, thousands, until_next_midnight};
 use super::layout::{HEADER_H, Layout, Row, reveal};
 use super::{TimelineState, View, file_name, thumb_key};
 use crate::media::MediaKind;
 use crate::store::db::AlbumInfo;
+use crate::ui::grid::grid_scroll_area;
 use crate::ui::selection::{self, ClickMods};
 use crate::ui::style::{self, GAP};
 use crate::ui::tiles::{self, Tile, TileEvent, TileMark};
 use crate::ui::workers::ThumbCache;
-use crate::ui::{App, ClickOutcome, FavMark, GridEvents, albums, fmt_time, marked, take_plain_key};
+use crate::ui::{App, ClickOutcome, FavMark, GridEvents, albums, fmt_time, marked};
 use chrono::Datelike;
 use egui::{RichText, Sense, Vec2};
 use std::collections::HashMap;
@@ -94,20 +95,33 @@ impl RowsView<'_> {
             .favorite(marked(self.marks, item.file_id, item.favorite))
             .selectable(mark, picking);
         let id = ui.make_persistent_id(("tile", i));
-        let o = tiles::show(ui, thumbs, id, rect, &tile);
-        if let Some((ev, mods)) = o.event {
-            events.clicked = Some((i, ev, mods));
-        }
-        if o.resp.secondary_clicked() {
-            events.right_clicked = Some(i);
-        }
+        let out = tiles::show(ui, thumbs, id, rect, &tile);
         let in_album = matches!(tl.view, View::Album(_));
-        o.resp.context_menu(|ui| {
-            if let Some(m) = albums::tile_menu(ui, self.albums, in_album) {
-                events.menu = Some((i, m));
-            }
-        });
+        events.record(i, &out, |ui| albums::tile_menu(ui, self.albums, in_album));
     }
+}
+
+/// What was clicked in the "Jump to date" list.
+#[derive(Default)]
+struct DateClicks {
+    /// The first item to scroll to.
+    jump: Option<usize>,
+    /// The year whose months are shown or hidden.
+    toggle: Option<i32>,
+}
+
+/// One indented month of the "Jump to date" list; true when it was clicked.
+fn month_row(ui: &mut egui::Ui, m: &MonthEntry) -> bool {
+    let name = u8::try_from(m.month)
+        .ok()
+        .and_then(|n| chrono::Month::try_from(n).ok())
+        .map_or("", |m| m.name());
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.selectable_label(false, format!("{name} ({})", thousands(m.count)))
+            .clicked()
+    })
+    .inner
 }
 
 impl App {
@@ -128,54 +142,43 @@ impl App {
         if self.tl.view == View::RecentlyAdded || self.tl.dates.is_empty() {
             return;
         }
-        let mut jump = None;
-        let mut toggle = None;
+        let mut clicks = DateClicks::default();
         egui::CollapsingHeader::new("Jump to date")
             .id_salt("jump-to-date")
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("dates")
                     .max_height(260.0)
-                    .show(ui, |ui| {
-                        for y in &self.tl.dates {
-                            let label = format!("{} ({})", y.year, thousands(y.count));
-                            if ui
-                                .selectable_label(self.tl.top_year == Some(y.year), label)
-                                .clicked()
-                            {
-                                jump = Some(y.first);
-                                toggle = Some(y.year);
-                            }
-                            if self.tl.expanded.contains(&y.year) {
-                                for m in &y.months {
-                                    let name = u8::try_from(m.month)
-                                        .ok()
-                                        .and_then(|n| chrono::Month::try_from(n).ok())
-                                        .map_or("", |m| m.name());
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(14.0);
-                                        if ui
-                                            .selectable_label(
-                                                false,
-                                                format!("{name} ({})", thousands(m.count)),
-                                            )
-                                            .clicked()
-                                        {
-                                            jump = Some(m.first);
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                    });
+                    .show(ui, |ui| self.date_rows(ui, &mut clicks));
             });
-        if let Some(y) = toggle
+        if let Some(y) = clicks.toggle
             && !self.tl.expanded.remove(&y)
         {
             self.tl.expanded.insert(y);
         }
-        if let Some(i) = jump {
+        if let Some(i) = clicks.jump {
             self.tl.pending = Some((i, true));
+        }
+    }
+
+    /// One row per year, followed by its months while the year is expanded.
+    fn date_rows(&self, ui: &mut egui::Ui, clicks: &mut DateClicks) {
+        for y in &self.tl.dates {
+            let label = format!("{} ({})", y.year, thousands(y.count));
+            if ui
+                .selectable_label(self.tl.top_year == Some(y.year), label)
+                .clicked()
+            {
+                clicks.jump = Some(y.first);
+                clicks.toggle = Some(y.year);
+            }
+            if self.tl.expanded.contains(&y.year) {
+                for m in &y.months {
+                    if month_row(ui, m) {
+                        clicks.jump = Some(m.first);
+                    }
+                }
+            }
         }
     }
 
@@ -191,6 +194,18 @@ impl App {
             });
             return;
         }
+        self.timeline_header(ui);
+        if self.tl.items.is_empty() {
+            if self.tl.awaiting.is_none() {
+                self.timeline_empty_state(ui);
+            }
+            return;
+        }
+        self.timeline_rows(ui);
+    }
+
+    /// The selection bar or view header, the tip and the "On this day" strip.
+    fn timeline_header(&mut self, ui: &mut egui::Ui) {
         if !self.selection_bar_ui(ui) {
             self.view_header(ui);
         }
@@ -202,22 +217,15 @@ impl App {
                 .request_repaint_after(until_next_midnight(now) + Duration::from_secs(1));
             self.on_this_day_strip(ui);
         }
-        if self.tl.items.is_empty() {
-            if self.tl.awaiting.is_none() {
-                self.timeline_empty_state(ui);
-            }
-            return;
-        }
+    }
+
+    /// The scrolling grid of items and what the user did in it.
+    fn timeline_rows(&mut self, ui: &mut egui::Ui) {
         self.tl.grid.shown = true;
         let width = ui.available_width() - style::SCROLLBAR_ALLOWANCE;
         self.tl.ensure_layout(width);
         self.tl.resolve_pending();
-        let mut area = egui::ScrollArea::vertical()
-            .id_salt("timeline")
-            .auto_shrink([false, false]);
-        if let Some(y) = self.tl.grid.scroll_to.take() {
-            area = area.vertical_scroll_offset(y);
-        }
+        let area = grid_scroll_area("timeline", &mut self.tl.grid.scroll_to);
         let Some(layout) = self.tl.layout.as_ref() else {
             return;
         };
@@ -244,12 +252,7 @@ impl App {
         if let Some((i, ev, mods)) = events.clicked {
             self.click_timeline_item(i, ev, mods);
         }
-        if let Some(i) = events.right_clicked {
-            self.select_for_menu(i);
-        }
-        if let Some((i, m)) = events.menu {
-            self.apply_tile_menu(i, m);
-        }
+        self.apply_menu_events(&mut events);
         // Applying a scroll offset needs one more frame to take effect.
         if self.tl.grid.scroll_to.is_some() {
             ui.ctx().request_repaint();
@@ -295,8 +298,7 @@ impl App {
         {
             ClickOutcome::Favorite => {
                 let it = &items[i];
-                let fav = !marked(&self.fav_marks, it.file_id, it.favorite);
-                self.set_favorite(it.file_id, fav);
+                self.toggle_favorite(it.file_id, it.favorite);
             }
             ClickOutcome::Selected => {}
             ClickOutcome::Open => self.open_timeline_item(i),
@@ -319,15 +321,10 @@ impl App {
         if !grid_was_shown || self.tl.items.is_empty() || self.keys_blocked(ctx) {
             return;
         }
-        if take_plain_key(ctx, egui::Key::F) {
-            if self.tl.grid.sel.is_multi() {
-                self.toggle_favorite_of_selection();
-            } else if let Some(item) = self.tl.grid.selected.and_then(|i| self.tl.items.get(i)) {
-                let id = item.file_id;
-                let fav = !marked(&self.fav_marks, id, item.favorite);
-                self.set_favorite(id, fav);
-            }
-        }
+        let multi = self.tl.grid.sel.is_multi();
+        let primary = self.tl.grid.selected.and_then(|i| self.tl.items.get(i));
+        let primary = primary.map(|it| (it.file_id, it.favorite));
+        self.favorite_key(ctx, multi, primary);
         let input = selection::read_nav_keys(ctx);
         let items = Arc::clone(&self.tl.items);
         let len = items.len();

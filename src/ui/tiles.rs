@@ -202,6 +202,36 @@ pub(super) fn show(
     let resp = ui.interact(rect, id, Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
     let small = rect.width() < 72.0;
+    let (circle, star) = interact_zones(ui, id, rect, tile, small);
+    describe_zones(tile, &resp, &circle, &star);
+
+    if ui.is_rect_visible(rect) {
+        paint(ui, thumbs, rect, tile, hovered, small, &pal);
+    }
+
+    let event = click_event(ui, &resp, &circle, &star);
+    let over_control = (tile.selectable && circle.hovered()) || star.hovered();
+    if hovered && (over_control || resp.hovered()) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let resp = if over_control {
+        resp
+    } else {
+        resp.on_hover_ui(|ui| {
+            ui.label(tile.tip.map_or_else(|| (tile.name)(), |tip| tip()));
+        })
+    };
+    TileOut { resp, event }
+}
+
+/// The areas of the selection circle and of the star.
+fn interact_zones(
+    ui: &egui::Ui,
+    id: egui::Id,
+    rect: Rect,
+    tile: &Tile<'_>,
+    small: bool,
+) -> (egui::Response, egui::Response) {
     let circle_zone = Rect::from_min_size(rect.min, Vec2::splat(ZONE));
     let star_zone =
         Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - ZONE), Vec2::splat(ZONE));
@@ -219,6 +249,16 @@ pub(super) fn show(
         Sense::click()
     };
     let star = ui.interact(star_zone, id.with("favorite"), star_sense);
+    (circle, star)
+}
+
+/// What assistive technology reads for the circle, the star and the tile itself.
+fn describe_zones(
+    tile: &Tile<'_>,
+    resp: &egui::Response,
+    circle: &egui::Response,
+    star: &egui::Response,
+) {
     if tile.selectable {
         circle.widget_info(|| {
             let verb = if tile.checked() { "Deselect" } else { "Select" };
@@ -244,32 +284,24 @@ pub(super) fn show(
             &label,
         )
     });
+}
 
-    if ui.is_rect_visible(rect) {
-        paint(ui, thumbs, rect, tile, hovered, small, &pal);
-    }
-
-    let mut event = None;
+/// The click on the circle, the star or the picture, if there was one this frame.
+fn click_event(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    circle: &egui::Response,
+    star: &egui::Response,
+) -> Option<(TileEvent, ClickMods)> {
     if circle.clicked() {
-        event = Some((TileEvent::Circle, ClickMods::of_click(ui.ctx())));
+        Some((TileEvent::Circle, ClickMods::of_click(ui.ctx())))
     } else if star.clicked() {
-        event = Some((TileEvent::Star, ClickMods::default()));
+        Some((TileEvent::Star, ClickMods::default()))
     } else if resp.clicked() {
-        event = Some((TileEvent::Click, ClickMods::of_click(ui.ctx())));
-    }
-    let hand =
-        hovered && ((tile.selectable && circle.hovered()) || star.hovered() || resp.hovered());
-    if hand {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    let resp = if (tile.selectable && circle.hovered()) || star.hovered() {
-        resp
+        Some((TileEvent::Click, ClickMods::of_click(ui.ctx())))
     } else {
-        resp.on_hover_ui(|ui| {
-            ui.label(tile.tip.map_or_else(|| (tile.name)(), |tip| tip()));
-        })
-    };
-    TileOut { resp, event }
+        None
+    }
 }
 
 /// What shows where the picture is not (yet) available.
@@ -321,83 +353,104 @@ fn paint(
     pal: &Palette,
 ) {
     let painter = ui.painter_at(rect);
-    let radius = CornerRadius::same(style::TILE_RADIUS);
+    paint_picture(ui, &painter, thumbs, rect, tile, pal);
+    if hovered {
+        paint_shades(&painter, rect);
+    }
+    if tile.selectable && (hovered || tile.picking || tile.checked()) && !small {
+        paint_select_circle(&painter, rect, tile.checked(), pal);
+    }
+    if !small && (tile.favorite || hovered) {
+        paint_star(&painter, rect, tile.favorite, pal);
+    }
+    if let Some(text) = &tile.badge {
+        paint_pill(&painter, rect, text);
+    }
+    paint_mark_ring(&painter, rect, tile.mark, pal);
+}
+
+/// The thumbnail, or the placeholder while there is none.
+fn paint_picture(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    thumbs: &mut ThumbCache,
+    rect: Rect,
+    tile: &Tile<'_>,
+    pal: &Palette,
+) {
     let failed = thumbs.failed(tile.key);
     if let Some(tex) = thumbs.get(tile.key) {
+        let radius = CornerRadius::same(style::TILE_RADIUS);
         let shape = egui::epaint::RectShape::filled(rect, radius, Color32::WHITE)
             .with_texture(tex.id(), square_uv(tex.size_vec2()));
         painter.add(shape);
     } else {
-        paint_placeholder(ui, &painter, rect, failed, pal);
+        paint_placeholder(ui, painter, rect, failed, pal);
     }
+}
 
-    let show_controls = tile.selectable && (hovered || tile.picking || tile.checked()) && !small;
-    if hovered {
-        // Soft shades at the top and bottom keep the circle, the star and the time readable
-        // on bright photos, without a visible edge.
+/// Soft shades at the top and bottom keep the circle, the star and the time readable on
+/// bright photos, without a visible edge.
+fn paint_shades(painter: &egui::Painter, rect: Rect) {
+    for top in [true, false] {
         painter.add(fade(
             rect,
-            true,
-            SHADE_HEIGHT,
-            SHADE_ALPHA,
-            f32::from(style::TILE_RADIUS),
-        ));
-        painter.add(fade(
-            rect,
-            false,
+            top,
             SHADE_HEIGHT,
             SHADE_ALPHA,
             f32::from(style::TILE_RADIUS),
         ));
     }
-    if show_controls {
-        let c = circle_center(rect);
-        if tile.checked() {
-            painter.circle_filled(c, CIRCLE_RADIUS, pal.accent);
-            paint_icon(&painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.on_accent);
-        } else {
-            painter.circle_filled(
-                c,
-                CIRCLE_RADIUS,
-                Color32::from_black_alpha(CIRCLE_DISC_ALPHA),
-            );
-            painter.circle_stroke(c, CIRCLE_RADIUS - 1.0, Stroke::new(2.0, Color32::WHITE));
-        }
+}
+
+/// The selection circle at the top left: empty, or filled with a check mark.
+fn paint_select_circle(painter: &egui::Painter, rect: Rect, checked: bool, pal: &Palette) {
+    let c = circle_center(rect);
+    if checked {
+        painter.circle_filled(c, CIRCLE_RADIUS, pal.accent);
+        paint_icon(painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.on_accent);
+    } else {
+        painter.circle_filled(
+            c,
+            CIRCLE_RADIUS,
+            Color32::from_black_alpha(CIRCLE_DISC_ALPHA),
+        );
+        painter.circle_stroke(c, CIRCLE_RADIUS - 1.0, Stroke::new(2.0, Color32::WHITE));
     }
-    if tile.favorite && !small {
-        let c = star_center(rect);
-        painter.circle_filled(
-            c,
-            STAR_DISC_RADIUS,
-            Color32::from_black_alpha(STAR_DISC_ALPHA),
-        );
-        paint_icon(&painter, c, icons::ICON_STAR, STAR_SIZE, pal.favorite);
-    } else if hovered && !small {
-        let c = star_center(rect);
-        painter.circle_filled(
-            c,
-            STAR_DISC_RADIUS,
-            Color32::from_black_alpha(STAR_DISC_ALPHA),
-        );
+}
+
+/// The star at the bottom left: filled for a favorite, an outline while hovered otherwise.
+fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool, pal: &Palette) {
+    let c = star_center(rect);
+    painter.circle_filled(
+        c,
+        STAR_DISC_RADIUS,
+        Color32::from_black_alpha(STAR_DISC_ALPHA),
+    );
+    if favorite {
+        paint_icon(painter, c, icons::ICON_STAR, STAR_SIZE, pal.favorite);
+    } else {
         paint_icon(
-            &painter,
+            painter,
             c,
             icons::ICON_STAR.outlined(),
             STAR_SIZE,
             Color32::WHITE,
         );
     }
-    if let Some(text) = &tile.badge {
-        paint_pill(&painter, rect, text);
-    }
-    if tile.checked() {
+}
+
+/// The ring around a checked tile (thick) or the tile the keyboard is on (thin).
+fn paint_mark_ring(painter: &egui::Painter, rect: Rect, mark: TileMark, pal: &Palette) {
+    let radius = CornerRadius::same(style::TILE_RADIUS);
+    if mark == TileMark::Checked {
         painter.rect_stroke(
             rect.shrink(1.5),
             radius,
             Stroke::new(3.0, pal.accent),
             egui::StrokeKind::Inside,
         );
-    } else if tile.mark == TileMark::Focused {
+    } else if mark == TileMark::Focused {
         painter.rect_stroke(
             rect.shrink(1.0),
             radius,

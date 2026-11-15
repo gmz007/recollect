@@ -3,8 +3,7 @@
 
 use super::View;
 use crate::library::Activity;
-#[cfg(test)]
-use crate::store::db::TimelineItem;
+use crate::store::db::{TimelineFilter, TimelineItem};
 use crate::ui::App;
 use std::time::{Duration, Instant};
 
@@ -23,39 +22,8 @@ impl App {
             self.tl.requested_at = Instant::now();
             let same_view = self.tl.loaded_filter.as_ref() == Some(&r.filter);
             match r.items {
-                Ok(mut items) => {
-                    if r.filter.favorites_only {
-                        // A list read before an unfavorite was saved still has the item.
-                        items.retain(|it| self.fav_marks.get(&it.file_id).is_none_or(|m| m.value));
-                    }
-                    if same_view {
-                        // A reload of what is shown: stay on the same photo.
-                        self.tl.anchor_scroll(&items);
-                    } else {
-                        self.tl.grid.scroll_to = Some(0.0);
-                        self.tl.grid.selected = None;
-                        self.tl.pending = None;
-                    }
-                    self.tl.loaded_filter = Some(r.filter);
-                    self.tl.error = None;
-                    self.tl.failed = None;
-                    self.tl.set_items(items);
-                }
-                Err(e) => {
-                    if !same_view {
-                        // Never keep showing another view's items.
-                        self.tl.grid.selected = None;
-                        self.tl.pending = None;
-                        self.tl.grid.scroll_to = Some(0.0);
-                        self.tl.loaded_filter = Some(r.filter.clone());
-                        self.tl.set_items(Vec::new());
-                    }
-                    tracing::warn!("could not load the photos: {e}");
-                    self.tl.error = Some(e);
-                    self.tl.loaded = true;
-                    self.tl.failed = Some((r.filter, Instant::now()));
-                    self.tl.requested = None; // allow a retry
-                }
+                Ok(items) => self.apply_loaded_items(r.filter, items, same_view),
+                Err(e) => self.apply_failed_load(r.filter, e, same_view),
             }
         }
         if let View::Folder(id) = self.tl.view
@@ -64,6 +32,54 @@ impl App {
         {
             self.set_view(View::Timeline);
         }
+        self.reload_if_due();
+    }
+
+    /// Shows the items of a finished load.
+    fn apply_loaded_items(
+        &mut self,
+        filter: TimelineFilter,
+        mut items: Vec<TimelineItem>,
+        same_view: bool,
+    ) {
+        if filter.favorites_only {
+            // A list read before an unfavorite was saved still has the item.
+            items.retain(|it| self.fav_marks.get(&it.file_id).is_none_or(|m| m.value));
+        }
+        if same_view {
+            // A reload of what is shown: stay on the same photo.
+            self.tl.anchor_scroll(&items);
+        } else {
+            self.tl.grid.scroll_to = Some(0.0);
+            self.tl.grid.selected = None;
+            self.tl.pending = None;
+        }
+        self.tl.loaded_filter = Some(filter);
+        self.tl.error = None;
+        self.tl.failed = None;
+        self.tl.set_items(items);
+    }
+
+    /// Records a failed load and, when it was for another view, empties the grid.
+    fn apply_failed_load(&mut self, filter: TimelineFilter, error: String, same_view: bool) {
+        if !same_view {
+            // Never keep showing another view's items.
+            self.tl.grid.selected = None;
+            self.tl.pending = None;
+            self.tl.grid.scroll_to = Some(0.0);
+            self.tl.loaded_filter = Some(filter.clone());
+            self.tl.set_items(Vec::new());
+        }
+        tracing::warn!("could not load the photos: {error}");
+        self.tl.error = Some(error);
+        self.tl.loaded = true;
+        self.tl.failed = Some((filter, Instant::now()));
+        self.tl.requested = None; // allow a retry
+    }
+
+    /// Starts a load when the view or the library changed (or files keep arriving), and asks
+    /// for the repaints that the retry and live reload timers need.
+    fn reload_if_due(&mut self) {
         let filter = self.tl.filter(self.kind);
         let jobs = self.lib.jobs_finished();
         // Files are being added: reload now and then. Embedding adds no files, so it does not

@@ -1,6 +1,7 @@
 //! Favorite marks: shown at once, saved in the background, and taken back if saving fails.
 
 use super::App;
+use super::grid::take_plain_key;
 use super::timeline::View;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,6 +32,30 @@ impl App {
             .filter(|&(id, _)| self.grid().sel.contains(id))
             .all(|(id, fav)| marked(&self.fav_marks, id, fav));
         self.set_favorites(&ids, !all_fav);
+    }
+
+    /// Flips the favorite mark of a file whose stored flag is `listed`.
+    pub(super) fn toggle_favorite(&mut self, file_id: i64, listed: bool) {
+        let fav = !marked(&self.fav_marks, file_id, listed);
+        self.set_favorite(file_id, fav);
+    }
+
+    /// The F key: favorite the whole selection when several items are selected, otherwise
+    /// the primary item (`primary` is its file id and stored flag).
+    pub(super) fn favorite_key(
+        &mut self,
+        ctx: &egui::Context,
+        multi: bool,
+        primary: Option<(i64, bool)>,
+    ) {
+        if !take_plain_key(ctx, egui::Key::F) {
+            return;
+        }
+        if multi {
+            self.toggle_favorite_of_selection();
+        } else if let Some((file_id, listed)) = primary {
+            self.toggle_favorite(file_id, listed);
+        }
     }
 
     /// Marks (or unmarks) a favorite everywhere it is shown right away, and has it stored in
@@ -101,8 +126,8 @@ impl App {
                 .is_some_and(|m| m.value == w.fav);
             match w.error {
                 None => {
-                    if pending && let Some(m) = self.fav_marks.get_mut(&w.file_id) {
-                        m.confirmed = true;
+                    if pending {
+                        self.confirm_favorite(w.file_id);
                     }
                 }
                 Some(e) => {
@@ -113,22 +138,46 @@ impl App {
                     // A newer mark for the same file is still on its way: it decides.
                     if pending {
                         // The library still has the earlier state.
-                        let value = !w.fav;
-                        self.fav_marks.insert(
-                            w.file_id,
-                            FavMark {
-                                value,
-                                confirmed: true,
-                            },
-                        );
-                        if let Some(v) = &mut self.viewer {
-                            v.set_favorite(w.file_id, value);
-                        }
+                        self.revert_favorite(w.file_id, !w.fav);
                         reverted = true;
                     }
                 }
             }
         }
+        self.report_failed_favorites(failed, &first_error);
+        if reverted {
+            // An item taken out of the Favorites list has to come back.
+            if self.tl.view == View::Favorites {
+                self.tl.requested = None;
+            }
+            self.patch_lists();
+        }
+        self.follow_favorites_version();
+    }
+
+    /// The write for `file_id` was committed.
+    fn confirm_favorite(&mut self, file_id: i64) {
+        if let Some(m) = self.fav_marks.get_mut(&file_id) {
+            m.confirmed = true;
+        }
+    }
+
+    /// Takes a mark back after its write failed: the file shows `value` again.
+    fn revert_favorite(&mut self, file_id: i64, value: bool) {
+        self.fav_marks.insert(
+            file_id,
+            FavMark {
+                value,
+                confirmed: true,
+            },
+        );
+        if let Some(v) = &mut self.viewer {
+            v.set_favorite(file_id, value);
+        }
+    }
+
+    /// One notice for all the writes that failed in this frame.
+    fn report_failed_favorites(&mut self, failed: usize, first_error: &str) {
         if failed == 1 {
             tracing::warn!("could not save a favorite mark: {first_error}");
             self.notify_error("Couldn't save your favorite. Try again in a moment.");
@@ -137,13 +186,10 @@ impl App {
                 "Couldn't save favorites for {failed} items. Try again in a moment."
             ));
         }
-        if reverted {
-            // An item taken out of the Favorites list has to come back.
-            if self.tl.view == View::Favorites {
-                self.tl.requested = None;
-            }
-            self.patch_lists();
-        }
+    }
+
+    /// Reloads the Favorites view when the set of favorites changed.
+    fn follow_favorites_version(&mut self) {
         let version = self.lib.favorites_version();
         if version != self.fav_version_seen {
             self.fav_version_seen = version;

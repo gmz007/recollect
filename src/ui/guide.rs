@@ -123,15 +123,13 @@ pub(super) enum Part<'a> {
     Star,
 }
 
-/// The screen for a view with nothing in it: an icon, one sentence and one main button.
-/// Returns true when the button was clicked.
-pub(super) fn empty_state(
-    ui: &mut egui::Ui,
-    icon: MaterialIcon,
+/// The sentence of an empty-state screen laid out for display, and the same sentence in
+/// plain text for assistive technology (the star named).
+fn sentence_job(
+    ui: &egui::Ui,
     sentence: &[Part<'_>],
-    button: &str,
-) -> bool {
-    let pal = Palette::of(ui.ctx());
+    pal: &Palette,
+) -> (egui::text::LayoutJob, String) {
     let color = ui.visuals().text_color();
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = ui.available_width().min(460.0);
@@ -168,6 +166,24 @@ pub(super) fn empty_state(
             }
         }
     }
+    (job, plain)
+}
+
+/// An [`empty_state`] whose sentence is plain text.
+fn empty_text(ui: &mut egui::Ui, icon: MaterialIcon, text: &str, button: &str) -> bool {
+    empty_state(ui, icon, &[Part::Text(text)], button)
+}
+
+/// The screen for a view with nothing in it: an icon, one sentence and one main button.
+/// Returns true when the button was clicked.
+pub(super) fn empty_state(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    sentence: &[Part<'_>],
+    button: &str,
+) -> bool {
+    let pal = Palette::of(ui.ctx());
+    let (job, plain) = sentence_job(ui, sentence, &pal);
     let mut clicked = false;
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.22).min(140.0));
@@ -203,12 +219,10 @@ impl App {
     /// What the album grids show when the current view has no items.
     pub(super) fn timeline_empty_state(&mut self, ui: &mut egui::Ui) {
         let go_photos = match self.tl.view {
-            View::Album(_) => empty_state(
+            View::Album(_) => empty_text(
                 ui,
                 icons::ICON_PHOTO_ALBUM,
-                &[Part::Text(
-                    "This album is empty. Select photos and choose Add to album.",
-                )],
+                "This album is empty. Select photos and choose Add to album.",
                 "Go to Photos",
             ),
             View::Favorites => empty_state(
@@ -222,39 +236,23 @@ impl App {
                 "Go to Photos",
             ),
             View::RecentlyAdded => {
-                if empty_state(
-                    ui,
-                    icons::ICON_SCHEDULE,
-                    &[Part::Text(
-                        "Photos and videos you add to your folders show up here.",
-                    )],
-                    "Check for new photos",
-                ) {
+                let text = "Photos and videos you add to your folders show up here.";
+                if empty_text(ui, icons::ICON_SCHEDULE, text, "Check for new photos") {
                     self.start_indexing();
                 }
                 false
             }
             View::Folder(_) => {
-                if empty_state(
-                    ui,
-                    icons::ICON_FOLDER_OPEN,
-                    &[Part::Text("There are no photos or videos in this folder.")],
-                    "Check for new photos",
-                ) {
+                let text = "There are no photos or videos in this folder.";
+                if empty_text(ui, icons::ICON_FOLDER_OPEN, text, "Check for new photos") {
                     self.start_indexing();
                 }
                 false
             }
             View::Timeline => {
-                if empty_state(
-                    ui,
-                    icons::ICON_PHOTO_LIBRARY,
-                    &[Part::Text(
-                        "No photos or videos yet. Add a folder, or give Recollect a moment to \
-                         look through the ones you have.",
-                    )],
-                    "Add a folder",
-                ) {
+                let text = "No photos or videos yet. Add a folder, or give Recollect a moment to \
+                            look through the ones you have.";
+                if empty_text(ui, icons::ICON_PHOTO_LIBRARY, text, "Add a folder") {
                     self.open_add_folder();
                 }
                 false
@@ -271,39 +269,33 @@ impl App {
             return;
         }
         if let Some(e) = self.res.error.clone() {
-            if !self.snapshot.model_installed {
-                if empty_state(
-                    ui,
-                    icons::ICON_AUTO_AWESOME,
-                    &[Part::Text(
-                        "Smart search is off. Turn it on to find photos by describing them.",
-                    )],
-                    "Turn on smart search",
-                ) {
-                    self.open_settings_at(super::settings::Section::SmartSearch);
-                }
-            } else if e.can_retry {
-                if empty_state(
-                    ui,
-                    icons::ICON_SEARCH_OFF,
-                    &[Part::Text(&e.text)],
-                    "Try again",
-                ) {
-                    self.rerun();
-                }
-            } else if empty_state(
-                ui,
-                icons::ICON_SEARCH_OFF,
-                &[Part::Text(&e.text)],
-                "Start over",
-            ) {
-                self.clear_search();
-            }
+            self.search_problem_state(ui, &e);
             return;
         }
         if self.res.label.is_empty() {
             return;
         }
+        self.no_match_state(ui);
+    }
+
+    /// The search could not run: say why and offer the way out.
+    fn search_problem_state(&mut self, ui: &mut egui::Ui, e: &SearchProblem) {
+        if !self.snapshot.model_installed {
+            let text = "Smart search is off. Turn it on to find photos by describing them.";
+            if empty_text(ui, icons::ICON_AUTO_AWESOME, text, "Turn on smart search") {
+                self.open_settings_at(super::settings::Section::SmartSearch);
+            }
+        } else if e.can_retry {
+            if empty_text(ui, icons::ICON_SEARCH_OFF, &e.text, "Try again") {
+                self.rerun();
+            }
+        } else if empty_text(ui, icons::ICON_SEARCH_OFF, &e.text, "Start over") {
+            self.clear_search();
+        }
+    }
+
+    /// The search ran and found nothing.
+    fn no_match_state(&mut self, ui: &mut egui::Ui) {
         let date_set = self.date != super::when::DateFilter::default();
         let sentence = format!(
             "No photos match “{}”. Try different words{}.",
@@ -319,12 +311,7 @@ impl App {
         } else {
             "Start over"
         };
-        if empty_state(
-            ui,
-            icons::ICON_IMAGE_SEARCH,
-            &[Part::Text(&sentence)],
-            button,
-        ) {
+        if empty_text(ui, icons::ICON_IMAGE_SEARCH, &sentence, button) {
             if date_set {
                 self.date = super::when::DateFilter::default();
                 self.rerun();
@@ -395,6 +382,68 @@ fn suggestion_chip(
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     ids.push(r.id);
     r.clicked()
+}
+
+/// What the user picked in the search help.
+#[derive(Default)]
+struct HelpPicks {
+    /// A suggestion to search for.
+    chosen: Option<String>,
+    /// "Clear recent searches" was clicked.
+    clear: bool,
+}
+
+/// The sections of the search help: examples, recent searches and the privacy note.
+/// `ids` collects the suggestions' ids for keyboard movement.
+fn help_sections(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    recent: &[String],
+    ids: &mut Vec<egui::Id>,
+) -> HelpPicks {
+    let mut picks = HelpPicks::default();
+    help_heading(ui, pal, "Try searching for");
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        for q in EXAMPLE_SEARCHES {
+            if suggestion_chip(ui, None, q, q, ids) {
+                picks.chosen = Some(q.to_string());
+            }
+        }
+    });
+    if !recent.is_empty() {
+        ui.add_space(10.0);
+        help_heading(ui, pal, "Recent searches");
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+            for q in recent {
+                let name = format!("Recent search: {q}");
+                if suggestion_chip(ui, Some(icons::ICON_HISTORY), q, &name, ids) {
+                    picks.chosen = Some(q.clone());
+                }
+            }
+        });
+        ui.add_space(6.0);
+        picks.clear = ui
+            .add(egui::Button::new(
+                RichText::new("Clear recent searches").color(pal.accent),
+            ))
+            .clicked();
+    }
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new("Your searches stay on this computer.")
+            .small()
+            .color(pal.text_secondary),
+    );
+    picks
+}
+
+/// A small heading of the search help.
+fn help_heading(ui: &mut egui::Ui, pal: &Palette, text: &str) {
+    ui.label(style::semibold(text).size(13.5).color(pal.text_secondary));
 }
 
 impl App {
@@ -488,7 +537,7 @@ impl App {
         let mut ids: Vec<egui::Id> = Vec::new();
         let pal = Palette::of(ctx);
         let recent = self.settings.recent_searches.clone();
-        let (mut chosen, mut clear) = (None::<String>, false);
+        let mut picks = HelpPicks::default();
         let out = egui::Area::new(egui::Id::unique("search-help"))
             .order(egui::Order::Foreground)
             .fixed_pos(Pos2::new(field.min.x, field.max.y + 6.0))
@@ -501,64 +550,15 @@ impl App {
                     .shadow(ctx.global_style().visuals.popup_shadow)
                     .show(ui, |ui| {
                         ui.set_width(field.width().max(480.0) - 28.0);
-                        ui.label(
-                            style::semibold("Try searching for")
-                                .size(13.5)
-                                .color(pal.text_secondary),
-                        );
-                        ui.add_space(4.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                            for q in EXAMPLE_SEARCHES {
-                                if suggestion_chip(ui, None, q, q, &mut ids) {
-                                    chosen = Some(q.to_string());
-                                }
-                            }
-                        });
-                        if !recent.is_empty() {
-                            ui.add_space(10.0);
-                            ui.label(
-                                style::semibold("Recent searches")
-                                    .size(13.5)
-                                    .color(pal.text_secondary),
-                            );
-                            ui.add_space(4.0);
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                for q in &recent {
-                                    let name = format!("Recent search: {q}");
-                                    if suggestion_chip(
-                                        ui,
-                                        Some(icons::ICON_HISTORY),
-                                        q,
-                                        &name,
-                                        &mut ids,
-                                    ) {
-                                        chosen = Some(q.clone());
-                                    }
-                                }
-                            });
-                            ui.add_space(6.0);
-                            clear = ui
-                                .add(egui::Button::new(
-                                    RichText::new("Clear recent searches").color(pal.accent),
-                                ))
-                                .clicked();
-                        }
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("Your searches stay on this computer.")
-                                .small()
-                                .color(pal.text_secondary),
-                        );
+                        picks = help_sections(ui, &pal, &recent, &mut ids);
                     });
             });
         self.search_help.dropdown = Some(out.response.rect);
         self.keyboard_in_suggestions(ctx, &ids);
-        if clear {
+        if picks.clear {
             self.change_settings(|s| s.recent_searches.clear());
         }
-        if let Some(q) = chosen {
+        if let Some(q) = picks.chosen {
             self.search_for(&q);
         }
     }

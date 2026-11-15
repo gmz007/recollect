@@ -11,6 +11,9 @@ use crate::ui::{App, fmt_time, marked};
 use chrono::{Datelike, NaiveDate};
 use egui::{RichText, Sense, Vec2};
 
+/// Side of the square tiles in the "On this day" strip.
+const STRIP_TILE: f32 = 96.0;
+
 /// One "On this day" entry: an item of the album and how many years ago it was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OnThisDay {
@@ -77,7 +80,6 @@ impl App {
 
     /// A strip of photos taken on today's date in earlier years, above the timeline.
     pub(super) fn on_this_day_strip(&mut self, ui: &mut egui::Ui) {
-        const SIZE: f32 = 96.0;
         let today = self.today();
         let entries: Vec<OnThisDay> = self.tl.on_this_day(today).to_vec();
         if entries.is_empty() {
@@ -94,44 +96,49 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = GAP;
                     for (pos, e) in entries.iter().enumerate() {
-                        let item = &self.tl.items[e.index];
-                        ui.vertical(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(SIZE), Sense::hover());
-                            let key = thumb_key(item);
-                            let name = || file_name(item);
-                            let tip = || format!("{}\n{}", file_name(item), fmt_taken(item));
-                            let tile = Tile::new(&key, "On this day", &name)
-                                .tip(&tip)
-                                .badge(
-                                    (item.kind == MediaKind::Video)
-                                        .then(|| fmt_time(item.duration.unwrap_or(0.0))),
-                                )
-                                .favorite(marked(&self.fav_marks, item.file_id, item.favorite));
-                            let id = ui.make_persistent_id(("otd", pos));
-                            let o = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
-                            match o.event {
-                                Some((TileEvent::Star, _)) => star = Some(e.index),
-                                Some(_) => open = Some(pos),
-                                None => {}
-                            }
-                            ui.label(RichText::new(years_ago_text(e.years_ago)).small());
-                        });
+                        match self.on_this_day_entry(ui, pos, e) {
+                            Some(TileEvent::Star) => star = Some(e.index),
+                            Some(_) => open = Some(pos),
+                            None => {}
+                        }
                     }
                 });
             });
         if let Some(i) = star {
             let it = &self.tl.items[i];
-            let (id, fav) = (
-                it.file_id,
-                !marked(&self.fav_marks, it.file_id, it.favorite),
-            );
-            self.set_favorite(id, fav);
+            self.toggle_favorite(it.file_id, it.favorite);
         }
         ui.add_space(6.0);
         if let Some(pos) = open {
             let idx: Vec<usize> = entries.iter().map(|e| e.index).collect();
             self.open_viewer_subset(&idx, pos);
         }
+    }
+
+    /// One tile of the strip with its "N years ago" caption; says what was clicked on it.
+    fn on_this_day_entry(
+        &mut self,
+        ui: &mut egui::Ui,
+        pos: usize,
+        e: &OnThisDay,
+    ) -> Option<TileEvent> {
+        let item = &self.tl.items[e.index];
+        ui.vertical(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(STRIP_TILE), Sense::hover());
+            let key = thumb_key(item);
+            let name = || file_name(item);
+            let tip = || format!("{}\n{}", file_name(item), fmt_taken(item));
+            let tile = Tile::new(&key, "On this day", &name)
+                .tip(&tip)
+                .badge(
+                    (item.kind == MediaKind::Video).then(|| fmt_time(item.duration.unwrap_or(0.0))),
+                )
+                .favorite(marked(&self.fav_marks, item.file_id, item.favorite));
+            let id = ui.make_persistent_id(("otd", pos));
+            let o = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
+            ui.label(RichText::new(years_ago_text(e.years_ago)).small());
+            o.event.map(|(ev, _)| ev)
+        })
+        .inner
     }
 }

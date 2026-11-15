@@ -2,7 +2,7 @@
 //! does, and moving through tiles with the keyboard.
 
 use super::selection::{ClickMods, Selection};
-use super::{albums, tiles};
+use super::{App, albums, tiles};
 
 /// What a grid of files (the timeline or the search results) remembers about the user's
 /// selection and scrolling.
@@ -51,6 +51,56 @@ pub(super) struct GridEvents {
     pub(super) menu: Option<(usize, albums::TileMenu)>,
     /// The first item of the first visible row.
     pub(super) top_item: Option<usize>,
+}
+
+impl GridEvents {
+    /// Notes what the user did to tile `i` (drawn as `out`); `menu` draws the tile's
+    /// context menu and says which entry was chosen.
+    pub(super) fn record(
+        &mut self,
+        i: usize,
+        out: &tiles::TileOut,
+        menu: impl FnOnce(&mut egui::Ui) -> Option<albums::TileMenu>,
+    ) {
+        if let Some((ev, mods)) = out.event {
+            self.clicked = Some((i, ev, mods));
+        }
+        if out.resp.secondary_clicked() {
+            self.right_clicked = Some(i);
+        }
+        out.resp.context_menu(|ui| {
+            if let Some(m) = menu(ui) {
+                self.menu = Some((i, m));
+            }
+        });
+    }
+}
+
+impl App {
+    /// Acts on a right click and on a choice from a tile's context menu.
+    pub(super) fn apply_menu_events(&mut self, events: &mut GridEvents) {
+        if let Some(i) = events.right_clicked.take() {
+            self.select_for_menu(i);
+        }
+        if let Some((i, m)) = events.menu.take() {
+            self.apply_tile_menu(i, m);
+        }
+    }
+}
+
+/// A vertical scroll area for a grid that fills its panel; it starts at `scroll_to` if one
+/// is waiting (which is used up).
+pub(super) fn grid_scroll_area(
+    id_salt: &'static str,
+    scroll_to: &mut Option<f32>,
+) -> egui::ScrollArea {
+    let mut area = egui::ScrollArea::vertical()
+        .id_salt(id_salt)
+        .auto_shrink([false, false]);
+    if let Some(y) = scroll_to.take() {
+        area = area.vertical_scroll_offset(y);
+    }
+    area
 }
 
 /// What a click on a tile left to do after the selection was updated.

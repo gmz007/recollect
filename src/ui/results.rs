@@ -5,8 +5,8 @@ use super::style::{GAP, TILE};
 use super::tiles::{Tile, TileMark};
 use super::workers::Query;
 use super::{
-    App, ClickOutcome, GridEvents, GridState, albums, fmt_time, guide, marked,
-    scroll_offset_for_row, selection, step, style, take_plain_key, tiles, to_millis,
+    App, ClickOutcome, GridEvents, GridState, albums, fmt_time, grid::grid_scroll_area, guide,
+    marked, scroll_offset_for_row, selection, step, style, tiles, to_millis,
 };
 use crate::media::MediaKind;
 use crate::search::{SearchHit, SearchOptions};
@@ -20,6 +20,33 @@ pub(super) const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Files asked for by one search.
 pub(super) const SEARCH_LIMIT: usize = 300;
+
+/// Where the tiles of the results grid go at the current width.
+struct ResultsMetrics {
+    /// Width of the tile area.
+    avail: f32,
+    cols: usize,
+    rows: usize,
+    tile: f32,
+    /// Distance between row tops (and between tile left edges).
+    stride: f32,
+}
+
+impl ResultsMetrics {
+    /// For `width` points of space and `len` results.
+    fn new(width: f32, len: usize) -> Self {
+        let avail = width - style::SCROLLBAR_ALLOWANCE;
+        let cols = (((avail + GAP) / (TILE + GAP)).floor() as usize).max(1);
+        let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(TILE * 0.6);
+        Self {
+            avail,
+            cols,
+            rows: len.div_ceil(cols),
+            tile,
+            stride: tile + GAP,
+        }
+    }
+}
 
 /// The current search and what it found.
 pub(super) struct ResultsState {
@@ -166,61 +193,73 @@ impl App {
             self.results_empty_state(ui);
             return;
         }
-        let avail = ui.available_width() - style::SCROLLBAR_ALLOWANCE;
-        let cols = (((avail + GAP) / (TILE + GAP)).floor() as usize).max(1);
-        let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(TILE * 0.6);
-        let rows = self.res.hits.len().div_ceil(cols);
-        self.res.cols = cols;
+        let m = ResultsMetrics::new(ui.available_width(), self.res.hits.len());
+        self.res.cols = m.cols;
         self.res.grid.shown = true;
-        let stride = tile + GAP;
-        let mut area = egui::ScrollArea::vertical()
-            .id_salt("results")
-            .auto_shrink([false, false]);
-        if let Some(y) = self.res.grid.scroll_to.take() {
-            area = area.vertical_scroll_offset(y);
-        }
+        let area = grid_scroll_area("results", &mut self.res.grid.scroll_to);
         let results = Arc::clone(&self.res.hits);
         let mut events = GridEvents::default();
         let out = area.show_viewport(ui, |ui, viewport| {
-            let (origin, _) = ui
-                .allocate_exact_size(Vec2::new(avail, rows as f32 * stride), egui::Sense::hover());
-            let first = (viewport.min.y / stride).floor().max(0.0) as usize;
-            let last = ((viewport.max.y / stride).ceil() as usize + 1).min(rows);
-            for row in first..last {
-                for i in row * cols..((row + 1) * cols).min(results.len()) {
-                    let x = origin.min.x + (i - row * cols) as f32 * (tile + GAP);
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(x, origin.min.y + row as f32 * stride),
-                        Vec2::splat(tile),
-                    );
-                    self.result_tile(ui, &results[i], i, rect, &mut events);
-                }
-            }
+            self.result_rows(ui, viewport, &m, &results, &mut events);
         });
-        if let Some(i) = self
+        self.follow_result_selection(ui, &out, &m);
+        self.apply_menu_events(&mut events);
+        if let Some((i, ev, mods)) = events.clicked {
+            self.click_result(&results, i, ev, mods);
+        }
+    }
+
+    /// Draws the rows of results that intersect `viewport`.
+    fn result_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: egui::Rect,
+        m: &ResultsMetrics,
+        results: &[SearchHit],
+        events: &mut GridEvents,
+    ) {
+        let (origin, _) = ui.allocate_exact_size(
+            Vec2::new(m.avail, m.rows as f32 * m.stride),
+            egui::Sense::hover(),
+        );
+        let first = (viewport.min.y / m.stride).floor().max(0.0) as usize;
+        let last = ((viewport.max.y / m.stride).ceil() as usize + 1).min(m.rows);
+        for row in first..last {
+            let (start, end) = (row * m.cols, ((row + 1) * m.cols).min(results.len()));
+            for (i, hit) in results.iter().enumerate().take(end).skip(start) {
+                let x = origin.min.x + (i - start) as f32 * (m.tile + GAP);
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(x, origin.min.y + row as f32 * m.stride),
+                    Vec2::splat(m.tile),
+                );
+                self.result_tile(ui, hit, i, rect, events);
+            }
+        }
+    }
+
+    /// Scrolls so that a result the keyboard moved to is in view.
+    fn follow_result_selection<R>(
+        &mut self,
+        ui: &egui::Ui,
+        out: &egui::scroll_area::ScrollAreaOutput<R>,
+        m: &ResultsMetrics,
+    ) {
+        let Some(i) = self
             .res
             .grid
             .selected
             .filter(|_| self.res.grid.keyboard_moved)
-        {
-            // Rows are virtualized, so the selected tile may not exist on screen yet:
-            // scroll by row arithmetic instead of asking the tile to scroll itself.
-            self.res.grid.keyboard_moved = false;
-            let view = out.inner_rect.height();
-            let offset = out.state.clamped_offset().y;
-            self.res.grid.scroll_to = scroll_offset_for_row(i / cols, stride, tile, view, offset);
-            if self.res.grid.scroll_to.is_some() {
-                ui.ctx().request_repaint();
-            }
-        }
-        if let Some(i) = events.right_clicked {
-            self.select_for_menu(i);
-        }
-        if let Some((i, m)) = events.menu {
-            self.apply_tile_menu(i, m);
-        }
-        if let Some((i, ev, mods)) = events.clicked {
-            self.click_result(&results, i, ev, mods);
+        else {
+            return;
+        };
+        // Rows are virtualized, so the selected tile may not exist on screen yet:
+        // scroll by row arithmetic instead of asking the tile to scroll itself.
+        self.res.grid.keyboard_moved = false;
+        let view = out.inner_rect.height();
+        let offset = out.state.clamped_offset().y;
+        self.res.grid.scroll_to = scroll_offset_for_row(i / m.cols, m.stride, m.tile, view, offset);
+        if self.res.grid.scroll_to.is_some() {
+            ui.ctx().request_repaint();
         }
     }
 
@@ -246,7 +285,7 @@ impl App {
             grid.selected == Some(i),
             grid.picking || grid.sel.is_multi(),
         );
-        let t = Tile::new(&key, "Result", &name)
+        let tile = Tile::new(&key, "Result", &name)
             .badge(
                 (hit.kind == MediaKind::Video)
                     .then(|| format!("at {}", fmt_time(hit.t_start.unwrap_or(0.0)))),
@@ -254,16 +293,8 @@ impl App {
             .favorite(marked(&self.fav_marks, hit.file_id, hit.favorite))
             .selectable(mark, grid.picking);
         let id = ui.make_persistent_id(("result", i));
-        let o = tiles::show(ui, &mut self.thumbs, id, rect, &t);
-        if let Some((ev, mods)) = o.event {
-            events.clicked = Some((i, ev, mods));
-        }
-        if o.resp.secondary_clicked() {
-            events.right_clicked = Some(i);
-        }
-        o.resp.context_menu(|ui| {
-            events.menu = albums::tile_menu(ui, &self.albums, false).map(|m| (i, m));
-        });
+        let out = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
+        events.record(i, &out, |ui| albums::tile_menu(ui, &self.albums, false));
     }
 
     /// What a click on result `i` does: favorite it, change the selection or open it.
@@ -281,8 +312,7 @@ impl App {
         match outcome {
             ClickOutcome::Favorite => {
                 let h = &results[i];
-                let fav = !marked(&self.fav_marks, h.file_id, h.favorite);
-                self.set_favorite(h.file_id, fav);
+                self.toggle_favorite(h.file_id, h.favorite);
             }
             ClickOutcome::Selected => {
                 self.res.selected_t = self.res.grid.selected.and_then(|p| results[p].t_start);
@@ -331,14 +361,10 @@ impl App {
             self.res.selected_t = next.and_then(|i| results[i].t_start);
             self.res.grid.keyboard_moved = true;
         }
-        if take_plain_key(ctx, egui::Key::F) {
-            if self.res.grid.sel.is_multi() {
-                self.toggle_favorite_of_selection();
-            } else if let Some(h) = self.res.grid.selected.and_then(|i| self.res.hits.get(i)) {
-                let (id, fav) = (h.file_id, !marked(&self.fav_marks, h.file_id, h.favorite));
-                self.set_favorite(id, fav);
-            }
-        }
+        let multi = self.res.grid.sel.is_multi();
+        let primary = self.res.grid.selected.and_then(|i| self.res.hits.get(i));
+        let primary = primary.map(|h| (h.file_id, h.favorite));
+        self.favorite_key(ctx, multi, primary);
         if input.enter
             && let Some(i) = self.res.grid.selected.filter(|&i| i < self.res.hits.len())
         {

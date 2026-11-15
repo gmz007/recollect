@@ -102,7 +102,13 @@ impl Palette {
         } else {
             egui::Visuals::light()
         };
-        let control = CornerRadius::same(CONTROL_RADIUS);
+        self.window_visuals(&mut v);
+        self.widget_visuals(&mut v.widgets);
+        v
+    }
+
+    /// Backgrounds, windows, links, selection and shadows.
+    fn window_visuals(&self, v: &mut egui::Visuals) {
         v.panel_fill = self.background;
         v.window_fill = self.surface;
         v.window_stroke = Stroke::new(1.0, self.border);
@@ -124,7 +130,11 @@ impl Palette {
             color: Color32::from_black_alpha(if self.dark { 120 } else { 40 }),
         };
         v.popup_shadow = v.window_shadow;
-        let w = &mut v.widgets;
+    }
+
+    /// Fills, strokes and corners of buttons and other widgets in each state.
+    fn widget_visuals(&self, w: &mut egui::style::Widgets) {
+        let control = CornerRadius::same(CONTROL_RADIUS);
         w.noninteractive.bg_fill = self.surface;
         w.noninteractive.weak_bg_fill = self.surface;
         w.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
@@ -152,7 +162,6 @@ impl Palette {
         w.open.bg_stroke = Stroke::NONE;
         w.open.fg_stroke = Stroke::new(1.0, self.text);
         w.open.corner_radius = control;
-        v
     }
 }
 

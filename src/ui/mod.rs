@@ -45,7 +45,6 @@ use favorites::{FavMark, marked};
 use frame_stats::FrameStats;
 use grid::{
     ClickOutcome, GridEvents, GridState, Nav, consume_plain_key, scroll_offset_for_row, step,
-    take_plain_key,
 };
 use notices::{NoticeAction, Notices};
 use preview::Previews;
@@ -151,49 +150,82 @@ fn results_refresh_due(last_search_at: Option<Instant>, awaiting: Option<u64>) -
     awaiting.is_none() && last_search_at.is_some_and(|t| t.elapsed() > RESULTS_REFRESH)
 }
 
-impl App {
-    pub fn new(ctx: &egui::Context, lib: Arc<Library>) -> Self {
+/// The background workers and readers the app starts with.
+struct Workers {
+    search: SearchWorker,
+    thumbs: ThumbCache,
+    tl: TimelineState,
+    previews: Previews,
+    years_read: BgRead<Vec<i32>>,
+    albums_read: BgRead<anyhow::Result<Vec<AlbumInfo>>>,
+    snapshot_read: BgRead<Snapshot>,
+}
+
+impl Workers {
+    fn start(ctx: &egui::Context, lib: &Arc<Library>) -> Self {
         let c = ctx.clone();
         lib.set_notifier(move || c.request_repaint());
         let c = ctx.clone();
-        let search = SearchWorker::new(Arc::clone(&lib), move || c.request_repaint());
+        let search = SearchWorker::new(Arc::clone(lib), move || c.request_repaint());
         let thumbs = ThumbCache::new(ctx, &lib.paths().thumbs_dir(), 3);
-        prune_thumbnails(&lib);
-        let tl = TimelineState::new(Arc::clone(&lib), ctx);
-        let previews = Previews::new(ctx, Arc::clone(&lib), 2);
+        prune_thumbnails(lib);
+        let tl = TimelineState::new(Arc::clone(lib), ctx);
+        let previews = Previews::new(ctx, Arc::clone(lib), 2);
         let years_read = BgRead::new(ctx, "years", {
-            let lib = Arc::clone(&lib);
+            let lib = Arc::clone(lib);
             move || lib.years().ok()
         });
         let albums_read = BgRead::new(ctx, "albums", {
-            let lib = Arc::clone(&lib);
+            let lib = Arc::clone(lib);
             move || Some(lib.albums())
         });
         let snapshot_read = BgRead::new(ctx, "snapshot", {
-            let lib = Arc::clone(&lib);
+            let lib = Arc::clone(lib);
             move || Some(Snapshot::fetch(&lib))
         });
-        let mut app = Self {
-            lib,
+        Self {
             search,
             thumbs,
             tl,
+            previews,
+            years_read,
+            albums_read,
+            snapshot_read,
+        }
+    }
+}
+
+impl App {
+    pub fn new(ctx: &egui::Context, lib: Arc<Library>) -> Self {
+        let workers = Workers::start(ctx, &lib);
+        let mut app = Self::blank(ctx, lib, workers);
+        app.load_initial_state(ctx);
+        app
+    }
+
+    /// The state before anything is read from the library.
+    fn blank(ctx: &egui::Context, lib: Arc<Library>, w: Workers) -> Self {
+        Self {
+            lib,
+            search: w.search,
+            thumbs: w.thumbs,
+            tl: w.tl,
             viewer: None,
             viewer_info: true,
-            previews,
+            previews: w.previews,
             query: String::new(),
             query_changed_at: None,
             kind: None,
             date: DateFilter::default(),
             sort: SearchSort::Relevance,
             known_years: Vec::new(),
-            years_read,
+            years_read: w.years_read,
             years_seen: None,
             fav_marks: HashMap::new(),
             fav_version_seen: 0,
             albums_version_seen: 0,
             albums: Vec::new(),
-            albums_read,
+            albums_read: w.albums_read,
             res: ResultsState::default(),
             frame_stats: FrameStats::from_env(),
             dialogs: Dialogs::default(),
@@ -202,7 +234,7 @@ impl App {
             error_seq_seen: 0,
             notices: Notices::default(),
             snapshot: Snapshot::default(),
-            snapshot_read,
+            snapshot_read: w.snapshot_read,
             ctx: ctx.clone(),
             status: Status::default(),
             was_busy: false,
@@ -213,33 +245,37 @@ impl App {
             failed_open: false,
             #[cfg(test)]
             today_override: None,
-        };
-        app.settings = app.lib.settings();
-        app.settings_seen = app.lib.settings_version();
-        style::apply(ctx, app.settings.theme, app.settings.text_size);
-        app.snapshot = Snapshot::fetch(&app.lib);
-        if !app.settings.welcome_done {
-            if app.snapshot.folders.is_empty() {
-                app.welcome = Some(welcome::Welcome::new(app.lib.model().id));
+        }
+    }
+
+    /// Reads settings, folders and albums, decides on the welcome flow and starts the
+    /// background work that follows from them.
+    fn load_initial_state(&mut self, ctx: &egui::Context) {
+        self.settings = self.lib.settings();
+        self.settings_seen = self.lib.settings_version();
+        style::apply(ctx, self.settings.theme, self.settings.text_size);
+        self.snapshot = Snapshot::fetch(&self.lib);
+        if !self.settings.welcome_done {
+            if self.snapshot.folders.is_empty() {
+                self.welcome = Some(welcome::Welcome::new(self.lib.model().id));
             } else {
                 // Someone who already uses the app never sees the welcome.
-                app.change_settings(|s| s.welcome_done = true);
+                self.change_settings(|s| s.welcome_done = true);
             }
         }
-        app.albums = app.lib.albums().unwrap_or_default();
-        app.albums_version_seen = app.lib.albums_version();
+        self.albums = self.lib.albums().unwrap_or_default();
+        self.albums_version_seen = self.lib.albums_version();
         // Unit tests fake an installed model with placeholder files; never feed those to
         // ONNX Runtime.
-        if app.snapshot.model_installed && !cfg!(test) {
+        if self.snapshot.model_installed && !cfg!(test) {
             // Load the text model in the background so the first search is fast.
-            let lib = Arc::clone(&app.lib);
+            let lib = Arc::clone(&self.lib);
             std::thread::spawn(move || lib.embed_text("warm up").ok());
         }
         // Pick up changes made while the app was closed (and read dates even without a model).
-        if !app.snapshot.folders.is_empty() {
-            app.start_indexing();
+        if !self.snapshot.folders.is_empty() {
+            self.start_indexing();
         }
-        app
     }
 
     /// Looks for new photos, or as soon as the running task ends; says so when it has to wait.
@@ -341,26 +377,9 @@ impl App {
     /// Draws the whole app into `ui` (separate from `eframe::App` for headless UI tests).
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        if let Some(stats) = &mut self.frame_stats {
-            stats.frame(self.lib.is_busy());
-            // egui only repaints on events; keep frames coming so there is something to time.
-            ctx.request_repaint();
-        }
-        if self.refresh_settings(&ctx) {
-            // This frame's root ui was created with the old style.
-            ui.set_style(ctx.global_style());
-        }
+        self.begin_frame(ui, &ctx);
         self.update_state(&ctx);
-        if (self.dialog_open() || self.dialogs.settings_open)
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        {
-            // The topmost thing closes first: a question, otherwise the Settings sheet.
-            if self.dialog_open() {
-                self.dialogs.cancel();
-            } else {
-                self.dialogs.settings_open = false;
-            }
-        }
+        self.close_topmost_on_escape(&ctx);
         if self.viewer_open() {
             // The viewer fills the window: no sidebar, top bar or grid while it is open.
             self.res.grid.shown = false;
@@ -379,7 +398,42 @@ impl App {
         let timeline_was_shown = std::mem::take(&mut self.tl.grid.shown);
         self.handle_navigation_keys(&ctx, grid_was_shown);
         self.handle_timeline_keys(&ctx, timeline_was_shown);
-        let pal = style::Palette::of(&ctx);
+        self.show_panels(ui, &ctx);
+        self.show_overlays(&ctx);
+        if !self.keys_blocked(&ctx) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.clear_selection();
+        }
+    }
+
+    /// Frame statistics and the style for this frame.
+    fn begin_frame(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(stats) = &mut self.frame_stats {
+            stats.frame(self.lib.is_busy());
+            // egui only repaints on events; keep frames coming so there is something to time.
+            ctx.request_repaint();
+        }
+        if self.refresh_settings(ctx) {
+            // This frame's root ui was created with the old style.
+            ui.set_style(ctx.global_style());
+        }
+    }
+
+    /// Escape closes the topmost thing first: a question, otherwise the Settings sheet.
+    fn close_topmost_on_escape(&mut self, ctx: &egui::Context) {
+        if (self.dialog_open() || self.dialogs.settings_open)
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            if self.dialog_open() {
+                self.dialogs.cancel();
+            } else {
+                self.dialogs.settings_open = false;
+            }
+        }
+    }
+
+    /// The top bar, the sidebar and the central panel.
+    fn show_panels(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let pal = style::Palette::of(ctx);
         egui::Panel::top("top")
             .frame(
                 egui::Frame::new()
@@ -407,20 +461,21 @@ impl App {
                     self.no_folders_state(ui);
                 }
             });
+    }
+
+    /// Sheets, dialogs, the search help and the toasts, drawn over the panels.
+    fn show_overlays(&mut self, ctx: &egui::Context) {
         if self.dialogs.settings_open {
-            self.settings_sheet(&ctx);
+            self.settings_sheet(ctx);
         }
-        self.model_confirm_dialog(&ctx);
+        self.model_confirm_dialog(ctx);
         if self.dialogs.help_open {
-            self.help_sheet(&ctx);
+            self.help_sheet(ctx);
         }
-        self.search_help_dropdown(&ctx);
-        self.album_dialogs(&ctx);
-        self.folder_dialogs(&ctx);
-        self.toasts(&ctx);
-        if !self.keys_blocked(&ctx) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.clear_selection();
-        }
+        self.search_help_dropdown(ctx);
+        self.album_dialogs(ctx);
+        self.folder_dialogs(ctx);
+        self.toasts(ctx);
     }
 }
 
