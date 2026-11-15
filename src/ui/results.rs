@@ -57,7 +57,9 @@ pub(super) struct ResultsState {
     pub(super) hits: Arc<Vec<SearchHit>>,
     pub(super) label: String,
     pub(super) error: Option<guide::SearchProblem>,
-    pub(super) last_search_at: Option<Instant>,
+    /// When the last awaited answer was applied (the timed refresh counts from here, so a slow
+    /// search never runs back to back with the next one).
+    pub(super) last_answer_at: Option<Instant>,
     /// Selected moment (seconds) for the selected video.
     pub(super) selected_t: Option<f64>,
     /// Columns in the results grid as of the last layout (for up/down navigation).
@@ -73,7 +75,7 @@ impl Default for ResultsState {
             hits: Arc::default(),
             label: String::new(),
             error: None,
-            last_search_at: None,
+            last_answer_at: None,
             selected_t: None,
             cols: 1,
         }
@@ -118,7 +120,6 @@ impl App {
         }
         self.res.awaiting = Some(self.search.submit(q.clone(), opts));
         self.res.current = Some(q);
-        self.res.last_search_at = Some(Instant::now());
     }
 
     pub(super) fn rerun(&mut self) {
@@ -136,6 +137,7 @@ impl App {
             return;
         }
         self.res.awaiting = None;
+        self.res.last_answer_at = Some(Instant::now());
         self.res.label = r.query.label();
         let prev = self
             .res
@@ -346,30 +348,28 @@ impl App {
         if !grid_was_shown || self.res.hits.is_empty() || self.keys_blocked(ctx) {
             return;
         }
-        let input = selection::read_nav_keys(ctx);
         let results = Arc::clone(&self.res.hits);
         let (len, cols) = (results.len(), self.res.cols);
-        let before = self.res.grid.selected;
-        let next = selection::apply_keys(
-            &input,
-            &mut self.res.grid.sel,
-            before,
-            len,
-            &|i| results[i].file_id,
+        let keys = selection::apply_grid_keys(
+            ctx,
+            &mut self.res.grid,
+            &selection::GridList {
+                len,
+                id_at: &|i| results[i].file_id,
+                favorite_at: &|i| results[i].favorite,
+            },
             |sel, n| step(sel, len, cols, n),
         );
-        if next != before {
-            self.res.grid.selected = next;
-            self.res.selected_t = next.and_then(|i| results[i].t_start);
-            self.res.grid.keyboard_moved = true;
+        if keys.moved {
+            self.res.selected_t = self
+                .res
+                .grid
+                .selected
+                .and_then(|i| results.get(i))
+                .and_then(|h| h.t_start);
         }
-        let multi = self.res.grid.sel.is_multi();
-        let primary = self.res.grid.selected.and_then(|i| self.res.hits.get(i));
-        let primary = primary.map(|h| (h.file_id, h.favorite));
-        self.favorite_key(ctx, multi, primary);
-        if input.enter
-            && let Some(i) = self.res.grid.selected.filter(|&i| i < self.res.hits.len())
-        {
+        self.favorite_key(keys.favorite);
+        if let Some(i) = keys.open {
             self.open_viewer_results(i);
         }
     }

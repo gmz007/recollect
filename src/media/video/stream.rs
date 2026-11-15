@@ -248,6 +248,27 @@ pub(crate) fn is_io_failure(e: ff::Error) -> bool {
     matches!(e, ff::Error::Other { errno } if GONE.contains(&errno))
 }
 
+/// True when the file cannot be opened or its last bytes cannot be read right now. `FFmpeg`
+/// demuxers report `EIO` for some truncated or garbled files too, so the errno alone cannot tell
+/// a vanished drive from damaged data; reading the end of the file can.
+pub(crate) fn storage_unreachable(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL_PROBE_BYTES: i64 = 4096;
+    let probe = || -> std::io::Result<()> {
+        let mut file = std::fs::File::open(path)?;
+        if file.seek(SeekFrom::End(-TAIL_PROBE_BYTES)).is_err() {
+            // Shorter than the probe: read from the start instead.
+            file.rewind()?;
+        }
+        std::io::copy(
+            &mut file.by_ref().take(2 * TAIL_PROBE_BYTES as u64),
+            &mut std::io::sink(),
+        )?;
+        Ok(())
+    };
+    probe().is_err()
+}
+
 /// Like [`is_io_failure`], looking through the context layers of an `anyhow` error.
 pub(crate) fn chain_is_io_failure(e: &anyhow::Error) -> bool {
     e.chain()

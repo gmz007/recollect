@@ -203,14 +203,15 @@ pub(super) fn show(
     let hovered = ui.rect_contains_pointer(rect);
     let small = rect.width() < 72.0;
     let (circle, star) = interact_zones(ui, id, rect, tile, small);
-    describe_zones(tile, &resp, &circle, &star);
+    describe_zones(tile, small, &resp, &circle, &star);
 
     if ui.is_rect_visible(rect) {
         paint(ui, thumbs, rect, tile, hovered, small, &pal);
     }
 
     let event = click_event(ui, &resp, &circle, &star);
-    let over_control = (tile.selectable && circle.hovered()) || star.hovered();
+    // The zones of small tiles are not drawn and take no clicks, so they are no controls.
+    let over_control = !small && ((tile.selectable && circle.hovered()) || star.hovered());
     if hovered && (over_control || resp.hovered()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -252,29 +253,33 @@ fn interact_zones(
     (circle, star)
 }
 
-/// What assistive technology reads for the circle, the star and the tile itself.
+/// What assistive technology reads for the circle, the star and the tile itself. Small tiles
+/// draw neither the circle nor the star, so only the tile is described there.
 fn describe_zones(
     tile: &Tile<'_>,
+    small: bool,
     resp: &egui::Response,
     circle: &egui::Response,
     star: &egui::Response,
 ) {
-    if tile.selectable {
+    if tile.selectable && !small {
         circle.widget_info(|| {
             let verb = if tile.checked() { "Deselect" } else { "Select" };
             let label = format!("{verb} {}", (tile.name)());
             egui::WidgetInfo::selected(egui::Role::CheckBox, true, tile.checked(), &label)
         });
     }
-    star.widget_info(|| {
-        let name = (tile.name)();
-        let label = if tile.favorite {
-            format!("Remove {name} from favorites")
-        } else {
-            format!("Add {name} to favorites")
-        };
-        egui::WidgetInfo::selected(egui::Role::Button, true, tile.favorite, &label)
-    });
+    if !small {
+        star.widget_info(|| {
+            let name = (tile.name)();
+            let label = if tile.favorite {
+                format!("Remove {name} from favorites")
+            } else {
+                format!("Add {name} to favorites")
+            };
+            egui::WidgetInfo::selected(egui::Role::Button, true, tile.favorite, &label)
+        });
+    }
     resp.widget_info(|| {
         let label = format!("{} {}", tile.role, (tile.name)());
         egui::WidgetInfo::selected(

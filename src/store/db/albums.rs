@@ -106,7 +106,10 @@ impl Db {
     /// Creates an album and puts `files` in it in one transaction: on any error nothing is
     /// left behind. Returns the id and how many files were added.
     pub fn create_album_with(&mut self, name: &str, files: &[i64]) -> Result<(i64, usize)> {
-        let tx = self.conn.transaction()?;
+        // Immediate: the name check and the insert must see the same albums.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let name = check_album_name(
             name,
             Self::existing_album_names(&tx)?

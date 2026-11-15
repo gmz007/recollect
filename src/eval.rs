@@ -181,7 +181,12 @@ pub fn run(lib: &Library, queries: &Path, root: &Path) -> Result<Report> {
         )?;
         let rank = hits.iter().position(|h| matches(h, &exp));
         rep.ranks.push((q.id.clone(), rank));
-        tally(&mut rep, &mut sums, (kind, q.source.as_str()), &hits, &exp);
+        tally(
+            &mut rep,
+            &mut sums,
+            (kind, q.source.as_str()),
+            (&hits, &exp, rank),
+        );
     }
     fill_averages(&mut rep, &sums);
     Ok(rep)
@@ -193,10 +198,8 @@ fn tally(
     rep: &mut Report,
     sums: &mut Sums,
     (kind, source): (MediaKind, &str),
-    hits: &[SearchHit],
-    exp: &[Expected],
+    (hits, exp, rank): (&[SearchHit], &[Expected], Option<usize>),
 ) {
-    let rank = hits.iter().position(|h| matches(h, exp));
     let at = |k: usize| f64::from(u8::from(rank.is_some_and(|r| r < k)));
     match (kind, source) {
         (MediaKind::Video, _) => {

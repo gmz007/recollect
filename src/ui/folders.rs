@@ -184,7 +184,7 @@ pub(super) struct AddFolderOutcome {
 }
 
 /// What the typed-path row did in one frame.
-pub(super) enum TypedFolder {
+enum TypedFolder {
     Nothing,
     Bad,
     Folder(PathBuf),
@@ -215,10 +215,7 @@ pub(super) fn add_folder_body(
 
 /// The explanation, the folder picker button and the suggested folders. Returns the folder
 /// that was chosen, if any.
-pub(super) fn pick_folder_rows(
-    ui: &mut egui::Ui,
-    suggestions: &[(String, PathBuf)],
-) -> Option<PathBuf> {
+fn pick_folder_rows(ui: &mut egui::Ui, suggestions: &[(String, PathBuf)]) -> Option<PathBuf> {
     let mut chosen = None;
     ui.set_width(420.0);
     ui.label(
@@ -256,7 +253,7 @@ pub(super) fn pick_folder_rows(
 
 /// The "or type a folder path" field with the Add and Cancel buttons. Returns what Add did and
 /// whether Cancel was clicked.
-pub(super) fn typed_folder_row(ui: &mut egui::Ui, typed: &mut String) -> (TypedFolder, bool) {
+fn typed_folder_row(ui: &mut egui::Ui, typed: &mut String) -> (TypedFolder, bool) {
     ui.add_space(12.0);
     ui.label("or type a folder path");
     let r = ui.add(

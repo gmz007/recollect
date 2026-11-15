@@ -192,44 +192,24 @@ pub(crate) enum Outcome {
     Failed,
 }
 
-/// What happened to a file that failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Failure {
-    /// Looks temporary; the file stays pending and the next run tries it again.
-    Retry,
-    /// The error was stored on the file; it is not retried until it changes.
-    Recorded,
-}
-
-impl Failure {
-    /// Whether the failure counts as an error in the run summary.
-    #[cfg(test)]
-    pub(crate) fn is_error(self) -> bool {
-        self == Self::Recorded
-    }
-}
-
 /// Records a per-file failure. Failures that look temporary (the file or its drive vanished,
-/// I/O errors) leave the file pending so the next run retries it; decode failures are
-/// recorded as errors.
-pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Result<Failure> {
-    let transient = is_transient(f.path.exists(), e);
+/// I/O errors) leave the file pending so the next run retries it ([`Outcome::Deferred`]);
+/// decode failures are recorded as errors on the file ([`Outcome::Failed`]).
+pub(crate) fn file_failed(lib: &Library, f: &FileRow, e: &anyhow::Error) -> Result<Outcome> {
+    let transient = is_transient(crate::media::video::storage_unreachable(&f.path), e);
     if transient {
         tracing::warn!("{}: {e:#} (will retry on the next scan)", f.path.display());
-    } else {
-        lib.db.lock().set_error(f.id, &format!("{e:#}"))?;
+        return Ok(Outcome::Deferred);
     }
-    Ok(if transient {
-        Failure::Retry
-    } else {
-        Failure::Recorded
-    })
+    lib.db.lock().set_error(f.id, &format!("{e:#}"))?;
+    Ok(Outcome::Failed)
 }
 
-/// Whether a failure looks temporary: the file is gone, or the error chain holds an I/O error
-/// (from the standard library or from the video decoder) that is not about the data itself.
-fn is_transient(path_exists: bool, e: &anyhow::Error) -> bool {
-    !path_exists
+/// Whether a failure looks temporary: the file or its storage cannot be reached right now, or
+/// the error chain holds a standard-library I/O error that is not about the data itself. An
+/// `FFmpeg` I/O errno alone does not count: some demuxers raise it for damaged files.
+fn is_transient(storage_unreachable: bool, e: &anyhow::Error) -> bool {
+    storage_unreachable
         || e.chain().any(|c| {
             c.downcast_ref::<std::io::Error>().is_some_and(|io| {
                 !matches!(
@@ -238,20 +218,15 @@ fn is_transient(path_exists: bool, e: &anyhow::Error) -> bool {
                 )
             })
         })
-        || crate::media::video::chain_is_io_failure(e)
 }
 
 /// Records a failed file and counts it in the progress. If the failure cannot be recorded
 /// (a database error) the file stays pending and is retried next run.
 pub(crate) fn fail_file(lib: &Library, prog: &mut Progress, f: &FileRow, e: &anyhow::Error) {
-    let failure = file_failed(lib, f, e).unwrap_or_else(|db_err| {
+    let outcome = file_failed(lib, f, e).unwrap_or_else(|db_err| {
         tracing::warn!("{}: could not record failure: {db_err:#}", f.path.display());
-        Failure::Retry
+        Outcome::Deferred
     });
-    let outcome = match failure {
-        Failure::Retry => Outcome::Deferred,
-        Failure::Recorded => Outcome::Failed,
-    };
     prog.file_done(lib, f, 0, outcome);
 }
 
@@ -316,7 +291,7 @@ pub(crate) struct Progress {
     items: usize,
     last_update: Instant,
     /// Files left for the next run; they are part of `p.done` so the bar reaches its end.
-    pub deferred: usize,
+    pub(crate) deferred: usize,
 }
 
 impl Progress {
@@ -557,21 +532,18 @@ mod tests {
     }
 
     #[test]
-    fn an_ffmpeg_io_failure_is_temporary_but_invalid_data_is_not() {
+    fn an_ffmpeg_io_errno_is_temporary_only_when_the_storage_is_unreachable() {
         use ffmpeg_next as ff;
         let io = anyhow::Error::new(ff::Error::Other {
             errno: ff::error::EIO,
         })
         .context("reading packet");
-        assert!(is_transient(true, &io));
+        assert!(!is_transient(false, &io), "damaged data is recorded");
+        assert!(is_transient(true, &io), "an unreachable drive is retried");
         let bad = anyhow::Error::new(ff::Error::InvalidData).context("reading packet");
-        assert!(!is_transient(true, &bad));
-        assert!(is_transient(false, &bad), "a vanished file is temporary");
-    }
-
-    #[test]
-    fn only_recorded_failures_count_as_errors() {
-        assert!(Failure::Recorded.is_error());
-        assert!(!Failure::Retry.is_error());
+        assert!(!is_transient(false, &bad));
+        assert!(is_transient(true, &bad), "a vanished file is temporary");
+        let std_io = anyhow::Error::new(std::io::Error::other("disk"));
+        assert!(is_transient(false, &std_io));
     }
 }

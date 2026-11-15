@@ -147,3 +147,25 @@ fn a_bulk_favorite_failure_is_one_notice() {
     settle(&mut h, || app.borrow().fav_marks.is_empty());
     assert!(app.borrow().tl.items.iter().all(|it| !it.favorite));
 }
+
+#[test]
+fn keys_do_not_reach_the_grid_behind_an_open_tile_menu() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 4);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 4);
+    click_with(&mut h, "Item p1.jpg", egui::Modifiers::COMMAND);
+    let before = lib.favorites_version();
+    h.get_by_label("Item p1.jpg").click_secondary();
+    h.run_steps(3);
+    assert_eq!(tl_selection(&app).len(), 1, "the tile is selected");
+    assert!(
+        h.get_all_by_label("Add to album…").count() > 0,
+        "the menu is open"
+    );
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    lib.wait_writes();
+    assert_eq!(lib.favorites_version(), before, "nothing was favorited");
+    assert!(app.borrow().fav_marks.is_empty());
+}

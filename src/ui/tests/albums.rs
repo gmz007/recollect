@@ -492,3 +492,13 @@ fn a_refused_album_name_leaves_the_field_ready_for_typing() {
         "the name field takes focus again"
     );
 }
+
+#[test]
+fn small_tiles_expose_no_select_or_favorite_buttons() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let h = small_tiles_harness(&app);
+    h.get_by_label("Item img1.jpg");
+    assert!(h.query_by_label("Select Item img1.jpg").is_none());
+    assert!(h.query_by_label("Add Item img1.jpg to favorites").is_none());
+}

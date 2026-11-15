@@ -49,6 +49,8 @@ impl Library {
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
+            // Saves the index cache unless a job is running; a running job (the scan this
+            // started, or an earlier one) saves when it ends instead.
             lib.save_index_cache();
         });
     }
@@ -83,6 +85,8 @@ impl Library {
             }
             lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
             lib.notify();
+            // Saves the index cache unless a job is running; a running job (the scan this
+            // started, or an earlier one) saves when it ends instead.
             lib.save_index_cache();
         });
     }
@@ -120,6 +124,8 @@ impl Library {
                 }
                 lib.jobs_finished.fetch_add(1, Ordering::AcqRel);
                 lib.notify();
+                // Saves the index cache unless a job is running; a running job (the scan this
+                // started, or an earlier one) saves when it ends instead.
                 lib.save_index_cache();
             },
         );

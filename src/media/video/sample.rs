@@ -1,7 +1,7 @@
 //! Sampling frames through a whole video, one GOP at a time.
 
 use super::convert::Converter;
-use super::stream::{Stream, chain_is_io_failure, open, packet_time};
+use super::stream::{Stream, chain_is_io_failure, open, packet_time, storage_unreachable};
 use super::{Frame, SamplerConfig, VideoInfo};
 use anyhow::{Result, bail};
 use ffmpeg_next as ff;
@@ -68,12 +68,13 @@ pub fn sample(
 }
 
 /// The next packet, or `None` at the end of the stream. A read error after some frames were
-/// emitted also ends the stream, unless the cause is an I/O failure.
+/// emitted also ends the stream, unless the cause is an I/O errno and the storage itself is
+/// unreachable right now (the errno alone can also mean damaged data).
 fn next_packet_or_stop(s: &mut Stream, emitted: usize, path: &Path) -> Result<Option<ff::Packet>> {
     match s.next_packet() {
         Ok(Some(p)) => Ok(Some(p)),
         Ok(None) => Ok(None),
-        Err(e) if emitted > 0 && !chain_is_io_failure(&e) => {
+        Err(e) if emitted > 0 && !(chain_is_io_failure(&e) && storage_unreachable(path)) => {
             // A damaged region late in a long file shouldn't discard everything before it.
             // A vanished drive is different: fail the file so it is retried in full.
             tracing::warn!("{}: stopping at a read error: {e:#}", path.display());

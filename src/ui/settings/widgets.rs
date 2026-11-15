@@ -99,7 +99,9 @@ impl CardText {
         ui: &egui::Ui,
         pal: Palette,
         text_w: f32,
-        (title, blurb, note): (&str, &str, &str),
+        title: &str,
+        blurb: &str,
+        note: &str,
     ) -> Self {
         let painter = ui.painter();
         Self {
@@ -145,7 +147,7 @@ pub(in crate::ui) fn choice_card(
 ) -> bool {
     let pal = Palette::of(ui.ctx());
     let width = ui.available_width();
-    let text = CardText::measure(ui, pal, width - 56.0, (title, blurb, note));
+    let text = CardText::measure(ui, pal, width - 56.0, title, blurb, note);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, text.height()), Sense::click());
     paint_choice_card_background(ui, pal, rect, resp.hovered(), selected);
     paint_choice_card_text(ui, pal, rect, selected, text);

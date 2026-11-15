@@ -26,11 +26,20 @@ pub(super) enum Slot {
     Ready(egui::TextureHandle),
     /// Decoding failed at this moment.
     Failed(Instant),
+    /// Failed before and queued for another try: it still looks failed until the answer comes.
+    Retrying,
 }
 
 impl Slot {
+    /// True while a decode is queued or running (also for a retry).
     pub(super) fn is_loading(&self) -> bool {
-        matches!(self, Slot::Loading)
+        matches!(self, Slot::Loading | Slot::Retrying)
+    }
+
+    /// True when the last answer was a failure (also while a retry is under way), so the
+    /// display keeps its failed look instead of flipping to "loading" and back.
+    pub(super) fn looks_failed(&self) -> bool {
+        matches!(self, Slot::Failed(_) | Slot::Retrying)
     }
 }
 
@@ -151,15 +160,15 @@ impl<K: Clone + Eq + Hash + Send + 'static> TextureLoader<K> {
         }
     }
 
-    /// Queues `key` again when it failed long enough ago; true when it was queued.
-    pub(super) fn requeue_if_due(&mut self, key: &K) -> bool {
+    /// When `key` failed long enough ago, marks it as being retried and returns true; the
+    /// caller then queues it the way it queues any new request (so its queue limits apply).
+    pub(super) fn start_retry_if_due(&mut self, key: &K) -> bool {
         let due = matches!(
             self.states.get(key),
             Some((Slot::Failed(at), _)) if retry_due(*at, Instant::now())
         );
         if due && let Some(entry) = self.states.get_mut(key) {
-            entry.0 = Slot::Loading;
-            self.shared.push(key.clone());
+            entry.0 = Slot::Retrying;
         }
         due
     }
@@ -247,11 +256,29 @@ mod tests {
     }
 
     #[test]
-    fn a_recently_failed_image_is_not_queued_again() {
+    fn a_recently_failed_image_is_not_retried() {
         let ctx = egui::Context::default();
         let mut loader = TextureLoader::new(&ctx, "test", 1, |_: &u32| None, |k| format!("t{k}"));
         loader.states.insert(1, (Slot::Failed(Instant::now()), 0));
-        assert!(!loader.requeue_if_due(&1));
+        assert!(!loader.start_retry_if_due(&1));
+        assert!(matches!(loader.states[&1].0, Slot::Failed(_)));
         assert!(loader.shared.queue.lock().is_empty());
+    }
+
+    #[test]
+    fn a_due_failed_image_is_retried_and_reads_as_failed_until_the_answer_arrives() {
+        let ctx = egui::Context::default();
+        let mut loader = TextureLoader::new(&ctx, "test", 1, |_: &u32| None, |k| format!("t{k}"));
+        let long_ago = Instant::now().checked_sub(RETRY_FAILED_AFTER * 2).unwrap();
+        loader.states.insert(1, (Slot::Failed(long_ago), 0));
+        assert!(loader.start_retry_if_due(&1));
+        let slot = &loader.states[&1].0;
+        assert!(slot.looks_failed(), "no flip to the loading look");
+        assert!(slot.is_loading(), "the loader treats it as in flight");
+        assert!(!loader.start_retry_if_due(&1), "not retried twice");
+        // The answer (another failure) replaces the slot with a fresh failure.
+        loader.shared.done.lock().push((1, None));
+        loader.upload_finished(&ctx, true);
+        assert!(matches!(loader.states[&1].0, Slot::Failed(at) if at > long_ago));
     }
 }

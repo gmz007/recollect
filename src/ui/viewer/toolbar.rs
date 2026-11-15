@@ -80,7 +80,7 @@ impl Viewer {
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                self.left_buttons(ui, (row.width(), pos_w), text, actions);
+                self.left_buttons(ui, row.width(), pos_w, text, actions);
             },
         );
         let left_end = left.response.rect.max.x;
@@ -99,11 +99,12 @@ impl Viewer {
     }
 
     /// The left of the toolbar: Back and, while the info panel is closed, the item's name.
-    /// `widths` are the bar's width and the position label's.
+    /// `row_width` is the bar's width and `pos_w` the position label's.
     fn left_buttons(
         &mut self,
         ui: &mut egui::Ui,
-        (row_width, pos_w): (f32, f32),
+        row_width: f32,
+        pos_w: f32,
         text: bool,
         actions: &mut Vec<Action>,
     ) {

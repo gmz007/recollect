@@ -1,6 +1,6 @@
 use super::convert::{frame_sizes, rotate, rotation_from_matrix};
+use super::stream::{chain_is_io_failure, finite_positive, is_io_failure};
 use super::stream::{checked_time_base, stream_time};
-use super::stream::{finite_positive, is_io_failure};
 use super::*;
 use anyhow::anyhow;
 use std::path::Path;
@@ -273,4 +273,21 @@ fn cancel_stops_sampling() {
     let p = make_clip(d.path(), "c.mp4", 10, 10, &[]);
     let err = sample(&p, SamplerConfig::default(), 64, &|| true, &mut |_| Ok(())).unwrap_err();
     assert!(err.to_string().contains("cancelled"));
+}
+
+#[test]
+fn storage_is_reachable_for_an_existing_file_and_not_for_a_missing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let small = dir.path().join("small.bin");
+    std::fs::write(&small, b"tiny").unwrap();
+    let empty = dir.path().join("empty.bin");
+    std::fs::write(&empty, b"").unwrap();
+    let big = dir.path().join("big.bin");
+    std::fs::write(&big, vec![7u8; 100_000]).unwrap();
+    assert!(!super::stream::storage_unreachable(&small));
+    assert!(!super::stream::storage_unreachable(&empty));
+    assert!(!super::stream::storage_unreachable(&big));
+    assert!(super::stream::storage_unreachable(
+        &dir.path().join("gone.bin")
+    ));
 }

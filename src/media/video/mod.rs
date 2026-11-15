@@ -16,7 +16,7 @@ mod stream;
 
 pub use sample::sample;
 pub use still::frame_at;
-pub(crate) use stream::{chain_is_io_failure, header_duration, open_input};
+pub(crate) use stream::{header_duration, open_input, storage_unreachable};
 
 use super::image::Rgb;
 use ffmpeg_next as ff;

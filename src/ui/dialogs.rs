@@ -53,13 +53,14 @@ impl App {
         self.dialogs.any_open()
     }
 
-    /// True when keys must not reach the views: a text field has focus, Settings is open or an
-    /// album dialog is.
+    /// True when keys must not reach the views: a text field has focus, Settings is open, an
+    /// album dialog is, or a menu is open (keys then belong to the menu).
     pub(super) fn keys_blocked(&self, ctx: &egui::Context) -> bool {
         self.dialogs.settings_open
             || self.dialog_open()
             || ctx.text_edit_focused()
             || self.search_help.inside
+            || egui::Popup::is_any_open(ctx)
     }
 }
 

@@ -291,7 +291,7 @@ impl App {
         // Details (file size, camera) are re-read once the library has changed under them.
         self.previews
             .sync_details((self.tl.generation, self.lib.jobs_finished()));
-        let keys = !self.keys_blocked(ui.ctx()) && !egui::Popup::is_any_open(ui.ctx());
+        let keys = !self.keys_blocked(ui.ctx());
         let actions = viewer.show(
             ui,
             &mut self.previews,

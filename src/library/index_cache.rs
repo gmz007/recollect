@@ -18,7 +18,9 @@ impl Library {
     /// Writes the in-memory index to disk so the next start can skip decoding every vector.
     /// Does nothing if a save is already running, the cache is already current, or a job is
     /// running: the save holds the index read lock for the whole write, which would stall the
-    /// job's next index write and, behind it, searches. A running job saves when it ends.
+    /// job's next index write and, behind it, searches. Callers that finish a quick task (adding
+    /// or removing a folder) therefore save only when no job is running; a running job saves
+    /// when it ends.
     pub fn save_index_cache(&self) {
         if self.is_busy() {
             return;

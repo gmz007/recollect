@@ -176,7 +176,9 @@ impl Previews {
 
     fn request(&mut self, key: &PreviewKey, urgent: bool) -> Preview<'_> {
         let frame = self.loader.frame;
-        self.loader.requeue_if_due(key);
+        if self.loader.start_retry_if_due(key) {
+            self.loader.shared.push(key.clone());
+        }
         let shared = &self.loader.shared;
         let entry = match self.loader.states.entry(key.clone()) {
             Entry::Vacant(v) => {
@@ -195,7 +197,7 @@ impl Previews {
         match &entry.0 {
             Slot::Ready(t) => Preview::Ready(t),
             Slot::Loading => Preview::Loading,
-            Slot::Failed(_) => Preview::Failed,
+            Slot::Failed(_) | Slot::Retrying => Preview::Failed,
         }
     }
 

@@ -568,6 +568,13 @@ fn the_timed_refresh_waits_for_the_answer_to_the_last_search() {
 }
 
 #[test]
+fn a_slow_search_leaves_a_pause_after_its_answer_before_the_next_refresh() {
+    // The search took longer than the refresh interval, but its answer arrived just now.
+    let just_answered = Instant::now();
+    assert!(!crate::ui::results_refresh_due(Some(just_answered), None));
+}
+
+#[test]
 fn emptying_the_field_before_the_answer_arrives_leaves_no_results() {
     let d = tempfile::tempdir().unwrap();
     let app = searchable_app(d.path());

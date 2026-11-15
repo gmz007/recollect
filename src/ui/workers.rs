@@ -114,7 +114,9 @@ impl ThumbCache {
     /// The texture for `key` if ready; schedules loading otherwise.
     pub fn get(&mut self, key: &ThumbKey) -> Option<&egui::TextureHandle> {
         let frame = self.loader.frame;
-        self.loader.requeue_if_due(key);
+        if self.loader.start_retry_if_due(key) {
+            self.request(key.clone());
+        }
         if let Some(entry) = self.loader.states.get_mut(key) {
             entry.1 = frame;
         } else {
@@ -131,7 +133,10 @@ impl ThumbCache {
     }
 
     pub fn failed(&self, key: &ThumbKey) -> bool {
-        matches!(self.loader.states.get(key), Some((Slot::Failed(_), _)))
+        self.loader
+            .states
+            .get(key)
+            .is_some_and(|(slot, _)| slot.looks_failed())
     }
 
     fn request(&mut self, key: ThumbKey) {

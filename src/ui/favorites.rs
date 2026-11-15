@@ -1,7 +1,6 @@
 //! Favorite marks: shown at once, saved in the background, and taken back if saving fails.
 
 use super::App;
-use super::grid::take_plain_key;
 use super::timeline::View;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,6 +19,15 @@ pub(super) struct FavMark {
 /// The favorite flag to show for a file: the pending mark if there is one, else `listed`.
 pub(super) fn marked(marks: &HashMap<i64, FavMark>, file_id: i64, listed: bool) -> bool {
     marks.get(&file_id).map_or(listed, |m| m.value)
+}
+
+/// What the F key acts on.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum FavoriteKey {
+    /// Several items are selected: all of them.
+    Selection,
+    /// One item: its file id and stored favorite flag.
+    Item(i64, bool),
 }
 
 impl App {
@@ -41,20 +49,12 @@ impl App {
     }
 
     /// The F key: favorite the whole selection when several items are selected, otherwise
-    /// the primary item (`primary` is its file id and stored flag).
-    pub(super) fn favorite_key(
-        &mut self,
-        ctx: &egui::Context,
-        multi: bool,
-        primary: Option<(i64, bool)>,
-    ) {
-        if !take_plain_key(ctx, egui::Key::F) {
-            return;
-        }
-        if multi {
-            self.toggle_favorite_of_selection();
-        } else if let Some((file_id, listed)) = primary {
-            self.toggle_favorite(file_id, listed);
+    /// the primary item.
+    pub(super) fn favorite_key(&mut self, key: Option<FavoriteKey>) {
+        match key {
+            Some(FavoriteKey::Selection) => self.toggle_favorite_of_selection(),
+            Some(FavoriteKey::Item(file_id, listed)) => self.toggle_favorite(file_id, listed),
+            None => {}
         }
     }
 

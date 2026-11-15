@@ -248,7 +248,7 @@ fn empty_mount_point_keeps_the_index_and_missing_files_stay_pending() {
     let err = anyhow!("decode failed");
     assert_eq!(
         crate::indexer::file_failed(&lib, &row, &err).unwrap(),
-        crate::indexer::Failure::Retry
+        crate::indexer::Outcome::Deferred
     );
     // A file that is still there but cannot be decoded is recorded as an error.
     let bad = media.join("bad.jpg");
@@ -256,7 +256,7 @@ fn empty_mount_point_keeps_the_index_and_missing_files_stay_pending() {
     let row = crate::store::db::FileRow { path: bad, ..row };
     assert_eq!(
         crate::indexer::file_failed(&lib, &row, &err).unwrap(),
-        crate::indexer::Failure::Recorded
+        crate::indexer::Outcome::Failed
     );
 }
 
@@ -1171,4 +1171,24 @@ fn names_of(items: &[TimelineItem]) -> Vec<String> {
         .iter()
         .map(|i| i.path.file_name().unwrap().to_string_lossy().into_owned())
         .collect()
+}
+
+#[test]
+fn progress_counts_indexed_failed_and_deferred_files() {
+    use crate::indexer::{Outcome, Progress};
+    let dir = tempfile::tempdir().unwrap();
+    let lib = open(dir.path());
+    let row = crate::store::db::FileRow {
+        id: 1,
+        path: "/x.jpg".into(),
+        kind: MediaKind::Image,
+        size: 1,
+        mtime: 1,
+        status: crate::store::db::FileStatus::Pending,
+    };
+    let mut prog = Progress::new(3, crate::model::Device::Cpu);
+    prog.file_done(&lib, &row, 1, Outcome::Indexed);
+    prog.file_done(&lib, &row, 0, Outcome::Failed);
+    prog.file_done(&lib, &row, 0, Outcome::Deferred);
+    assert_eq!((prog.p.done, prog.p.errors, prog.deferred), (3, 1, 1));
 }

@@ -6,7 +6,9 @@
 //! a non-empty selection; [`Selection::sync`] restores that after the grid changed the primary
 //! by itself.
 
-use super::Nav;
+use super::favorites::FavoriteKey;
+use super::grid::take_plain_key;
+use super::{GridState, Nav};
 use std::collections::HashSet;
 
 /// Which modifier keys a click carried.
@@ -273,6 +275,59 @@ pub(super) fn read_nav_keys(ctx: &egui::Context) -> NavInput {
         ctx.memory_mut(|m| m.surrender_focus(id));
     }
     out
+}
+
+/// The list a grid shows, as far as the keys need to know it.
+pub(super) struct GridList<'a> {
+    pub(super) len: usize,
+    pub(super) id_at: &'a dyn Fn(usize) -> i64,
+    /// The stored favorite flag of the item at an index.
+    pub(super) favorite_at: &'a dyn Fn(usize) -> bool,
+}
+
+/// What this frame's grid keys asked for beyond moving the selection.
+pub(super) struct GridKeyResult {
+    /// The primary selection moved (to a new item or off the list).
+    pub(super) moved: bool,
+    /// F was pressed: what to favorite, taken from the selection after the arrows were applied.
+    pub(super) favorite: Option<FavoriteKey>,
+    /// Enter was pressed on a selected item.
+    pub(super) open: Option<usize>,
+}
+
+/// The flow shared by the results grid and the timeline: read the keys, move the selection
+/// with `step` (the grid's own idea of up, down, left and right), then look at F and Enter
+/// against the item the arrows moved to.
+pub(super) fn apply_grid_keys(
+    ctx: &egui::Context,
+    grid: &mut GridState,
+    list: &GridList<'_>,
+    step: impl Fn(Option<usize>, Nav) -> Option<usize>,
+) -> GridKeyResult {
+    let input = read_nav_keys(ctx);
+    let before = grid.selected;
+    let next = apply_keys(&input, &mut grid.sel, before, list.len, list.id_at, step);
+    let moved = next != before;
+    if moved {
+        grid.selected = next;
+        grid.keyboard_moved = true;
+    }
+    let selected = grid.selected.filter(|&i| i < list.len);
+    let favorite = take_plain_key(ctx, egui::Key::F)
+        .then(|| {
+            if grid.sel.is_multi() {
+                Some(FavoriteKey::Selection)
+            } else {
+                selected.map(|i| FavoriteKey::Item((list.id_at)(i), (list.favorite_at)(i)))
+            }
+        })
+        .flatten();
+    let open = selected.filter(|_| input.enter);
+    GridKeyResult {
+        moved,
+        favorite,
+        open,
+    }
 }
 
 /// Applies this frame's keys to the selection of a list and returns the new primary index.

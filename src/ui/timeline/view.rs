@@ -323,21 +323,17 @@ impl App {
         if !grid_was_shown || self.tl.items.is_empty() || self.keys_blocked(ctx) {
             return;
         }
-        let multi = self.tl.grid.sel.is_multi();
-        let primary = self.tl.grid.selected.and_then(|i| self.tl.items.get(i));
-        let primary = primary.map(|it| (it.file_id, it.favorite));
-        self.favorite_key(ctx, multi, primary);
-        let input = selection::read_nav_keys(ctx);
         let items = Arc::clone(&self.tl.items);
         let len = items.len();
         let layout = self.tl.layout.as_ref();
-        let before = self.tl.grid.selected;
-        let next = selection::apply_keys(
-            &input,
-            &mut self.tl.grid.sel,
-            before,
-            len,
-            &|i| items[i].file_id,
+        let keys = selection::apply_grid_keys(
+            ctx,
+            &mut self.tl.grid,
+            &selection::GridList {
+                len,
+                id_at: &|i| items[i].file_id,
+                favorite_at: &|i| items[i].favorite,
+            },
             |sel, n| {
                 // Nothing (valid) selected: any arrow picks the first item.
                 let Some(cur) = sel.filter(|&i| i < len) else {
@@ -346,13 +342,8 @@ impl App {
                 Some(layout.map_or(cur, |l| l.step(cur, len, n)))
             },
         );
-        if next != before {
-            self.tl.grid.selected = next;
-            self.tl.grid.keyboard_moved = true;
-        }
-        if input.enter
-            && let Some(i) = self.tl.grid.selected
-        {
+        self.favorite_key(keys.favorite);
+        if let Some(i) = keys.open {
             self.open_timeline_item(i);
         }
     }

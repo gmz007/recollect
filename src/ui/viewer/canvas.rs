@@ -99,21 +99,22 @@ impl Viewer {
             failed,
         } = self.pick_texture(previews, thumbs, fit);
         if let Some(tex) = tex {
-            self.draw_picture(ui, area, &resp, &tex, (loading, ppp));
+            self.draw_picture(ui, area, &resp, &tex, loading, ppp);
         }
         paint_status(ui, area, loading, failed);
         self.nav_buttons(ui, area);
     }
 
-    /// Draws `tex` fitted to `area`, or at full size and draggable when zoomed in. `state` is
-    /// whether `tex` is only the stand-in thumbnail, and the screen's pixels per point.
+    /// Draws `tex` fitted to `area`, or at full size and draggable when zoomed in. `loading` is
+    /// whether `tex` is only the stand-in thumbnail; `ppp` is the screen's pixels per point.
     fn draw_picture(
         &mut self,
         ui: &mut egui::Ui,
         area: Rect,
         resp: &egui::Response,
         tex: &egui::TextureHandle,
-        (loading, ppp): (bool, f32),
+        loading: bool,
+        ppp: f32,
     ) {
         let native = tex.size_vec2();
         let full = (self.zoom && !loading).then(|| {
