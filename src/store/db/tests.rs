@@ -468,8 +468,11 @@ fn timeline_order_and_ties() {
     assert_eq!(names(&asc), ["b.mp4", "d.jpg", "a.jpg", "c.jpg"]);
     assert_eq!(asc[0].camera.as_deref(), Some("cam"));
     assert_eq!(asc[0].date_source, DateSource::Video);
-    // Added order: everything was added in the same second, so path order decides; make
-    // one file "newer" explicitly.
+    // Added order: give every file the same time (the two folders may have been synced in
+    // different seconds), so path order decides; then make one file "newer".
+    db.conn
+        .execute("UPDATE files SET added_at = 1000", [])
+        .unwrap();
     db.conn
         .execute(
             "UPDATE files SET added_at = added_at + 100 WHERE id = ?1",

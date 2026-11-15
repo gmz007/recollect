@@ -80,6 +80,9 @@ pub struct Status {
     /// noticed as a new failure.
     pub error_seq: u64,
     pub last_run: Option<RunSummary>,
+    /// Counts every finished run (each time `last_run` is set), so a run that starts and ends
+    /// between two looks at the status is still noticed.
+    pub run_seq: u64,
 }
 
 impl Status {

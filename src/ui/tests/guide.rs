@@ -410,9 +410,9 @@ fn the_skipped_folders_notice_shows_when_a_run_ends() {
             skipped_folders: vec!["/gone".into()],
             ..Default::default()
         });
+        // A finished run is counted, whether or not the app ever saw it running.
+        s.run_seq += 1;
     });
-    // The app saw the library busy on the previous frame; now it is idle.
-    app.borrow_mut().was_busy = true;
     h.run_steps(2);
     h.get_by_label("Some folders couldn't be reached, so they were left as they were.");
     // Without a run that just ended it stays quiet.

@@ -383,7 +383,11 @@ fn album_view(
     h.get_by_label(&format!("A ({n})")).click();
     settle(&mut h, || {
         let a = app.borrow();
-        matches!(a.tl.view, View::Album(_)) && a.tl.items.len() == n && a.tl.loaded
+        // `awaiting`: the album's own list has arrived, not just the previous view's.
+        matches!(a.tl.view, View::Album(_))
+            && a.tl.items.len() == n
+            && a.tl.loaded
+            && a.tl.awaiting.is_none()
     });
     h.run_steps(3);
     (lib, app, h)

@@ -258,7 +258,11 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
     let before = lib.jobs_finished();
     h.get_by_label("Try again").click();
     settle(&mut h, || lib.jobs_finished() > before);
-    assert!(app.borrow().notices.current().is_none());
+    // The folder of these files does not exist; the finished run says so, and nothing else.
+    assert_eq!(
+        app.borrow().notices.current(),
+        Some("Some folders couldn't be reached, so they were left as they were.")
+    );
     // Check for new photos is offered here too (the sidebar has a button of the same name).
     assert!(
         !h.get_all_by_label("Check for new photos")

@@ -164,7 +164,10 @@ impl Library {
             s.activity = Activity::Idle;
             s.paused = false;
             match res {
-                Ok(sum) => s.last_run = Some(sum),
+                Ok(sum) => {
+                    s.last_run = Some(sum);
+                    s.run_seq += 1;
+                }
                 Err(e) => s.set_error_of(ErrorKind::Scan, format!("Indexing failed: {e:#}")),
             }
         });

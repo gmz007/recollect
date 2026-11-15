@@ -141,8 +141,8 @@ impl App {
     }
 
     /// Toasts for what the status says, and expiry of old ones.
-    pub(super) fn report_status_and_notices(&mut self, ctx: &egui::Context, run_ended: bool) {
-        self.report_status(run_ended);
+    pub(super) fn report_status_and_notices(&mut self, ctx: &egui::Context) {
+        self.report_status();
         let now = Instant::now();
         self.notices.expire(now);
         if let Some(left) = self.notices.next_expiry(now) {
@@ -151,8 +151,9 @@ impl App {
     }
 
     /// Turns what the library reports into toasts: each failure once (also when the same
-    /// message comes again), and folders that could not be reached when a run has just ended.
-    pub(super) fn report_status(&mut self, run_ended: bool) {
+    /// message comes again), and folders that could not be reached once per finished run (by
+    /// its counter, so a run too short to be seen running is reported too).
+    pub(super) fn report_status(&mut self) {
         if self.status.error_seq != self.error_seq_seen {
             self.error_seq_seen = self.status.error_seq;
             if let Some(e) = self.status.last_error.clone() {
@@ -160,13 +161,12 @@ impl App {
                 self.notify_problem(text, e, action);
             }
         }
-        if run_ended
-            && self
-                .status
-                .last_run
-                .as_ref()
-                .is_some_and(|r| !r.skipped_folders.is_empty())
-        {
+        if self.status.run_seq == self.run_seq_seen {
+            return;
+        }
+        self.run_seq_seen = self.status.run_seq;
+        let skipped = |r: &crate::library::RunSummary| !r.skipped_folders.is_empty();
+        if self.status.last_run.as_ref().is_some_and(skipped) {
             self.notify("Some folders couldn't be reached, so they were left as they were.");
         }
     }

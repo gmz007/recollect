@@ -128,6 +128,8 @@ pub struct App {
     search_help: guide::SearchHelp,
     /// `Status::error_seq` of the last error that was shown as a toast.
     error_seq_seen: u64,
+    /// The last finished run that was reported (see `Status::run_seq`).
+    run_seq_seen: u64,
     notices: Notices,
     snapshot: Snapshot,
     snapshot_read: BgRead<Snapshot>,
@@ -234,6 +236,7 @@ impl App {
             welcome: None,
             search_help: guide::SearchHelp::default(),
             error_seq_seen: 0,
+            run_seq_seen: 0,
             notices: Notices::default(),
             snapshot: Snapshot::default(),
             snapshot_read: w.snapshot_read,
@@ -302,8 +305,8 @@ impl App {
         self.status = self.lib.status();
         self.poll_search();
         self.poll_debounce(ctx);
-        let (jobs, run_ended) = self.poll_library(ctx);
-        self.report_status_and_notices(ctx, run_ended);
+        let jobs = self.poll_library(ctx);
+        self.report_status_and_notices(ctx);
         self.poll_favorites();
         self.poll_albums();
         self.update_timeline();
@@ -313,8 +316,8 @@ impl App {
     }
 
     /// Follows what the library is doing: live refreshes while it works, and a full reload
-    /// when a job or run ends. Returns the number of jobs finished so far and whether a run ended just now.
-    fn poll_library(&mut self, ctx: &egui::Context) -> (u64, bool) {
+    /// when a job or run ends. Returns the number of jobs finished so far.
+    fn poll_library(&mut self, ctx: &egui::Context) -> u64 {
         let busy = self.lib.is_busy();
         if busy {
             self.refresh_snapshot(false);
@@ -339,7 +342,7 @@ impl App {
             self.last_prune = Instant::now();
             prune_thumbnails(&self.lib);
         }
-        (jobs, run_ended)
+        jobs
     }
 
     /// Keeps each grid's selection consistent with its primary item (nothing is selected
