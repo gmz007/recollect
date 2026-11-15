@@ -1,3 +1,4 @@
+#![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
 use super::*;
 use crate::indexer::Embedded;
 use crate::media::{MediaKind, ScannedFile};

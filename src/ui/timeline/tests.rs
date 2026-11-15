@@ -1,3 +1,4 @@
+#![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
 #![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
 use super::dates::{group_key, header_text, until_next_midnight};
 use super::layout::{HEADER_H, SECTION_GAP, reveal};

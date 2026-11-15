@@ -113,6 +113,26 @@ Grids keep a **selection by file id** plus a *primary* item (by list index) that
 viewer; ids that vanish in a reload are dropped. Range selection runs in
 list order from an anchor, so it follows the grouping and sort order on screen.
 
+## Code layout
+
+One crate; each directory is one type or one screen split by concern, and no source file holds
+more than a few hundred lines of code.
+
+| Path | What it holds |
+|---|---|
+| `library/` | `Library`, the thread-safe facade for the GUI and CLI: `jobs` (the single background worker, pause/cancel, requests that wait for it), `writes` (favorites and album changes through one writer thread), `folders`, `model` (choice, switch, download), `index_cache`, `status` |
+| `store/db/` | `Db` (SQLite): `schema` (creation and upgrades), `files` (folders, scan sync, dates, counts), `items` (vectors), `timeline`, `albums` |
+| `store/index.rs` | the in-memory vector index and its on-disk cache |
+| `indexer.rs`, `video_index.rs` | the indexing run: scan, dates, image and video embedding |
+| `media/` | `scan`, `image`, `metadata` (capture dates), `video/` (`stream`, `convert`, `sample`, `still`) |
+| `model/` | `registry`, `download`, `embedder` |
+| `search.rs` | turning index candidates into hits |
+| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `timeline/`, `viewer/`, `settings/`, and one file per remaining screen or widget |
+| `cli.rs`, `bench.rs`, `eval.rs` | command-line entry points |
+
+Functions are kept to 50 lines of code (a clippy threshold); longer scenario tests are the
+exception.
+
 ## Interface structure
 
 `ui/style.rs` holds the palettes, fonts (Inter and Material Symbols, with egui's fonts as

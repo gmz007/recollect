@@ -1,4 +1,5 @@
 //! Headless UI tests (`egui_kittest`). No model or GPU needed.
+#![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
 #![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
 
 mod albums;

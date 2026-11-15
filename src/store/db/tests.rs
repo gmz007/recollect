@@ -1,3 +1,4 @@
+#![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
 use super::*;
 use crate::media::metadata::{Capture, DateSource, local_wall_clock};
 use crate::media::{MediaKind, ScannedFile};

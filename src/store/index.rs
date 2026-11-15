@@ -504,6 +504,7 @@ impl VectorIndex {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
     #![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
     use super::*;
 

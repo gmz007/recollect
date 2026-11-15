@@ -1,5 +1,6 @@
 //! Tests with the real models. Ignored by default; run with
 //! `RECOLLECT_TEST_MODELS=<dir with clip-vit-b32/ and/or siglip-base-16/> cargo nextest run --run-ignored all`.
+#![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
 
 use recollect::model::{Device, VisionEncoder, registry};
 use std::path::PathBuf;

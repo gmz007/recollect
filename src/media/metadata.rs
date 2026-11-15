@@ -293,6 +293,7 @@ fn read_video(path: &Path, mtime: i64) -> (Option<Capture>, Option<f64>) {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
     #![expect(
         clippy::cast_possible_truncation,
         reason = "hand-built TIFF structures with a few bytes of payload"
