@@ -2,7 +2,7 @@
 //! says what Recollect is busy with. Also the "Add a folder" dialog and the confirmation for
 //! taking a folder out of the library.
 
-use super::albums::modal_window;
+use super::albums::{Confirmation, confirm_dialog, modal_window};
 use super::style::{self, Palette, icons};
 use super::timeline::{View, thousands};
 use super::{App, folder_labels};
@@ -134,65 +134,91 @@ pub(super) fn nav_row(
     selected: bool,
     reserve_right: f32,
 ) -> (Rect, Response) {
-    let pal = Palette::of(ui.ctx());
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
     if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let radius = CornerRadius::same(style::CONTROL_RADIUS);
-        if selected {
-            painter.rect_filled(rect, radius, pal.accent.gamma_multiply(0.22));
-        } else if resp.hovered() {
-            painter.rect_filled(rect, radius, pal.raised);
-        }
-        let fg = if selected { pal.accent } else { pal.text };
-        painter.text(
-            Pos2::new(rect.min.x + 20.0, rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            icon.codepoint,
-            style::icon_font_id(icon, 20.0),
-            if selected {
-                pal.accent
-            } else {
-                pal.text_secondary
-            },
-        );
-        let mut right = rect.max.x - 10.0 - reserve_right;
-        if let Some(t) = trailing {
-            let g = painter.layout_no_wrap(
-                t.to_string(),
-                egui::TextStyle::Small.resolve(ui.style()),
-                pal.text_secondary,
-            );
-            right -= g.size().x;
-            painter.galley(
-                Pos2::new(right, rect.center().y - g.size().y / 2.0),
-                g,
-                pal.text_secondary,
-            );
-            right -= 8.0;
-        }
-        let max_w = (right - (rect.min.x + 38.0)).max(20.0);
-        let mut job = egui::text::LayoutJob::simple_singleline(
-            text.to_string(),
-            egui::TextStyle::Body.resolve(ui.style()),
-            fg,
-        );
-        job.wrap = egui::text::TextWrapping {
-            max_width: max_w,
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('…'),
-        };
-        let g = painter.layout_job(job);
-        painter.galley(
-            Pos2::new(rect.min.x + 38.0, rect.center().y - g.size().y / 2.0),
-            g,
-            fg,
-        );
+        paint_nav_row_icon(ui, rect, resp.hovered(), icon, selected);
+        paint_nav_row_text(ui, rect, text, trailing, selected, reserve_right);
     }
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, accessible));
     (rect, resp.on_hover_cursor(egui::CursorIcon::PointingHand))
+}
+
+/// The row's background (selected or hovered) and its icon.
+fn paint_nav_row_icon(
+    ui: &egui::Ui,
+    rect: Rect,
+    hovered: bool,
+    icon: MaterialIcon,
+    selected: bool,
+) {
+    let pal = Palette::of(ui.ctx());
+    let painter = ui.painter();
+    let radius = CornerRadius::same(style::CONTROL_RADIUS);
+    if selected {
+        painter.rect_filled(rect, radius, pal.accent.gamma_multiply(0.22));
+    } else if hovered {
+        painter.rect_filled(rect, radius, pal.raised);
+    }
+    painter.text(
+        Pos2::new(rect.min.x + 20.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        icon.codepoint,
+        style::icon_font_id(icon, 20.0),
+        if selected {
+            pal.accent
+        } else {
+            pal.text_secondary
+        },
+    );
+}
+
+/// The row's trailing text, right-aligned, and its label, cut short with an ellipsis to fit
+/// what is left.
+fn paint_nav_row_text(
+    ui: &egui::Ui,
+    rect: Rect,
+    text: &str,
+    trailing: Option<&str>,
+    selected: bool,
+    reserve_right: f32,
+) {
+    let pal = Palette::of(ui.ctx());
+    let painter = ui.painter();
+    let fg = if selected { pal.accent } else { pal.text };
+    let mut right = rect.max.x - 10.0 - reserve_right;
+    if let Some(t) = trailing {
+        let g = painter.layout_no_wrap(
+            t.to_string(),
+            egui::TextStyle::Small.resolve(ui.style()),
+            pal.text_secondary,
+        );
+        right -= g.size().x;
+        painter.galley(
+            Pos2::new(right, rect.center().y - g.size().y / 2.0),
+            g,
+            pal.text_secondary,
+        );
+        right -= 8.0;
+    }
+    let max_w = (right - (rect.min.x + 38.0)).max(20.0);
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_string(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        fg,
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_w,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let g = painter.layout_job(job);
+    painter.galley(
+        Pos2::new(rect.min.x + 38.0, rect.center().y - g.size().y / 2.0),
+        g,
+        fg,
+    );
 }
 
 /// A section title with an optional icon button on its right. Returns the button's response.
@@ -217,6 +243,48 @@ pub(super) fn section_header(
     });
     out.reverse();
     out
+}
+
+/// A folder's row with the small "x" that stops showing it. Returns the row's response and
+/// whether the "x" was clicked.
+fn folder_row(ui: &mut egui::Ui, pal: Palette, name: &str, selected: bool) -> (Response, bool) {
+    let (rect, resp) = nav_row(ui, icons::ICON_FOLDER, name, name, None, selected, 28.0);
+    let x_rect = Rect::from_center_size(
+        Pos2::new(rect.max.x - 18.0, rect.center().y),
+        Vec2::splat(26.0),
+    );
+    let x = ui.interact(x_rect, resp.id.with("stop"), Sense::click());
+    let label = format!("Stop showing {name}");
+    x.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    // Also while it has keyboard focus, or Tab would land on an invisible button.
+    if ui.rect_contains_pointer(rect) || x.has_focus() {
+        ui.painter().text(
+            x_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icons::ICON_CLOSE.codepoint,
+            style::icon_font_id(icons::ICON_CLOSE, 16.0),
+            if x.hovered() {
+                pal.text
+            } else {
+                pal.text_secondary
+            },
+        );
+    }
+    let x = x.on_hover_text(format!("Stop showing “{name}”"));
+    (resp, x.clicked())
+}
+
+/// The thin progress bar of the activity card: filled to `fraction`, or animated when unknown.
+fn activity_progress(ui: &mut egui::Ui, fraction: Option<f32>) {
+    ui.add_space(4.0);
+    let bar = egui::ProgressBar::new(fraction.map_or(0.0, |f| f.clamp(0.0, 1.0)))
+        .desired_height(6.0)
+        .corner_radius(3.0);
+    ui.add(if fraction.is_some() {
+        bar
+    } else {
+        bar.animate(true)
+    });
 }
 
 impl AddFolder {
@@ -290,6 +358,36 @@ impl App {
     }
 
     fn folders_section(&mut self, ui: &mut egui::Ui) {
+        if !self.folders_header(ui) {
+            ui.label(RichText::new("No folders yet.").weak());
+            return;
+        }
+        let pal = Palette::of(ui.ctx());
+        let labels = folder_labels(self.snapshot.folders.iter().map(|f| f.path.as_path()));
+        let mut open = None;
+        let mut stop = None;
+        for (f, name) in self.snapshot.folders.iter().zip(labels) {
+            let (resp, stop_clicked) =
+                folder_row(ui, pal, &name, self.tl.view == View::Folder(f.id));
+            if stop_clicked {
+                stop = Some(StopFolder {
+                    id: f.id,
+                    name: name.clone(),
+                });
+            } else if resp.on_hover_text(f.path.display().to_string()).clicked() {
+                open = Some(f.id);
+            }
+        }
+        if let Some(id) = open {
+            self.set_view(View::Folder(id));
+        }
+        if stop.is_some() {
+            self.dialogs.stop_folder = stop;
+        }
+    }
+
+    /// The "Folders" title with its refresh and add buttons. Returns whether there are folders.
+    fn folders_header(&mut self, ui: &mut egui::Ui) -> bool {
         let busy = self.lib.is_busy();
         let has_folders = !self.snapshot.folders.is_empty();
         let buttons = section_header(
@@ -310,61 +408,7 @@ impl App {
         if buttons[1].clicked() {
             self.open_add_folder();
         }
-        if !has_folders {
-            ui.label(RichText::new("No folders yet.").weak());
-            return;
-        }
-        let pal = Palette::of(ui.ctx());
-        let labels = folder_labels(self.snapshot.folders.iter().map(|f| f.path.as_path()));
-        let mut open = None;
-        let mut stop = None;
-        for (f, name) in self.snapshot.folders.iter().zip(labels) {
-            let (rect, resp) = nav_row(
-                ui,
-                icons::ICON_FOLDER,
-                &name,
-                &name,
-                None,
-                self.tl.view == View::Folder(f.id),
-                28.0,
-            );
-            let x_rect = Rect::from_center_size(
-                Pos2::new(rect.max.x - 18.0, rect.center().y),
-                Vec2::splat(26.0),
-            );
-            let x = ui.interact(x_rect, resp.id.with("stop"), Sense::click());
-            let label = format!("Stop showing {name}");
-            x.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-            // Also while it has keyboard focus, or Tab would land on an invisible button.
-            if ui.rect_contains_pointer(rect) || x.has_focus() {
-                ui.painter().text(
-                    x_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    icons::ICON_CLOSE.codepoint,
-                    style::icon_font_id(icons::ICON_CLOSE, 16.0),
-                    if x.hovered() {
-                        pal.text
-                    } else {
-                        pal.text_secondary
-                    },
-                );
-            }
-            let x = x.on_hover_text(format!("Stop showing “{name}”"));
-            if x.clicked() {
-                stop = Some(StopFolder {
-                    id: f.id,
-                    name: name.clone(),
-                });
-            } else if resp.on_hover_text(f.path.display().to_string()).clicked() {
-                open = Some(f.id);
-            }
-        }
-        if let Some(id) = open {
-            self.set_view(View::Folder(id));
-        }
-        if stop.is_some() {
-            self.dialogs.stop_folder = stop;
-        }
+        has_folders
     }
 
     /// "N files couldn't be opened", with a way to try them again.
@@ -469,22 +513,7 @@ impl App {
                 text.to_string()
             };
             ui.label(shown);
-            if let Some(f) = fraction {
-                ui.add_space(4.0);
-                ui.add(
-                    egui::ProgressBar::new(f.clamp(0.0, 1.0))
-                        .desired_height(6.0)
-                        .corner_radius(3.0),
-                );
-            } else {
-                ui.add_space(4.0);
-                ui.add(
-                    egui::ProgressBar::new(0.0)
-                        .animate(true)
-                        .desired_height(6.0)
-                        .corner_radius(3.0),
-                );
-            }
+            activity_progress(ui, fraction);
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 if pausable {
@@ -519,100 +548,162 @@ impl App {
 
     /// The "Add a folder" dialog and the "Stop showing" confirmation.
     pub(super) fn folder_dialogs(&mut self, ctx: &egui::Context) {
-        if let Some(mut dlg) = self.dialogs.add_folder_dialog.take() {
-            let suggestions = std::mem::take(&mut dlg.suggestions);
-            let (mut close, mut bad_path, mut chosen) = (false, false, None::<PathBuf>);
-            modal_window(ctx, "Add a folder", |ui| {
-                ui.set_width(420.0);
-                ui.label(
-                    "Choose where your photos and videos are. Recollect only reads them; \
-                     it never changes or moves your files.",
-                );
-                ui.add_space(8.0);
-                if style::icon_label_button(ui, icons::ICON_FOLDER_OPEN, "Choose a folder…")
-                    .clicked()
-                    && let Some(dir) = rfd::FileDialog::new()
-                        .set_title("Choose a folder with photos and videos")
-                        .pick_folder()
-                {
-                    chosen = Some(dir);
-                }
-                if !suggestions.is_empty() {
-                    ui.add_space(12.0);
-                    ui.label(style::semibold("Suggestions").size(14.0));
-                    for (name, path) in &suggestions {
-                        let (_, r) = nav_row(
-                            ui,
-                            icons::ICON_FOLDER,
-                            name,
-                            &format!("Add {name}"),
-                            Some(&path.display().to_string()),
-                            false,
-                            0.0,
-                        );
-                        if r.clicked() {
-                            chosen = Some(path.clone());
-                        }
-                    }
-                }
-                ui.add_space(12.0);
-                ui.label("or type a folder path");
-                let r = ui.add(
-                    egui::TextEdit::singleline(&mut dlg.typed)
-                        .hint_text("For example /home/you/Pictures")
-                        .desired_width(f32::INFINITY),
-                );
-                r.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Folder path")
-                });
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let can_add = !dlg.typed.trim().is_empty();
-                    if (ui.add_enabled(can_add, egui::Button::new("Add")).clicked() || enter)
-                        && can_add
-                    {
-                        chosen = typed_folder(&dlg.typed);
-                        bad_path = chosen.is_none();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                });
-            });
-            if bad_path {
-                self.notify_error(BAD_FOLDER_PATH);
-            }
-            if let Some(p) = chosen {
-                self.add_folder(p);
-            } else if !close {
-                dlg.suggestions = suggestions;
-                self.dialogs.add_folder_dialog = Some(dlg);
-            }
+        self.add_folder_dialog(ctx);
+        self.stop_folder_dialog(ctx);
+    }
+
+    fn add_folder_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dlg) = self.dialogs.add_folder_dialog.take() else {
+            return;
+        };
+        let suggestions = std::mem::take(&mut dlg.suggestions);
+        let mut outcome = AddFolderOutcome::default();
+        modal_window(ctx, "Add a folder", |ui| {
+            outcome = add_folder_body(ui, &mut dlg.typed, &suggestions);
+        });
+        if outcome.bad_path {
+            self.notify_error(BAD_FOLDER_PATH);
         }
-        if let Some(s) = self.dialogs.stop_folder.clone() {
-            let (mut stop, mut cancel) = (false, false);
-            modal_window(ctx, "Stop showing this folder?", |ui| {
+        if let Some(p) = outcome.chosen {
+            self.add_folder(p);
+        } else if !outcome.close {
+            dlg.suggestions = suggestions;
+            self.dialogs.add_folder_dialog = Some(dlg);
+        }
+    }
+
+    fn stop_folder_dialog(&mut self, ctx: &egui::Context) {
+        let Some(s) = self.dialogs.stop_folder.clone() else {
+            return;
+        };
+        let choice = confirm_dialog(
+            ctx,
+            "Stop showing this folder?",
+            "Stop showing",
+            "Cancel",
+            true,
+            |ui| {
                 ui.label(format!("Stop showing “{}”?", s.name));
                 ui.label(RichText::new("Your files stay where they are.").weak());
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    stop = ui.button("Stop showing").clicked();
-                    cancel = ui.button("Cancel").clicked();
-                });
-            });
-            if stop {
+            },
+        );
+        match choice {
+            Some(Confirmation::Confirmed) => {
                 // Cancels any running job first; runs in the background.
                 self.lib.start_remove_folder(s.id);
                 self.snapshot.folders.retain(|f| f.id != s.id);
                 // A fetch already in flight may predate the removal: fetch again after it.
                 self.snapshot_read.mark_again();
                 self.dialogs.stop_folder = None;
-            } else if cancel {
-                self.dialogs.stop_folder = None;
+            }
+            Some(Confirmation::Cancelled) => self.dialogs.stop_folder = None,
+            None => {}
+        }
+    }
+}
+
+/// What the "Add a folder" dialog asked for in one frame.
+#[derive(Debug, Default)]
+struct AddFolderOutcome {
+    chosen: Option<PathBuf>,
+    /// The typed text is not a usable folder path.
+    bad_path: bool,
+    close: bool,
+}
+
+/// What the typed-path row did in one frame.
+enum TypedFolder {
+    Nothing,
+    Bad,
+    Folder(PathBuf),
+}
+
+/// The contents of the "Add a folder" window.
+fn add_folder_body(
+    ui: &mut egui::Ui,
+    typed: &mut String,
+    suggestions: &[(String, PathBuf)],
+) -> AddFolderOutcome {
+    let mut out = AddFolderOutcome {
+        chosen: pick_folder_rows(ui, suggestions),
+        ..Default::default()
+    };
+    let (typed_folder, cancel) = typed_folder_row(ui, typed);
+    match typed_folder {
+        TypedFolder::Nothing => {}
+        TypedFolder::Bad => {
+            out.chosen = None;
+            out.bad_path = true;
+        }
+        TypedFolder::Folder(p) => out.chosen = Some(p),
+    }
+    out.close = cancel;
+    out
+}
+
+/// The explanation, the folder picker button and the suggested folders. Returns the folder
+/// that was chosen, if any.
+fn pick_folder_rows(ui: &mut egui::Ui, suggestions: &[(String, PathBuf)]) -> Option<PathBuf> {
+    let mut chosen = None;
+    ui.set_width(420.0);
+    ui.label(
+        "Choose where your photos and videos are. Recollect only reads them; \
+         it never changes or moves your files.",
+    );
+    ui.add_space(8.0);
+    if style::icon_label_button(ui, icons::ICON_FOLDER_OPEN, "Choose a folder…").clicked()
+        && let Some(dir) = rfd::FileDialog::new()
+            .set_title("Choose a folder with photos and videos")
+            .pick_folder()
+    {
+        chosen = Some(dir);
+    }
+    if !suggestions.is_empty() {
+        ui.add_space(12.0);
+        ui.label(style::semibold("Suggestions").size(14.0));
+        for (name, path) in suggestions {
+            let (_, r) = nav_row(
+                ui,
+                icons::ICON_FOLDER,
+                name,
+                &format!("Add {name}"),
+                Some(&path.display().to_string()),
+                false,
+                0.0,
+            );
+            if r.clicked() {
+                chosen = Some(path.clone());
             }
         }
     }
+    chosen
+}
+
+/// The "or type a folder path" field with the Add and Cancel buttons. Returns what Add did and
+/// whether Cancel was clicked.
+fn typed_folder_row(ui: &mut egui::Ui, typed: &mut String) -> (TypedFolder, bool) {
+    ui.add_space(12.0);
+    ui.label("or type a folder path");
+    let r = ui.add(
+        egui::TextEdit::singleline(typed)
+            .hint_text("For example /home/you/Pictures")
+            .desired_width(f32::INFINITY),
+    );
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Folder path"));
+    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    ui.add_space(8.0);
+    let (mut added, mut cancel) = (TypedFolder::Nothing, false);
+    ui.horizontal(|ui| {
+        let can_add = !typed.trim().is_empty();
+        if (ui.add_enabled(can_add, egui::Button::new("Add")).clicked() || enter) && can_add {
+            added = typed_folder(typed).map_or(TypedFolder::Bad, TypedFolder::Folder);
+        }
+        if ui.button("Cancel").clicked() {
+            cancel = true;
+        }
+    });
+    (added, cancel)
 }
 
 #[cfg(test)]

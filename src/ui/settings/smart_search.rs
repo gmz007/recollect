@@ -5,7 +5,7 @@ use super::{heading, hint};
 use crate::library::Activity;
 use crate::model::registry::{self, ModelSpec, megabytes};
 use crate::ui::App;
-use crate::ui::albums::modal_window;
+use crate::ui::albums::{Confirmation, confirm_dialog};
 use crate::ui::style::{self, Palette, icons};
 use crate::ui::timeline::thousands;
 use egui::RichText;
@@ -50,12 +50,53 @@ pub(in crate::ui) fn smart_search_status(
     }
 }
 
+/// The collapsible "Details" section: name, license and source of the current choice.
+fn smart_search_details(ui: &mut egui::Ui, current: &ModelSpec) {
+    egui::CollapsingHeader::new("Details")
+        .id_salt("settings-search-details")
+        .show(ui, |ui| {
+            ui.label(format!("Name: {}", current.name));
+            ui.label(format!("License: {}", current.license));
+            ui.label(format!("Source: huggingface.co/{}", current.repo));
+        });
+}
+
 impl App {
     pub(super) fn settings_smart_search(&mut self, ui: &mut egui::Ui) {
+        let installed = self.snapshot.model_installed;
+        let downloading = matches!(self.status.activity, Activity::Downloading { .. });
+        self.smart_search_status_card(ui);
+        ui.add_space(8.0);
+        ui.label(
+            "Smart search finds photos and videos when you describe them, like “birthday \
+             cake”. It runs on this computer.",
+        );
+        heading(ui, "Choose one");
+        self.smart_search_choices(ui);
+        hint(
+            ui,
+            "Switching makes Recollect look at your photos again, which can take a while.",
+        );
+        if !installed && !downloading {
+            self.download_button(ui);
+        }
+        ui.add_space(10.0);
+        let mut gpu = self.settings.use_gpu;
+        if ui
+            .checkbox(&mut gpu, "Use the graphics card when available")
+            .changed()
+        {
+            self.change_settings(|s| s.use_gpu = gpu);
+        }
+        ui.add_space(6.0);
+        smart_search_details(ui, self.lib.model());
+    }
+
+    /// The card at the top: whether smart search is on, with the download progress.
+    fn smart_search_status_card(&self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let installed = self.snapshot.model_installed;
-        let current = self.lib.model();
-        let status = smart_search_status(&self.status.activity, installed, current);
+        let status = smart_search_status(&self.status.activity, installed, self.lib.model());
         let downloading = matches!(self.status.activity, Activity::Downloading { .. });
         style::card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -78,12 +119,11 @@ impl App {
                 );
             }
         });
-        ui.add_space(8.0);
-        ui.label(
-            "Smart search finds photos and videos when you describe them, like “birthday \
-             cake”. It runs on this computer.",
-        );
-        heading(ui, "Choose one");
+    }
+
+    /// One card per smart-search choice; picking another asks for confirmation.
+    fn smart_search_choices(&mut self, ui: &mut egui::Ui) {
+        let current = self.lib.model();
         for m in registry::MODELS {
             let here = self.snapshot.installed_models.contains(&m.id);
             let note = if here { "Already on this computer" } else { "" };
@@ -99,40 +139,23 @@ impl App {
             }
             ui.add_space(4.0);
         }
+    }
+
+    /// The accent button that downloads the current choice and turns smart search on.
+    fn download_button(&mut self, ui: &mut egui::Ui) {
+        let pal = Palette::of(ui.ctx());
+        ui.add_space(8.0);
+        let label = format!("Download and turn on ({} MB)", self.lib.model().size_mb());
+        let b = egui::Button::new(RichText::new(&label).color(pal.on_accent)).fill(pal.accent);
+        let r = ui.add(b);
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        if r.clicked() {
+            self.turn_on_search();
+        }
         hint(
             ui,
-            "Switching makes Recollect look at your photos again, which can take a while.",
+            "A one-time download. After that, search works without the internet.",
         );
-        if !installed && !downloading {
-            ui.add_space(8.0);
-            let label = format!("Download and turn on ({} MB)", current.size_mb());
-            let b = egui::Button::new(RichText::new(&label).color(pal.on_accent)).fill(pal.accent);
-            let r = ui.add(b);
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-            if r.clicked() {
-                self.turn_on_search();
-            }
-            hint(
-                ui,
-                "A one-time download. After that, search works without the internet.",
-            );
-        }
-        ui.add_space(10.0);
-        let mut gpu = self.settings.use_gpu;
-        if ui
-            .checkbox(&mut gpu, "Use the graphics card when available")
-            .changed()
-        {
-            self.change_settings(|s| s.use_gpu = gpu);
-        }
-        ui.add_space(6.0);
-        egui::CollapsingHeader::new("Details")
-            .id_salt("settings-search-details")
-            .show(ui, |ui| {
-                ui.label(format!("Name: {}", current.name));
-                ui.label(format!("License: {}", current.license));
-                ui.label(format!("Source: huggingface.co/{}", current.repo));
-            });
     }
 
     /// The question before switching smart search: it makes every photo get looked at again.
@@ -145,8 +168,8 @@ impl App {
             return;
         };
         let here = self.snapshot.installed_models.contains(&spec.id);
-        let (mut switch, mut cancel) = (false, false);
-        modal_window(ctx, &format!("Switch to {}?", quality_name(spec)), |ui| {
+        let title = format!("Switch to {}?", quality_name(spec));
+        let choice = confirm_dialog(ctx, &title, "Switch", "Cancel", true, |ui| {
             ui.set_max_width(420.0);
             ui.label(
                 "Recollect will look at all your photos again so search works with this \
@@ -160,16 +183,14 @@ impl App {
                 ));
             }
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                switch = ui.button("Switch").clicked();
-                cancel = ui.button("Cancel").clicked();
-            });
         });
-        if switch {
-            self.dialogs.model_confirm = None;
-            self.switch_model(spec);
-        } else if cancel {
-            self.dialogs.model_confirm = None;
+        match choice {
+            Some(Confirmation::Confirmed) => {
+                self.dialogs.model_confirm = None;
+                self.switch_model(spec);
+            }
+            Some(Confirmation::Cancelled) => self.dialogs.model_confirm = None,
+            None => {}
         }
     }
 

@@ -80,41 +80,13 @@ impl Viewer {
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if style::toolbar_button(
-                    ui,
-                    icons::ICON_ARROW_BACK,
-                    text.then_some("Back"),
-                    "Back",
-                    "Back",
-                    None,
-                    false,
-                )
-                .clicked()
-                {
-                    actions.push(Action::Close);
-                }
-                // The name is shown once: here while the info panel is closed, there while open.
-                if !self.info {
-                    ui.add_space(8.0);
-                    let room = (ui.available_width() - pos_w - 24.0)
-                        .min(row.width() * 0.3)
-                        .max(0.0);
-                    if room > 40.0 {
-                        ui.scope(|ui| {
-                            ui.set_max_width(room);
-                            ui.add(
-                                egui::Label::new(style::semibold(self.current().name())).truncate(),
-                            );
-                        });
-                    }
-                }
+                self.left_buttons(ui, (row.width(), pos_w), text, actions);
             },
         );
         let left_end = left.response.rect.max.x;
         // The position sits in the middle of the bar when there is room there, else right
         // beside the buttons, else it is left out. It is plain text: never a click target.
-        let x = position_slot(row.center().x, left_end, right_start, pos_w);
-        if let Some(x) = x {
+        if let Some(x) = position_slot(row.center().x, left_end, right_start, pos_w) {
             let rect = Rect::from_min_size(
                 Pos2::new(x, row.center().y - 11.0),
                 Vec2::new(pos_w + 2.0, 22.0),
@@ -123,6 +95,44 @@ impl Viewer {
                 rect,
                 egui::Label::new(RichText::new(pos).color(pal.text_secondary)).selectable(false),
             );
+        }
+    }
+
+    /// The left of the toolbar: Back and, while the info panel is closed, the item's name.
+    /// `widths` are the bar's width and the position label's.
+    fn left_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        (row_width, pos_w): (f32, f32),
+        text: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        if style::toolbar_button(
+            ui,
+            icons::ICON_ARROW_BACK,
+            text.then_some("Back"),
+            "Back",
+            "Back",
+            None,
+            false,
+        )
+        .clicked()
+        {
+            actions.push(Action::Close);
+        }
+        // The name is shown once: here while the info panel is closed, there while open.
+        if self.info {
+            return;
+        }
+        ui.add_space(8.0);
+        let room = (ui.available_width() - pos_w - 24.0)
+            .min(row_width * 0.3)
+            .max(0.0);
+        if room > 40.0 {
+            ui.scope(|ui| {
+                ui.set_max_width(room);
+                ui.add(egui::Label::new(style::semibold(self.current().name())).truncate());
+            });
         }
     }
 
@@ -137,24 +147,58 @@ impl Viewer {
     ) {
         let word = |w: &'static str| text.then_some(w);
         if self.current().kind == MediaKind::Image {
-            let (icon, label) = if self.zoom {
-                (icons::ICON_ZOOM_OUT, "Fit to window")
-            } else {
-                (icons::ICON_ZOOM_IN, "Zoom to 100%")
-            };
-            let tip = if self.zoom {
-                label.to_string()
-            } else {
-                "Zoom to 100% (one image pixel per screen pixel; photos larger than \
-                 4096 px on a side are scaled down to that first)"
-                    .to_string()
-            };
-            let short = if self.zoom { "Fit" } else { "Zoom" };
-            if style::toolbar_button(ui, icon, word(short), label, &tip, None, self.zoom).clicked()
-            {
-                self.toggle_zoom();
-            }
+            self.zoom_button(ui, word);
         }
+        self.file_buttons(ui, actions, text);
+        if style::toolbar_button(
+            ui,
+            icons::ICON_INFO,
+            word("Info"),
+            "Info",
+            "Photo details",
+            None,
+            self.info,
+        )
+        .clicked()
+        {
+            self.info = !self.info;
+        }
+        if let Some(c) = crate::ui::albums::album_menu_icon(ui, albums, word("Add to album")) {
+            actions.push(Action::AddToAlbum(self.current().file_id, c));
+        }
+        self.favorite_button(ui, actions, text);
+        if self.current().kind == MediaKind::Video {
+            self.play_button(ui, actions);
+        }
+    }
+
+    /// The zoom toggle (images only): "Zoom" to 100 % or "Fit" back to the window.
+    fn zoom_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        word: impl Fn(&'static str) -> Option<&'static str>,
+    ) {
+        let (icon, label) = if self.zoom {
+            (icons::ICON_ZOOM_OUT, "Fit to window")
+        } else {
+            (icons::ICON_ZOOM_IN, "Zoom to 100%")
+        };
+        let tip = if self.zoom {
+            label.to_string()
+        } else {
+            "Zoom to 100% (one image pixel per screen pixel; photos larger than \
+             4096 px on a side are scaled down to that first)"
+                .to_string()
+        };
+        let short = if self.zoom { "Fit" } else { "Zoom" };
+        if style::toolbar_button(ui, icon, word(short), label, &tip, None, self.zoom).clicked() {
+            self.toggle_zoom();
+        }
+    }
+
+    /// "Show in folder" and "Open", which act on the file on disk.
+    fn file_buttons(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>, text: bool) {
+        let word = |w: &'static str| text.then_some(w);
         let path = self.current().path.clone();
         if style::toolbar_button(
             ui,
@@ -182,26 +226,6 @@ impl Viewer {
         {
             actions.push(Action::Open(path));
         }
-        if style::toolbar_button(
-            ui,
-            icons::ICON_INFO,
-            word("Info"),
-            "Info",
-            "Photo details",
-            None,
-            self.info,
-        )
-        .clicked()
-        {
-            self.info = !self.info;
-        }
-        if let Some(c) = crate::ui::albums::album_menu_icon(ui, albums, word("Add to album")) {
-            actions.push(Action::AddToAlbum(self.current().file_id, c));
-        }
-        self.favorite_button(ui, actions, text);
-        if self.current().kind == MediaKind::Video {
-            self.play_button(ui, actions);
-        }
     }
 
     /// The accent button that plays the current video from the chosen moment.
@@ -211,30 +235,14 @@ impl Viewer {
         ui.add_space(8.0);
         let t = e.t.unwrap_or(0.0);
         let label = format!("Play at {}", fmt_time(t));
-        let mut job = egui::text::LayoutJob::default();
-        for (text, font, gap) in [
-            (
-                icons::ICON_PLAY_ARROW.codepoint,
-                style::icon_font_id(icons::ICON_PLAY_ARROW, 20.0),
-                0.0,
-            ),
-            (
-                label.as_str(),
-                egui::TextStyle::Button.resolve(ui.style()),
-                4.0,
-            ),
-        ] {
-            job.append(
-                text,
-                gap,
-                egui::TextFormat {
-                    font_id: font,
-                    color: pal.on_accent,
-                    valign: egui::Align::Center,
-                    ..Default::default()
-                },
-            );
-        }
+        let job = style::icon_label_job(
+            ui,
+            icons::ICON_PLAY_ARROW,
+            20.0,
+            pal.on_accent,
+            Some((&label, pal.on_accent)),
+            4.0,
+        );
         let b = egui::Button::new(job).fill(pal.accent);
         let r = ui.add(b);
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));

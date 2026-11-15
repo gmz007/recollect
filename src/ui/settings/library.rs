@@ -29,6 +29,50 @@ pub(in crate::ui) fn counts_text(stats: &Stats, installed: bool) -> String {
     parts.join(" · ")
 }
 
+/// A card for one folder of the library: its name and path and a "Stop showing" button.
+/// Returns true when the button was clicked.
+fn folder_card(ui: &mut egui::Ui, pal: Palette, name: &str, path: &str) -> bool {
+    let mut stop = false;
+    egui::Frame::new()
+        .fill(pal.raised)
+        .corner_radius(CornerRadius::same(style::CARD_RADIUS))
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(style::icon_text(icons::ICON_FOLDER, 22.0).color(pal.text_secondary));
+                let stop_label = format!(
+                    "Stop showing “{}”…",
+                    crate::ui::albums::short_name(name, 24)
+                );
+                let button_w = ui
+                    .painter()
+                    .layout_no_wrap(
+                        stop_label.clone(),
+                        egui::TextStyle::Button.resolve(ui.style()),
+                        pal.text,
+                    )
+                    .size()
+                    .x
+                    + 40.0;
+                let text_w = (ui.available_width() - button_w - 16.0).max(80.0);
+                ui.vertical(|ui| {
+                    ui.set_max_width(text_w);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add(egui::Label::new(style::semibold(name)).truncate());
+                    ui.add(
+                        egui::Label::new(RichText::new(path).small().color(pal.text_secondary))
+                            .truncate(),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    stop = ui.button(&stop_label).clicked();
+                });
+            });
+        });
+    stop
+}
+
 impl App {
     pub(super) fn settings_library(&mut self, ui: &mut egui::Ui) {
         self.settings_folders(ui);
@@ -52,52 +96,9 @@ impl App {
             .map(|(f, l)| (f.id, l, f.path.display().to_string()))
             .collect();
         for (id, name, path) in rows {
-            egui::Frame::new()
-                .fill(pal.raised)
-                .corner_radius(CornerRadius::same(style::CARD_RADIUS))
-                .inner_margin(Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            style::icon_text(icons::ICON_FOLDER, 22.0).color(pal.text_secondary),
-                        );
-                        let stop_label = format!(
-                            "Stop showing “{}”…",
-                            crate::ui::albums::short_name(&name, 24)
-                        );
-                        let button_w = ui
-                            .painter()
-                            .layout_no_wrap(
-                                stop_label.clone(),
-                                egui::TextStyle::Button.resolve(ui.style()),
-                                pal.text,
-                            )
-                            .size()
-                            .x
-                            + 40.0;
-                        let text_w = (ui.available_width() - button_w - 16.0).max(80.0);
-                        ui.vertical(|ui| {
-                            ui.set_max_width(text_w);
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add(egui::Label::new(style::semibold(&name)).truncate());
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&path).small().color(pal.text_secondary),
-                                )
-                                .truncate(),
-                            );
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(&stop_label).clicked() {
-                                self.dialogs.stop_folder = Some(crate::ui::sidebar::StopFolder {
-                                    id,
-                                    name: name.clone(),
-                                });
-                            }
-                        });
-                    });
-                });
+            if folder_card(ui, pal, &name, &path) {
+                self.dialogs.stop_folder = Some(crate::ui::sidebar::StopFolder { id, name });
+            }
             ui.add_space(2.0);
         }
         ui.add_space(4.0);

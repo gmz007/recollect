@@ -279,30 +279,46 @@ pub fn icon_text(icon: MaterialIcon, size: f32) -> RichText {
     icon.rich_text().size(size)
 }
 
-/// A button with an icon in front of its label, named `label` for assistive technology.
-pub fn icon_label_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> Response {
+/// An icon of `icon_size` followed, `gap` points later, by `label` in the button font. Both are
+/// centred on the line. Without a `label` the job holds the icon alone.
+pub fn icon_label_job(
+    ui: &egui::Ui,
+    icon: MaterialIcon,
+    icon_size: f32,
+    icon_color: Color32,
+    label: Option<(&str, Color32)>,
+    gap: f32,
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
-    let color = ui.visuals().widgets.inactive.fg_stroke.color;
     job.append(
         icon.codepoint,
         0.0,
         egui::TextFormat {
-            font_id: icon_font_id(icon, 18.0),
-            color,
+            font_id: icon_font_id(icon, icon_size),
+            color: icon_color,
             valign: egui::Align::Center,
             ..Default::default()
         },
     );
-    job.append(
-        label,
-        6.0,
-        egui::TextFormat {
-            font_id: TextStyle::Button.resolve(ui.style()),
-            color,
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
+    if let Some((text, color)) = label {
+        job.append(
+            text,
+            gap,
+            egui::TextFormat {
+                font_id: TextStyle::Button.resolve(ui.style()),
+                color,
+                valign: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
+/// A button with an icon in front of its label, named `label` for assistive technology.
+pub fn icon_label_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> Response {
+    let color = ui.visuals().widgets.inactive.fg_stroke.color;
+    let job = icon_label_job(ui, icon, 18.0, color, Some((label, color)), 6.0);
     let r = ui.add(egui::Button::new(job));
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     r
@@ -346,28 +362,8 @@ pub fn icon_menu_button<R>(
     label: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Response {
-    let mut job = egui::text::LayoutJob::default();
     let color = ui.visuals().widgets.inactive.fg_stroke.color;
-    job.append(
-        icon.codepoint,
-        0.0,
-        egui::TextFormat {
-            font_id: icon_font_id(icon, 18.0),
-            color,
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    job.append(
-        label,
-        6.0,
-        egui::TextFormat {
-            font_id: TextStyle::Button.resolve(ui.style()),
-            color,
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
+    let job = icon_label_job(ui, icon, 18.0, color, Some((label, color)), 6.0);
     let r = ui.menu_button(job, add_contents).response;
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     r
@@ -430,27 +426,8 @@ pub fn toolbar_button(
     let b = match text {
         None => egui::Button::new(icon_text(icon, 22.0).color(color)),
         Some(text) => {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                icon.codepoint,
-                0.0,
-                egui::TextFormat {
-                    font_id: icon_font_id(icon, 22.0),
-                    color,
-                    valign: egui::Align::Center,
-                    ..Default::default()
-                },
-            );
-            job.append(
-                text,
-                6.0,
-                egui::TextFormat {
-                    font_id: TextStyle::Button.resolve(ui.style()),
-                    color: ui.visuals().widgets.inactive.fg_stroke.color,
-                    valign: egui::Align::Center,
-                    ..Default::default()
-                },
-            );
+            let label_color = ui.visuals().widgets.inactive.fg_stroke.color;
+            let job = icon_label_job(ui, icon, 22.0, color, Some((text, label_color)), 6.0);
             egui::Button::new(job)
         }
     }

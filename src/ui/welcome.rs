@@ -181,6 +181,72 @@ fn progress_dots(ui: &mut egui::Ui, step: Step) {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
 }
 
+/// A screen's big title.
+fn welcome_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(style::semibold(text).size(28.0));
+    ui.add_space(10.0);
+}
+
+/// The first screen: what Recollect is for, in three lines.
+fn welcome_intro(ui: &mut egui::Ui) {
+    let pal = Palette::of(ui.ctx());
+    ui.add_space(24.0);
+    ui.vertical_centered(|ui| {
+        ui.label(style::icon_text(icons::ICON_PHOTO_LIBRARY, 72.0).color(pal.accent));
+        ui.add_space(12.0);
+        ui.label(
+            style::semibold("Welcome to Recollect")
+                .size(15.0)
+                .color(pal.accent),
+        );
+        ui.add_space(4.0);
+        welcome_title(ui, "Find any photo by describing it");
+    });
+    ui.add_space(16.0);
+    // The three lines sit as one block in the middle of the column.
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - 400.0) / 2.0).max(0.0));
+        ui.vertical(|ui| {
+            benefit(
+                ui,
+                icons::ICON_SEARCH,
+                "Search with words, like “kids on the beach”",
+            );
+            benefit(
+                ui,
+                icons::ICON_CALENDAR_MONTH,
+                "Browse everything by date, like any photo app",
+            );
+            benefit(ui, icons::ICON_LOCK, "Everything stays on this computer");
+        });
+    });
+}
+
+/// The last screen: what happens after Start.
+fn welcome_done(ui: &mut egui::Ui, w: &Welcome) {
+    let pal = Palette::of(ui.ctx());
+    ui.add_space(24.0);
+    let text = done_text(!w.folders().is_empty(), w.download);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    job.halign = egui::Align::Center;
+    job.append(
+        &text,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(16.0, egui::TextStyle::Body.resolve(ui.style()).family),
+            color: pal.text,
+            ..Default::default()
+        },
+    );
+    ui.vertical_centered(|ui| {
+        ui.label(style::icon_text(icons::ICON_CHECK_CIRCLE, 72.0).color(pal.accent));
+        ui.add_space(12.0);
+        welcome_title(ui, "You're all set");
+        ui.add(egui::Label::new(job));
+    });
+}
+
 /// The folders the user picked or typed so far, each with a button to take it back.
 fn welcome_added_folders(ui: &mut egui::Ui, w: &mut Welcome) {
     if w.added.is_empty() {
@@ -337,71 +403,11 @@ impl App {
     }
 
     fn welcome_body(&mut self, ui: &mut egui::Ui, w: &mut Welcome) {
-        let pal = Palette::of(ui.ctx());
-        let title = |ui: &mut egui::Ui, text: &str| {
-            ui.label(style::semibold(text).size(28.0));
-            ui.add_space(10.0);
-        };
         match w.step {
-            Step::Intro => {
-                ui.add_space(24.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(style::icon_text(icons::ICON_PHOTO_LIBRARY, 72.0).color(pal.accent));
-                    ui.add_space(12.0);
-                    ui.label(
-                        style::semibold("Welcome to Recollect")
-                            .size(15.0)
-                            .color(pal.accent),
-                    );
-                    ui.add_space(4.0);
-                    title(ui, "Find any photo by describing it");
-                });
-                ui.add_space(16.0);
-                // The three lines sit as one block in the middle of the column.
-                ui.horizontal(|ui| {
-                    ui.add_space(((ui.available_width() - 400.0) / 2.0).max(0.0));
-                    ui.vertical(|ui| {
-                        benefit(
-                            ui,
-                            icons::ICON_SEARCH,
-                            "Search with words, like “kids on the beach”",
-                        );
-                        benefit(
-                            ui,
-                            icons::ICON_CALENDAR_MONTH,
-                            "Browse everything by date, like any photo app",
-                        );
-                        benefit(ui, icons::ICON_LOCK, "Everything stays on this computer");
-                    });
-                });
-            }
+            Step::Intro => welcome_intro(ui),
             Step::Folders => self.welcome_folders(ui, w),
             Step::Search => Self::welcome_search(ui, w),
-            Step::Done => {
-                ui.add_space(24.0);
-                let text = done_text(!w.folders().is_empty(), w.download);
-                let mut job = egui::text::LayoutJob::default();
-                job.wrap.max_width = ui.available_width();
-                job.halign = egui::Align::Center;
-                job.append(
-                    &text,
-                    0.0,
-                    egui::TextFormat {
-                        font_id: egui::FontId::new(
-                            16.0,
-                            egui::TextStyle::Body.resolve(ui.style()).family,
-                        ),
-                        color: pal.text,
-                        ..Default::default()
-                    },
-                );
-                ui.vertical_centered(|ui| {
-                    ui.label(style::icon_text(icons::ICON_CHECK_CIRCLE, 72.0).color(pal.accent));
-                    ui.add_space(12.0);
-                    title(ui, "You're all set");
-                    ui.add(egui::Label::new(job));
-                });
-            }
+            Step::Done => welcome_done(ui, w),
         }
     }
 

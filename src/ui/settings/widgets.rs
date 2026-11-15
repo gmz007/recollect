@@ -1,7 +1,8 @@
 //! Controls shared by the settings sections and the welcome screens.
 
 use crate::ui::style::{self, Palette};
-use egui::{CornerRadius, Margin, Pos2, Sense, Stroke, Vec2};
+use egui::{CornerRadius, Galley, Margin, Pos2, Sense, Stroke, Vec2};
+use std::sync::Arc;
 
 /// "512 MB", "1 GB", "1.5 GB".
 pub(super) fn fmt_space(mb: f64) -> String {
@@ -44,47 +45,94 @@ pub(super) fn segmented<T: Copy + PartialEq>(
             ui.horizontal(|ui| {
                 for (value, label) in items {
                     let selected = *value == current;
-                    let font = egui::TextStyle::Body.resolve(ui.style());
-                    let g = ui
-                        .painter()
-                        .layout_no_wrap(label.to_string(), font, pal.text);
-                    let (rect, resp) =
-                        ui.allocate_exact_size(Vec2::new(g.size().x + 28.0, 30.0), Sense::click());
-                    let fg = if selected { pal.on_accent } else { pal.text };
-                    if selected {
-                        ui.painter()
-                            .rect_filled(rect, CornerRadius::same(7), pal.accent);
-                    } else if resp.hovered() {
-                        ui.painter()
-                            .rect_filled(rect, CornerRadius::same(7), pal.border);
-                    }
-                    let g = ui.painter().layout_no_wrap(
-                        label.to_string(),
-                        egui::TextStyle::Body.resolve(ui.style()),
-                        fg,
-                    );
-                    ui.painter().galley(
-                        Pos2::new(
-                            rect.center().x - g.size().x / 2.0,
-                            rect.center().y - g.size().y / 2.0,
-                        ),
-                        g,
-                        fg,
-                    );
-                    resp.widget_info(|| {
-                        egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, *label)
-                    });
-                    if resp
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                        && !selected
-                    {
+                    if segment_button(ui, pal, label, selected).clicked() && !selected {
                         picked = Some(*value);
                     }
                 }
             });
         });
     picked
+}
+
+/// One option of a [`segmented`] row: its label centred on a filled or hovered background.
+fn segment_button(ui: &mut egui::Ui, pal: Palette, label: &str, selected: bool) -> egui::Response {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let g = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font, pal.text);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(g.size().x + 28.0, 30.0), Sense::click());
+    let fg = if selected { pal.on_accent } else { pal.text };
+    if selected {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(7), pal.accent);
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(7), pal.border);
+    }
+    let g = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        fg,
+    );
+    ui.painter().galley(
+        Pos2::new(
+            rect.center().x - g.size().x / 2.0,
+            rect.center().y - g.size().y / 2.0,
+        ),
+        g,
+        fg,
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, label));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The laid-out texts of a [`choice_card`].
+struct CardText {
+    title: Arc<Galley>,
+    blurb: Arc<Galley>,
+    note: Option<Arc<Galley>>,
+}
+
+impl CardText {
+    /// Lays the texts out `text_w` wide.
+    fn measure(
+        ui: &egui::Ui,
+        pal: Palette,
+        text_w: f32,
+        (title, blurb, note): (&str, &str, &str),
+    ) -> Self {
+        let painter = ui.painter();
+        Self {
+            title: painter.layout(
+                title.to_string(),
+                egui::FontId::new(15.0, style::semibold_family()),
+                pal.text,
+                text_w,
+            ),
+            blurb: painter.layout(
+                blurb.to_string(),
+                egui::TextStyle::Body.resolve(ui.style()),
+                pal.text_secondary,
+                text_w,
+            ),
+            note: (!note.is_empty()).then(|| {
+                painter.layout(
+                    note.to_string(),
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    pal.accent,
+                    text_w,
+                )
+            }),
+        }
+    }
+
+    /// The card's height: padding around the stacked texts.
+    fn height(&self) -> f32 {
+        28.0 + self.title.size().y
+            + 4.0
+            + self.blurb.size().y
+            + self.note.as_ref().map_or(0.0, |g| 4.0 + g.size().y)
+    }
 }
 
 /// A large choice with a title and a description. Returns true when clicked.
@@ -97,33 +145,27 @@ pub(in crate::ui) fn choice_card(
 ) -> bool {
     let pal = Palette::of(ui.ctx());
     let width = ui.available_width();
-    let text_w = width - 56.0;
-    let title_g = ui.painter().layout(
-        title.to_string(),
-        egui::FontId::new(15.0, style::semibold_family()),
-        pal.text,
-        text_w,
-    );
-    let blurb_g = ui.painter().layout(
-        blurb.to_string(),
-        egui::TextStyle::Body.resolve(ui.style()),
-        pal.text_secondary,
-        text_w,
-    );
-    let note_g = (!note.is_empty()).then(|| {
-        ui.painter().layout(
-            note.to_string(),
-            egui::TextStyle::Small.resolve(ui.style()),
-            pal.accent,
-            text_w,
-        )
+    let text = CardText::measure(ui, pal, width - 56.0, (title, blurb, note));
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, text.height()), Sense::click());
+    paint_choice_card_background(ui, pal, rect, resp.hovered(), selected);
+    paint_choice_card_text(ui, pal, rect, selected, text);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, title));
+    // The text drawn under the title is what assistive technology reads as its description.
+    ui.ctx().accesskit_node_builder(resp.id, |b| {
+        b.set_description(blurb);
     });
-    let height = 28.0
-        + title_g.size().y
-        + 4.0
-        + blurb_g.size().y
-        + note_g.as_ref().map_or(0.0, |g| 4.0 + g.size().y);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// The card's fill (accent tint when selected, lighter when hovered) and its outline.
+fn paint_choice_card_background(
+    ui: &egui::Ui,
+    pal: Palette,
+    rect: egui::Rect,
+    hovered: bool,
+    selected: bool,
+) {
     let painter = ui.painter();
     let radius = CornerRadius::same(style::CARD_RADIUS);
     painter.rect_filled(
@@ -131,7 +173,7 @@ pub(in crate::ui) fn choice_card(
         radius,
         if selected {
             pal.accent.gamma_multiply(0.14)
-        } else if resp.hovered() {
+        } else if hovered {
             pal.border
         } else {
             pal.raised
@@ -145,9 +187,20 @@ pub(in crate::ui) fn choice_card(
             egui::StrokeKind::Inside,
         );
     }
+}
+
+/// The radio dot and the stacked title, description and note.
+fn paint_choice_card_text(
+    ui: &egui::Ui,
+    pal: Palette,
+    rect: egui::Rect,
+    selected: bool,
+    text: CardText,
+) {
+    let painter = ui.painter();
     let dot = Pos2::new(
         rect.min.x + 26.0,
-        rect.min.y + 14.0 + title_g.size().y / 2.0,
+        rect.min.y + 14.0 + text.title.size().y / 2.0,
     );
     painter.circle_stroke(
         dot,
@@ -166,22 +219,15 @@ pub(in crate::ui) fn choice_card(
     }
     let x = rect.min.x + 48.0;
     let mut y = rect.min.y + 14.0;
-    let h = title_g.size().y + 4.0;
-    painter.galley(Pos2::new(x, y), title_g, pal.text);
+    let h = text.title.size().y + 4.0;
+    painter.galley(Pos2::new(x, y), text.title, pal.text);
     y += h;
-    let h = blurb_g.size().y + 4.0;
-    painter.galley(Pos2::new(x, y), blurb_g, pal.text_secondary);
+    let h = text.blurb.size().y + 4.0;
+    painter.galley(Pos2::new(x, y), text.blurb, pal.text_secondary);
     y += h;
-    if let Some(g) = note_g {
+    if let Some(g) = text.note {
         painter.galley(Pos2::new(x, y), g, pal.accent);
     }
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, title));
-    // The text drawn under the title is what assistive technology reads as its description.
-    ui.ctx().accesskit_node_builder(resp.id, |b| {
-        b.set_description(blurb);
-    });
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
 }
 
 /// Whether a slider draft written in frame `written` still belongs to a drag that is going on
