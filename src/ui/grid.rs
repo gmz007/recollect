@@ -1,8 +1,11 @@
 //! What the timeline grid and the results grid share: selection state, what a click
 //! does, and moving through tiles with the keyboard.
 
+use super::albums::{AlbumChoice, album_menu};
 use super::selection::{ClickMods, Selection};
-use super::{App, albums, tiles};
+use super::selection_bar::BulkAction;
+use super::{App, tiles};
+use crate::store::db::AlbumInfo;
 
 /// What a grid of files (the timeline or the search results) remembers about the user's
 /// selection and scrolling.
@@ -48,7 +51,7 @@ impl GridState {
 pub(super) struct GridEvents {
     pub(super) clicked: Option<(usize, tiles::TileEvent, ClickMods)>,
     pub(super) right_clicked: Option<usize>,
-    pub(super) menu: Option<(usize, albums::TileMenu)>,
+    pub(super) menu: Option<(usize, TileMenu)>,
     /// The first item of the first visible row.
     pub(super) top_item: Option<usize>,
 }
@@ -60,7 +63,7 @@ impl GridEvents {
         &mut self,
         i: usize,
         out: &tiles::TileOut,
-        menu: impl FnOnce(&mut egui::Ui) -> Option<albums::TileMenu>,
+        menu: impl FnOnce(&mut egui::Ui) -> Option<TileMenu>,
     ) {
         if let Some((ev, mods)) = out.event {
             self.clicked = Some((i, ev, mods));
@@ -204,6 +207,94 @@ pub(super) fn scroll_offset_for_row(
         Some(top + tile - view)
     } else {
         None
+    }
+}
+
+/// What the right-click menu of a tile asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TileMenu {
+    Add(AlbumChoice),
+    Remove,
+}
+
+/// The right-click menu of a tile: "Add to album…" and, inside an album, "Remove from album".
+pub(super) fn tile_menu(
+    ui: &mut egui::Ui,
+    albums: &[AlbumInfo],
+    in_album: bool,
+) -> Option<TileMenu> {
+    let mut out = album_menu(ui, albums).map(TileMenu::Add);
+    if in_album && ui.button("Remove from album").clicked() {
+        out = Some(TileMenu::Remove);
+        ui.close();
+    }
+    out
+}
+
+impl App {
+    /// A right-click on tile `i` of the shown grid: a tile outside the selection becomes the
+    /// selection; one inside it leaves the selection alone (the menu then acts on all of it).
+    pub(super) fn select_for_menu(&mut self, i: usize) {
+        let Some(id) = self.file_id_at(i) else {
+            return;
+        };
+        let grid = self.active_grid();
+        if !grid.sel.contains(id) {
+            grid.sel.only(id);
+            grid.selected = Some(i);
+        }
+    }
+
+    /// Applies a choice from a tile's right-click menu to the selection it was opened on.
+    pub(super) fn apply_tile_menu(&mut self, i: usize, menu: TileMenu) {
+        self.select_for_menu(i);
+        self.bulk_action(match menu {
+            TileMenu::Add(c) => BulkAction::AddToAlbum(c),
+            TileMenu::Remove => BulkAction::RemoveFromAlbum,
+        });
+    }
+
+    /// Drops the selection of whatever grid is shown.
+    pub(super) fn clear_selection(&mut self) {
+        self.tl.grid.clear();
+        self.res.grid.clear();
+    }
+
+    /// The grid that is shown: the search results while a search is active, else the timeline.
+    pub(super) fn active_grid(&mut self) -> &mut GridState {
+        if self.searching() {
+            &mut self.res.grid
+        } else {
+            &mut self.tl.grid
+        }
+    }
+
+    /// [`Self::active_grid`] for reading.
+    pub(super) fn grid(&self) -> &GridState {
+        if self.searching() {
+            &self.res.grid
+        } else {
+            &self.tl.grid
+        }
+    }
+
+    /// Every file of the shown list, in order, with its favorite flag as loaded (a search can
+    /// list a file more than once).
+    pub(super) fn listed(&self) -> Box<dyn Iterator<Item = (i64, bool)> + '_> {
+        if self.searching() {
+            Box::new(self.res.hits.iter().map(|h| (h.file_id, h.favorite)))
+        } else {
+            Box::new(self.tl.items.iter().map(|it| (it.file_id, it.favorite)))
+        }
+    }
+
+    /// The file id of item `i` of the shown list.
+    pub(super) fn file_id_at(&self, i: usize) -> Option<i64> {
+        if self.searching() {
+            self.res.hits.get(i).map(|h| h.file_id)
+        } else {
+            self.tl.items.get(i).map(|it| it.file_id)
+        }
     }
 }
 

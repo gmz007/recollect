@@ -251,7 +251,7 @@ fn nested_choices_keep_the_parent_only() {
     assert_eq!(w.chosen_folders(), [other, parent]);
     // The same rule, directly.
     assert_eq!(
-        crate::ui::sidebar::without_nested(&["/a/b".into(), "/a".into(), "/c".into(), "/a".into()]),
+        crate::ui::folders::without_nested(&["/a/b".into(), "/a".into(), "/c".into(), "/a".into()]),
         [std::path::PathBuf::from("/a"), "/c".into()]
     );
 }

@@ -1,14 +1,15 @@
-//! Albums in the UI: the sidebar section, the name and confirmation dialogs, the
-//! "Add to album…" menu and the bar shown above a grid while items are selected.
+//! Albums in the UI: the sidebar section, the name and delete dialogs and the
+//! "Add to album…" menu.
 //!
 //! Album changes go to the library's write queue and come back as [`AlbumWrite`]s. The UI
 //! changes only once a write is confirmed (nothing is shown optimistically that could need
 //! taking back). The sidebar's album list is fetched in the background whenever the library's
 //! album version moves or a job finishes.
 
-use super::style::{self, Palette, icons};
+use super::App;
+use super::dialogs::{Confirmation, confirm_dialog, modal_window};
+use super::style::{self, icons};
 use super::timeline::{View, thousands};
-use super::{App, GridState};
 use crate::library::{AlbumOp, AlbumWrite};
 use crate::store::db::{self, AlbumInfo};
 use egui::RichText;
@@ -88,15 +89,6 @@ pub(super) struct RenameAlbum {
     focused: bool,
 }
 
-/// What the selection bar asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BulkAction {
-    AddToAlbum(AlbumChoice),
-    Favorite(bool),
-    RemoveFromAlbum,
-    Clear,
-}
-
 /// "1 item" / "3 items".
 pub(super) fn items_text(n: usize) -> String {
     if n == 1 {
@@ -166,96 +158,6 @@ pub(super) fn album_menu_icon(
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Add to album…"));
     r.on_hover_text("Add to album…");
     choice
-}
-
-/// What the right-click menu of a tile asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TileMenu {
-    Add(AlbumChoice),
-    Remove,
-}
-
-/// The right-click menu of a tile: "Add to album…" and, inside an album, "Remove from album".
-pub(super) fn tile_menu(
-    ui: &mut egui::Ui,
-    albums: &[AlbumInfo],
-    in_album: bool,
-) -> Option<TileMenu> {
-    let mut out = album_menu(ui, albums).map(TileMenu::Add);
-    if in_album && ui.button("Remove from album").clicked() {
-        out = Some(TileMenu::Remove);
-        ui.close();
-    }
-    out
-}
-
-/// Buttons on the accent colour: light text on a faint veil.
-fn veil_buttons(ui: &mut egui::Ui, pal: Palette) {
-    let v = ui.visuals_mut();
-    for w in [
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-    ] {
-        w.fg_stroke.color = pal.on_accent;
-        w.weak_bg_fill = pal.on_accent.gamma_multiply(0.16);
-        w.bg_fill = w.weak_bg_fill;
-    }
-    v.widgets.hovered.weak_bg_fill = pal.on_accent.gamma_multiply(0.28);
-    v.widgets.open.fg_stroke.color = pal.on_accent;
-    v.widgets.open.weak_bg_fill = pal.on_accent.gamma_multiply(0.28);
-}
-
-/// The accent bar that replaces the view header while items are selected.
-pub(super) fn selection_bar(
-    ui: &mut egui::Ui,
-    count: usize,
-    albums: &[AlbumInfo],
-    in_album: bool,
-) -> Option<BulkAction> {
-    let pal = Palette::of(ui.ctx());
-    let mut action = None;
-    egui::Frame::new()
-        .fill(pal.accent)
-        .corner_radius(egui::CornerRadius::same(style::CARD_RADIUS))
-        .inner_margin(egui::Margin::symmetric(16, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            veil_buttons(ui, pal);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    style::semibold(format!("{} selected", thousands(count)))
-                        .size(16.0)
-                        .color(pal.on_accent),
-                );
-                ui.add_space(8.0);
-                if let Some(c) = album_menu(ui, albums) {
-                    action = Some(BulkAction::AddToAlbum(c));
-                }
-                if style::icon_label_button(ui, icons::ICON_STAR, "Favorite").clicked() {
-                    action = Some(BulkAction::Favorite(true));
-                }
-                if style::icon_label_button(ui, icons::ICON_STAR.outlined(), "Unfavorite").clicked()
-                {
-                    action = Some(BulkAction::Favorite(false));
-                }
-                if in_album
-                    && style::icon_label_button(
-                        ui,
-                        icons::ICON_PLAYLIST_REMOVE,
-                        "Remove from album",
-                    )
-                    .clicked()
-                {
-                    action = Some(BulkAction::RemoveFromAlbum);
-                }
-                if style::icon_label_button(ui, icons::ICON_CLOSE, "Cancel").clicked() {
-                    action = Some(BulkAction::Clear);
-                }
-            });
-        });
-    ui.add_space(8.0);
-    action
 }
 
 /// The sidebar's album rows in a scroll area. Returns the album that was clicked.
@@ -390,19 +292,6 @@ impl App {
             }
             AlbumChoice::New => self.dialogs.new_album = Some(NewAlbum::with_items(files)),
         }
-    }
-
-    pub(super) fn dialog_open(&self) -> bool {
-        self.dialogs.any_open()
-    }
-
-    /// True when keys must not reach the views: a text field has focus, Settings is open or an
-    /// album dialog is.
-    pub(super) fn keys_blocked(&self, ctx: &egui::Context) -> bool {
-        self.dialogs.settings_open
-            || self.dialog_open()
-            || ctx.text_edit_focused()
-            || self.search_help.inside
     }
 
     /// The windows for naming a new album (when it starts with items), renaming and confirming
@@ -616,119 +505,6 @@ impl App {
             self.set_view(View::Timeline);
         }
     }
-
-    /// File ids of the selected items in list order, each file once (a search can list a file
-    /// more than once).
-    pub(super) fn selected_file_ids(&self) -> Vec<i64> {
-        let mut seen = HashSet::new();
-        let sel = &self.grid().sel;
-        self.listed()
-            .map(|(id, _)| id)
-            .filter(|id| sel.contains(*id) && seen.insert(*id))
-            .collect()
-    }
-
-    /// The selection bar, in place of the view header while items are selected. Returns whether
-    /// it was shown.
-    pub(super) fn selection_bar_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        let grid = self.grid();
-        let (count, picking) = (grid.sel.len(), grid.picking);
-        if count == 0 || !picking {
-            return false;
-        }
-        let in_album = !self.searching() && matches!(self.tl.view, View::Album(_));
-        if let Some(a) = selection_bar(ui, count, &self.albums, in_album) {
-            self.bulk_action(a);
-        }
-        true
-    }
-
-    pub(super) fn bulk_action(&mut self, action: BulkAction) {
-        let files = self.selected_file_ids();
-        match action {
-            BulkAction::AddToAlbum(c) => self.add_to_album_choice(files, c),
-            BulkAction::Favorite(fav) => self.set_favorites(&files, fav),
-            BulkAction::RemoveFromAlbum => {
-                // The grid drops them once the library confirms (see `report_album_write`).
-                if let View::Album(album) = self.tl.view {
-                    self.lib.queue_album(AlbumOp::Remove { album, files });
-                }
-            }
-            BulkAction::Clear => self.clear_selection(),
-        }
-    }
-
-    /// A right-click on tile `i` of the shown grid: a tile outside the selection becomes the
-    /// selection; one inside it leaves the selection alone (the menu then acts on all of it).
-    pub(super) fn select_for_menu(&mut self, i: usize) {
-        let Some(id) = self.file_id_at(i) else {
-            return;
-        };
-        let grid = self.active_grid();
-        if !grid.sel.contains(id) {
-            grid.sel.only(id);
-            grid.selected = Some(i);
-        }
-    }
-
-    /// Applies a choice from a tile's right-click menu to the selection it was opened on.
-    pub(super) fn apply_tile_menu(&mut self, i: usize, menu: TileMenu) {
-        self.select_for_menu(i);
-        self.bulk_action(match menu {
-            TileMenu::Add(c) => BulkAction::AddToAlbum(c),
-            TileMenu::Remove => BulkAction::RemoveFromAlbum,
-        });
-    }
-
-    /// Drops the selection of whatever grid is shown.
-    pub(super) fn clear_selection(&mut self) {
-        self.tl.grid.clear();
-        self.res.grid.clear();
-    }
-
-    /// The grid that is shown: the search results while a search is active, else the timeline.
-    pub(super) fn active_grid(&mut self) -> &mut GridState {
-        if self.searching() {
-            &mut self.res.grid
-        } else {
-            &mut self.tl.grid
-        }
-    }
-
-    /// [`Self::active_grid`] for reading.
-    pub(super) fn grid(&self) -> &GridState {
-        if self.searching() {
-            &self.res.grid
-        } else {
-            &self.tl.grid
-        }
-    }
-
-    /// Every file of the shown list, in order, with its favorite flag as loaded (a search can
-    /// list a file more than once).
-    pub(super) fn listed(&self) -> Box<dyn Iterator<Item = (i64, bool)> + '_> {
-        if self.searching() {
-            Box::new(self.res.hits.iter().map(|h| (h.file_id, h.favorite)))
-        } else {
-            Box::new(self.tl.items.iter().map(|it| (it.file_id, it.favorite)))
-        }
-    }
-
-    /// The file id of item `i` of the shown list.
-    pub(super) fn file_id_at(&self, i: usize) -> Option<i64> {
-        if self.searching() {
-            self.res.hits.get(i).map(|h| h.file_id)
-        } else {
-            self.tl.items.get(i).map(|it| it.file_id)
-        }
-    }
-}
-
-/// What was chosen in a [`confirm_dialog`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Confirmation {
-    Confirmed,
-    Cancelled,
 }
 
 /// What was said about adding `requested` items to album `to` when `changed` were new to it.
@@ -744,46 +520,4 @@ fn added_message(changed: usize, requested: usize, to: &str) -> String {
             items_text(requested)
         )
     }
-}
-
-/// A [`modal_window`] with a body and two buttons, `confirm` then `cancel`, which are disabled
-/// unless `enabled`. Returns what was clicked, if anything.
-pub(super) fn confirm_dialog(
-    ctx: &egui::Context,
-    title: &str,
-    confirm: &str,
-    cancel: &str,
-    enabled: bool,
-    add_body: impl FnOnce(&mut egui::Ui),
-) -> Option<Confirmation> {
-    let (mut confirmed, mut cancelled) = (false, false);
-    modal_window(ctx, title, |ui| {
-        add_body(ui);
-        ui.horizontal(|ui| {
-            confirmed = ui
-                .add_enabled(enabled, egui::Button::new(confirm))
-                .clicked();
-            cancelled = ui.add_enabled(enabled, egui::Button::new(cancel)).clicked();
-        });
-    });
-    if confirmed {
-        Some(Confirmation::Confirmed)
-    } else if cancelled {
-        Some(Confirmation::Cancelled)
-    } else {
-        None
-    }
-}
-
-/// A centred dialog over a dimmed backdrop, used by the album and folder dialogs.
-pub(super) fn modal_window(
-    ctx: &egui::Context,
-    title: &str,
-    add_contents: impl FnOnce(&mut egui::Ui),
-) {
-    egui::Modal::new(egui::Id::unique(("dialog", title))).show(ctx, |ui| {
-        ui.label(style::semibold(title).size(17.0));
-        ui.add_space(8.0);
-        add_contents(ui);
-    });
 }

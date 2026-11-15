@@ -2,8 +2,8 @@
 //! Recollect starts with no folders. Nothing is changed until the last screen's button.
 
 use super::App;
+use super::folders::{BAD_FOLDER_PATH, standard_folders, typed_folder, without_nested};
 use super::settings::{choice_card, quality_blurb, quality_name};
-use super::sidebar::{BAD_FOLDER_PATH, standard_folders, typed_folder, without_nested};
 use super::style::{self, Palette, icons};
 use super::timeline::View;
 use crate::model::registry;

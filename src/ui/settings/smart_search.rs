@@ -5,7 +5,7 @@ use super::{heading, hint};
 use crate::library::Activity;
 use crate::model::registry::{self, ModelSpec, megabytes};
 use crate::ui::App;
-use crate::ui::albums::{Confirmation, confirm_dialog};
+use crate::ui::dialogs::{Confirmation, confirm_dialog};
 use crate::ui::style::{self, Palette, icons};
 use crate::ui::timeline::thousands;
 use egui::RichText;

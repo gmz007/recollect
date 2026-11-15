@@ -5,8 +5,8 @@ use super::style::{GAP, TILE};
 use super::tiles::{Tile, TileMark};
 use super::workers::Query;
 use super::{
-    App, ClickOutcome, GridEvents, GridState, albums, fmt_time, grid::grid_scroll_area, guide,
-    marked, scroll_offset_for_row, selection, step, style, tiles, to_millis,
+    App, ClickOutcome, GridEvents, GridState, fmt_time, grid::grid_scroll_area, guide, marked,
+    scroll_offset_for_row, selection, step, style, tiles, to_millis,
 };
 use crate::media::MediaKind;
 use crate::search::{SearchHit, SearchOptions};
@@ -294,7 +294,9 @@ impl App {
             .selectable(mark, grid.picking);
         let id = ui.make_persistent_id(("result", i));
         let out = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
-        events.record(i, &out, |ui| albums::tile_menu(ui, &self.albums, false));
+        events.record(i, &out, |ui| {
+            super::grid::tile_menu(ui, &self.albums, false)
+        });
     }
 
     /// What a click on result `i` does: favorite it, change the selection or open it.

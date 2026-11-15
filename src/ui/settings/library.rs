@@ -97,7 +97,7 @@ impl App {
             .collect();
         for (id, name, path) in rows {
             if folder_card(ui, pal, &name, &path) {
-                self.dialogs.stop_folder = Some(crate::ui::sidebar::StopFolder { id, name });
+                self.dialogs.stop_folder = Some(crate::ui::folders::StopFolder { id, name });
             }
             ui.add_space(2.0);
         }

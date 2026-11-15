@@ -10,7 +10,7 @@ use crate::ui::selection::{self, ClickMods};
 use crate::ui::style::{self, GAP};
 use crate::ui::tiles::{self, Tile, TileEvent, TileMark};
 use crate::ui::workers::ThumbCache;
-use crate::ui::{App, ClickOutcome, FavMark, GridEvents, albums, fmt_time, marked};
+use crate::ui::{App, ClickOutcome, FavMark, GridEvents, fmt_time, marked};
 use chrono::Datelike;
 use egui::{RichText, Sense, Vec2};
 use std::collections::HashMap;
@@ -97,7 +97,9 @@ impl RowsView<'_> {
         let id = ui.make_persistent_id(("tile", i));
         let out = tiles::show(ui, thumbs, id, rect, &tile);
         let in_album = matches!(tl.view, View::Album(_));
-        events.record(i, &out, |ui| albums::tile_menu(ui, self.albums, in_album));
+        events.record(i, &out, |ui| {
+            crate::ui::grid::tile_menu(ui, self.albums, in_album)
+        });
     }
 }
 
