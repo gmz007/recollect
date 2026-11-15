@@ -50,10 +50,29 @@ $RECOLLECT_TEST_MODELS/siglip-base-16/
 Use [Conventional Commits](https://www.conventionalcommits.org/), e.g. `fix(video): handle files
 without a duration` or `feat(ui): keyboard navigation`.
 
+Release notes are generated from these messages, so write them for the people who will read the
+notes: the subject says what changed for a user of Recollect, the body adds the details worth
+knowing. `feat`, `fix`, `perf`, `refactor`, `build` and `docs` commits appear in the notes;
+`test`, `ci` and `chore` do not.
+
+## Releases
+
+Versions are tagged without a prefix (`0.6.2`). [git-cliff](https://git-cliff.org) builds the
+notes from the commit history with the rules in `cliff.toml`:
+
+```bash
+git cliff --unreleased                                      # what the next release holds so far
+git cliff --unreleased --tag X.Y.Z --prepend CHANGELOG.md   # add its section to the changelog
+```
+
+To release: bump the version in `Cargo.toml`, add the section to `CHANGELOG.md` with the second
+command, commit as `chore(release): X.Y.Z`, tag the commit `X.Y.Z` and push the branch and the
+tag. The Release workflow then creates the GitHub release with the same notes.
+
 ## Design
 
 Read [docs/design.md](docs/design.md) before larger changes; it explains the architecture and why
-things are built this way. Add user-visible changes to [CHANGELOG.md](CHANGELOG.md).
+things are built this way.
 
 ## Licensing
 

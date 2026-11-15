@@ -6,6 +6,7 @@ rust-version = "1.90"
 description = "Local, private semantic search over your photos and videos"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/gmz007/recollect"
 keywords = ["search", "clip", "photos", "video", "semantic"]
 categories = ["multimedia", "gui"]
 

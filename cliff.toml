@@ -1,0 +1,58 @@
+# git-cliff (https://git-cliff.org) turns the Conventional Commits history into release notes.
+#
+#   git cliff --unreleased                                      # what the next release holds so far
+#   git cliff --unreleased --tag X.Y.Z --prepend CHANGELOG.md   # add the section for a new release
+#   git cliff --latest --strip header                           # notes of the newest release
+#
+# The release workflow uses the same configuration for the notes of each GitHub release.
+
+[changelog]
+# Must stay identical to the top of CHANGELOG.md: `--prepend` finds it there and puts the new
+# section right below it.
+header = """
+# Changelog
+
+All notable changes to this project are documented here, newest first. Sections up to 0.6.2 were
+written by hand; later ones are generated from the commit history by
+[git-cliff](https://git-cliff.org) (see `cliff.toml`). This project adheres to
+[Semantic Versioning](https://semver.org/).
+"""
+body = """
+{%- if version %}
+## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{%- else %}
+## [Unreleased]
+{%- endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }}
+{%- if commit.body %}
+
+{{ commit.body | indent(prefix="  ", first=true) }}
+{% endif %}
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+# No runs of empty lines, whatever the commit bodies look like.
+postprocessors = [{ pattern = "\\n{3,}", replace = "\n\n" }]
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+# Versions are tagged without a prefix: 0.6.2
+tag_pattern = "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+sort_commits = "oldest"
+# What a reader of the release notes cares about, in this order; release commits, tests, CI and
+# chores are left out.
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Faster" },
+  { message = "^refactor", group = "<!-- 3 -->Changed inside" },
+  { message = "^build", group = "<!-- 4 -->Build and dependencies" },
+  { message = "^docs", group = "<!-- 5 -->Documentation" },
+  { message = "^(test|ci|chore)", skip = true },
+]

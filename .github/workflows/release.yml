@@ -1,0 +1,52 @@
+name: Release
+
+# Gives every version tag (0.6.2, no prefix) a GitHub release whose notes are generated from
+# the commit history by git-cliff (configuration: cliff.toml). It runs on pushes to main as well
+# as on tags, and only creates what is missing, so tags pushed together with main, tags pushed
+# alone and tags older than this workflow all end up with a release.
+on:
+  push:
+    branches: [main]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.14.2
+      - name: Create the missing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          # One pass over the whole history, then one section per version.
+          git cliff --config cliff.toml --strip header --output all-notes.md
+          notes_of() {
+            awk -v head="## [$1]" \
+              'index($0, "## [") == 1 { on = (index($0, head) == 1); next } on' all-notes.md
+          }
+          pattern='[0-9]*.[0-9]*.[0-9]*'
+          newest=$(git tag --list "$pattern" --sort=-v:refname | head -n 1)
+          for tag in $(git tag --list "$pattern" --sort=v:refname); do
+            if gh release view "$tag" > /dev/null 2>&1; then continue; fi
+            notes_of "$tag" > notes.md
+            latest=false
+            if [ "$tag" = "$newest" ]; then latest=true; fi
+            gh release create "$tag" --verify-tag --title "Recollect $tag" \
+              --notes-file notes.md --latest="$latest"
+            echo "created the release for $tag"
+          done
