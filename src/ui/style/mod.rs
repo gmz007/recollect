@@ -1,9 +1,15 @@
 //! The look of the app: fonts, light and dark colours, text styles and spacing, plus a few small
-//! helpers for icons and icon buttons.
+//! helpers for icons and buttons.
 //!
-//! Text is Inter (Regular and `SemiBold`, bundled), icons are Material Symbols, and egui's own
-//! fonts stay behind them as fallbacks for any character Inter does not have. The colours and
-//! sizes live here so every screen draws from one palette.
+//! Text is Inter (Regular, Medium and `SemiBold`, bundled), icons are Material Symbols, and
+//! egui's own fonts stay behind them as fallbacks for any character Inter does not have. The
+//! colours live in [`tokens`] so every screen draws from one palette.
+
+mod mark;
+mod tokens;
+
+pub use mark::app_mark;
+pub use tokens::*;
 
 use crate::config::{TextSize, Theme};
 use egui::{
@@ -17,8 +23,14 @@ pub use egui_material_icons::icons;
 
 /// Corner radius of cards, windows and menus.
 pub const CARD_RADIUS: u8 = 10;
-/// Corner radius of buttons and fields.
-pub const CONTROL_RADIUS: u8 = 8;
+/// Corner radius of buttons, icon buttons and rows.
+pub const CONTROL_RADIUS: u8 = 6;
+/// Side of an icon button.
+pub const ICON_BUTTON: f32 = 32.0;
+/// Height of a chip.
+pub const CHIP_HEIGHT: f32 = 28.0;
+/// Corner radius of the search field and other text fields.
+pub const FIELD_RADIUS: u8 = 8;
 /// Corner radius of photo tiles.
 pub const TILE_RADIUS: u8 = 6;
 /// Default side of a grid tile, in points.
@@ -30,141 +42,6 @@ pub const PANEL_MARGIN: (i8, i8) = (16, 12);
 /// Width kept free beside a scrolling grid for its scroll bar.
 pub const SCROLLBAR_ALLOWANCE: f32 = 12.0;
 
-/// The colours of one theme.
-#[derive(Debug, Clone, Copy)]
-pub struct Palette {
-    pub dark: bool,
-    pub background: Color32,
-    pub surface: Color32,
-    pub raised: Color32,
-    pub text: Color32,
-    pub text_secondary: Color32,
-    pub accent: Color32,
-    /// Text and icons drawn on top of the accent colour.
-    pub on_accent: Color32,
-    pub border: Color32,
-    pub error: Color32,
-    pub favorite: Color32,
-}
-
-impl Palette {
-    pub fn dark() -> Self {
-        Self {
-            dark: true,
-            background: Color32::from_rgb(0x12, 0x12, 0x14),
-            surface: Color32::from_rgb(0x1A, 0x1A, 0x1E),
-            raised: Color32::from_rgb(0x23, 0x23, 0x29),
-            text: Color32::from_rgb(0xED, 0xED, 0xF0),
-            text_secondary: Color32::from_rgb(0xA1, 0xA1, 0xAA),
-            accent: Color32::from_rgb(0x7C, 0x95, 0xFF),
-            on_accent: Color32::from_rgb(0x0E, 0x10, 0x20),
-            border: Color32::from_rgb(0x2E, 0x2E, 0x36),
-            error: Color32::from_rgb(0xFF, 0x8A, 0x80),
-            favorite: Color32::from_rgb(0xFF, 0xC8, 0x28),
-        }
-    }
-
-    pub fn light() -> Self {
-        Self {
-            dark: false,
-            // The content area is the lightest; the sidebar and top bar sit a step darker so
-            // they read as separate surfaces.
-            background: Color32::WHITE,
-            surface: Color32::from_rgb(0xF3, 0xF3, 0xF7),
-            raised: Color32::from_rgb(0xE7, 0xE7, 0xED),
-            text: Color32::from_rgb(0x18, 0x18, 0x1B),
-            text_secondary: Color32::from_rgb(0x52, 0x52, 0x5B),
-            accent: Color32::from_rgb(0x3B, 0x5B, 0xDB),
-            on_accent: Color32::WHITE,
-            border: Color32::from_rgb(0xDD, 0xDD, 0xE4),
-            error: Color32::from_rgb(0xC9, 0x2A, 0x2A),
-            favorite: Color32::from_rgb(0xF5, 0xA6, 0x00),
-        }
-    }
-
-    /// The palette of the theme `ui` is drawn with.
-    pub fn of(ctx: &egui::Context) -> Self {
-        if ctx.global_style().visuals.dark_mode {
-            Self::dark()
-        } else {
-            Self::light()
-        }
-    }
-
-    /// `self.text` mixed towards the background by `t` (0 = text, 1 = background).
-    fn mix_text(&self, base: Color32, t: f32) -> Color32 {
-        base.lerp_to_gamma(self.text, t)
-    }
-
-    fn visuals(&self) -> egui::Visuals {
-        let mut v = if self.dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-        self.window_visuals(&mut v);
-        self.widget_visuals(&mut v.widgets);
-        v
-    }
-
-    /// Backgrounds, windows, links, selection and shadows.
-    fn window_visuals(&self, v: &mut egui::Visuals) {
-        v.panel_fill = self.background;
-        v.window_fill = self.surface;
-        v.window_stroke = Stroke::new(1.0, self.border);
-        v.window_corner_radius = CornerRadius::same(CARD_RADIUS);
-        v.menu_corner_radius = CornerRadius::same(CONTROL_RADIUS);
-        v.extreme_bg_color = self.raised;
-        v.faint_bg_color = self.surface;
-        v.code_bg_color = self.raised;
-        v.hyperlink_color = self.accent;
-        v.warn_fg_color = self.favorite;
-        v.error_fg_color = self.error;
-        v.selection.bg_fill = self.accent;
-        v.selection.stroke = Stroke::new(1.0, self.on_accent);
-        v.text_cursor.stroke = Stroke::new(2.0, self.accent);
-        v.window_shadow = egui::Shadow {
-            offset: [0, 6],
-            blur: 24,
-            spread: 0,
-            color: Color32::from_black_alpha(if self.dark { 120 } else { 40 }),
-        };
-        v.popup_shadow = v.window_shadow;
-    }
-
-    /// Fills, strokes and corners of buttons and other widgets in each state.
-    fn widget_visuals(&self, w: &mut egui::style::Widgets) {
-        let control = CornerRadius::same(CONTROL_RADIUS);
-        w.noninteractive.bg_fill = self.surface;
-        w.noninteractive.weak_bg_fill = self.surface;
-        w.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
-        w.noninteractive.fg_stroke = Stroke::new(1.0, self.text);
-        w.noninteractive.corner_radius = control;
-        w.inactive.bg_fill = self.raised;
-        w.inactive.weak_bg_fill = self.raised;
-        w.inactive.bg_stroke = Stroke::NONE;
-        w.inactive.fg_stroke = Stroke::new(1.0, self.text);
-        w.inactive.corner_radius = control;
-        let hover = self.mix_text(self.raised, 0.08);
-        w.hovered.bg_fill = hover;
-        w.hovered.weak_bg_fill = hover;
-        w.hovered.bg_stroke = Stroke::NONE;
-        w.hovered.fg_stroke = Stroke::new(1.5, self.text);
-        w.hovered.corner_radius = control;
-        let active = self.mix_text(self.raised, 0.16);
-        w.active.bg_fill = active;
-        w.active.weak_bg_fill = active;
-        w.active.bg_stroke = Stroke::NONE;
-        w.active.fg_stroke = Stroke::new(1.5, self.text);
-        w.active.corner_radius = control;
-        w.open.bg_fill = hover;
-        w.open.weak_bg_fill = hover;
-        w.open.bg_stroke = Stroke::NONE;
-        w.open.fg_stroke = Stroke::new(1.0, self.text);
-        w.open.corner_radius = control;
-    }
-}
-
 /// The text style for date headers in the grids.
 pub fn section() -> TextStyle {
     TextStyle::Name("section".into())
@@ -173,6 +50,16 @@ pub fn section() -> TextStyle {
 /// The `SemiBold` family (also used by headings).
 pub fn semibold_family() -> FontFamily {
     FontFamily::Name("Inter-SemiBold".into())
+}
+
+/// The Medium (500) family, for emphasis.
+pub fn medium_family() -> FontFamily {
+    FontFamily::Name("Inter-Medium".into())
+}
+
+/// `text` in Medium.
+pub fn medium(text: impl Into<String>) -> RichText {
+    RichText::new(text).family(medium_family())
 }
 
 /// `text` in `SemiBold`.
@@ -185,20 +72,32 @@ fn fonts() -> FontDefinitions {
     defs.font_data.insert(
         "Inter".into(),
         Arc::new(FontData::from_static(include_bytes!(
-            "../../assets/fonts/Inter-Regular.ttf"
+            "../../../assets/fonts/Inter-Regular.ttf"
         ))),
     );
     defs.font_data.insert(
         "Inter-SemiBold".into(),
         Arc::new(FontData::from_static(include_bytes!(
-            "../../assets/fonts/Inter-SemiBold.ttf"
+            "../../../assets/fonts/Inter-SemiBold.ttf"
+        ))),
+    );
+    defs.font_data.insert(
+        "Inter-Medium".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../../assets/fonts/Inter-Medium.ttf"
         ))),
     );
     let proportional = defs.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "Inter".into());
-    let mut bold = vec!["Inter-SemiBold".to_string()];
-    bold.extend(proportional.iter().cloned());
-    defs.families.insert(semibold_family(), bold);
+    let fallbacks: Vec<String> = proportional.clone();
+    for (family, face) in [
+        (medium_family(), "Inter-Medium"),
+        (semibold_family(), "Inter-SemiBold"),
+    ] {
+        let mut names = vec![face.to_string()];
+        names.extend(fallbacks.iter().cloned());
+        defs.families.insert(family, names);
+    }
     defs
 }
 
@@ -220,21 +119,21 @@ fn install_fonts(ctx: &egui::Context) {
 fn apply_text_styles(style: &mut egui::Style) {
     let inter = FontFamily::Proportional;
     style.text_styles = [
-        (TextStyle::Body, FontId::new(14.5, inter.clone())),
-        (TextStyle::Button, FontId::new(14.5, inter.clone())),
-        (TextStyle::Heading, FontId::new(22.0, semibold_family())),
-        (TextStyle::Small, FontId::new(12.5, inter)),
+        (TextStyle::Body, FontId::new(13.0, inter.clone())),
+        (TextStyle::Button, FontId::new(13.0, inter.clone())),
+        (TextStyle::Heading, FontId::new(20.0, semibold_family())),
+        (TextStyle::Small, FontId::new(12.0, inter)),
         (
             TextStyle::Monospace,
-            FontId::new(13.0, FontFamily::Monospace),
+            FontId::new(12.0, FontFamily::Monospace),
         ),
-        (section(), FontId::new(17.0, semibold_family())),
+        (section(), FontId::new(14.0, semibold_family())),
     ]
     .into();
     let s = &mut style.spacing;
     s.item_spacing = Vec2::new(8.0, 6.0);
     s.button_padding = Vec2::new(12.0, 6.0);
-    s.interact_size = Vec2::new(36.0, 32.0);
+    s.interact_size = Vec2::new(32.0, 28.0);
     s.menu_margin = Margin::same(8);
     s.window_margin = Margin::same(16);
     s.slider_width = 120.0;
@@ -333,14 +232,22 @@ pub fn icon_label_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> 
     r
 }
 
-/// The one main button of a screen: accent fill, a little larger than a normal button.
+/// The one main button of a screen: accent fill, no border, a little darker on hover.
 /// Named `label` for assistive technology.
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> Response {
     let pal = Palette::of(ui.ctx());
-    let b = egui::Button::new(RichText::new(label).color(pal.on_accent).size(15.0))
-        .fill(pal.accent)
-        .min_size(Vec2::new(0.0, 36.0));
-    let r = ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let r = ui
+        .scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            w.inactive.weak_bg_fill = pal.accent;
+            w.hovered.weak_bg_fill = pal.accent.gamma_multiply(0.88);
+            w.active.weak_bg_fill = pal.accent.gamma_multiply(0.78);
+            let b =
+                egui::Button::new(medium(label).color(pal.onaccent)).min_size(Vec2::new(0.0, 32.0));
+            ui.add(b)
+        })
+        .inner
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     r
 }
@@ -455,7 +362,7 @@ pub fn toolbar_button(
 pub fn slider_scope<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let pal = Palette::of(ui.ctx());
     ui.scope(|ui| {
-        let rail = pal.text_secondary.gamma_multiply(0.55);
+        let rail = pal.text2.gamma_multiply(0.55);
         let visuals = ui.visuals_mut();
         visuals.widgets.inactive.bg_fill = rail;
         visuals.widgets.hovered.bg_fill = rail;
@@ -478,20 +385,86 @@ pub fn card(ui: &egui::Ui) -> egui::Frame {
         .inner_margin(Margin::same(16))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn palettes_follow_the_spec() {
-        let d = Palette::dark();
-        assert_eq!(d.background, Color32::from_rgb(0x12, 0x12, 0x14));
-        assert_eq!(d.accent, Color32::from_rgb(0x7C, 0x95, 0xFF));
-        let l = Palette::light();
-        assert_ne!(
-            l.surface, l.background,
-            "the sidebar stands out from the content"
-        );
-        assert_eq!(l.accent, Color32::from_rgb(0x3B, 0x5B, 0xDB));
+/// The name of the platform's command key as shown in tooltips.
+pub fn command_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl"
     }
+}
+
+/// A square icon button of the top bar: 17 point icon, a fill on hover, a tooltip with the
+/// action and its shortcut. Named `label` for assistive technology.
+pub fn top_bar_button(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    label: &str,
+    tooltip: &str,
+) -> Response {
+    square_icon_button(ui, icon, label, tooltip, ICON_BUTTON, 17.0)
+}
+
+/// A smaller icon button (24 points) for section headers; the tooltip is the label.
+pub fn small_icon_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> Response {
+    square_icon_button(ui, icon, label, label, 24.0, 16.0)
+}
+
+fn square_icon_button(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    label: &str,
+    tooltip: &str,
+    side: f32,
+    icon_size: f32,
+) -> Response {
+    let pal = Palette::of(ui.ctx());
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(side), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if r.is_pointer_button_down_on() {
+            pal.sel
+        } else if r.hovered() || r.has_focus() {
+            pal.hover
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(CONTROL_RADIUS), fill);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icon.codepoint,
+            icon_font_id(icon, icon_size),
+            if ui.is_enabled() { pal.text2 } else { pal.ring },
+        );
+    }
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+    r.on_hover_text(tooltip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A filter chip: fully rounded, the pill colours while `active`, the field colour otherwise.
+/// Named `accessible` for assistive technology; true when clicked.
+pub fn filter_chip(ui: &mut egui::Ui, text: &str, accessible: &str, active: bool) -> bool {
+    let pal = Palette::of(ui.ctx());
+    let font = TextStyle::Body.resolve(ui.style());
+    let fg = if active { pal.pilltext } else { pal.text };
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, fg);
+    let size = Vec2::new(galley.size().x + 24.0, CHIP_HEIGHT);
+    let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if active {
+            pal.pill
+        } else if r.hovered() {
+            pal.hover
+        } else {
+            pal.field
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same((CHIP_HEIGHT / 2.0) as u8), fill);
+        let pos = rect.center() - galley.size() / 2.0;
+        ui.painter().galley(pos, galley, fg);
+    }
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, active, accessible));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }

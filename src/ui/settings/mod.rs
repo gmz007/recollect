@@ -14,7 +14,7 @@ pub(super) use smart_search::{quality_blurb, quality_name};
 pub(super) use widgets::choice_card;
 
 use super::App;
-use super::sidebar::nav_row;
+use super::sidebar::plain_row;
 use super::style::{self, Palette, icons};
 use crate::config::{Settings, TextSize, Theme};
 use egui::{CornerRadius, Margin, RichText, Stroke, Vec2};
@@ -70,13 +70,13 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 
 fn hint(ui: &mut egui::Ui, text: &str) {
     let pal = Palette::of(ui.ctx());
-    ui.label(RichText::new(text).small().color(pal.text_secondary));
+    ui.label(RichText::new(text).small().color(pal.text2));
 }
 
 /// The section list on the left of the sheet.
 fn settings_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut Section, nav_w: f32, h: f32) {
     egui::Frame::new()
-        .fill(pal.raised)
+        .fill(pal.field)
         .corner_radius(CornerRadius {
             nw: 16,
             sw: 16,
@@ -93,14 +93,13 @@ fn settings_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut Section, nav_w: 
                 ui.label(style::semibold("Settings").size(18.0));
                 ui.add_space(10.0);
                 for s in Section::ALL {
-                    let (_, r) = nav_row(
+                    let (_, r) = plain_row(
                         ui,
                         s.icon(),
                         s.name(),
                         &format!("{} settings", s.name()),
                         None,
                         *current == s,
-                        0.0,
                     );
                     if r.clicked() {
                         *current = s;
@@ -197,8 +196,8 @@ impl App {
         let h = (screen.y - 48.0).clamp(320.0, 560.0);
         let nav_w = if w < 520.0 { 150.0 } else { 188.0 };
         let frame = egui::Frame::new()
-            .fill(pal.surface)
-            .stroke(Stroke::new(1.0, pal.border))
+            .fill(pal.side)
+            .stroke(Stroke::new(1.0, pal.line))
             .corner_radius(CornerRadius::same(16))
             .shadow(ctx.global_style().visuals.popup_shadow)
             .inner_margin(Margin::ZERO);
@@ -242,12 +241,16 @@ impl App {
         heading(ui, "Text size");
         if let Some(t) = segmented(
             ui,
-            &[(TextSize::Normal, "Normal"), (TextSize::Large, "Large")],
+            &[
+                (TextSize::Small, "Small"),
+                (TextSize::Medium, "Medium"),
+                (TextSize::Large, "Large"),
+            ],
             s.text_size,
         ) {
             self.change_settings(|s| s.text_size = t);
         }
-        hint(ui, "Large makes all text and buttons about 15 % bigger.");
+        hint(ui, "Everything scales with the text size.");
         ui.add_space(14.0);
         heading(ui, "Tips");
         ui.label("Short hints appear now and then to show you what Recollect can do.");
@@ -266,7 +269,7 @@ impl App {
                 ui.label(style::semibold("Recollect").size(18.0));
                 ui.label(
                     RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                        .color(pal.text_secondary),
+                        .color(pal.text2),
                 );
             });
         });

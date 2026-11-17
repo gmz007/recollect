@@ -14,6 +14,8 @@ const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(500);
 pub(super) struct Snapshot {
     pub(super) stats: Stats,
     pub(super) folders: Vec<Folder>,
+    /// Ids of the folders that cannot be read now (an unplugged drive).
+    pub(super) missing_folders: Vec<i64>,
     pub(super) errors: Vec<(PathBuf, String)>,
     pub(super) model_installed: bool,
     /// Ids of the smart-search choices whose files are on this computer.
@@ -24,9 +26,16 @@ pub(super) struct Snapshot {
 impl Snapshot {
     /// Database queries: run off the UI thread (the database may be busy for a while).
     pub(super) fn fetch(lib: &Library) -> Self {
+        let folders = lib.folders().unwrap_or_default();
+        let missing_folders = folders
+            .iter()
+            .filter(|f| !f.path.is_dir())
+            .map(|f| f.id)
+            .collect();
         Self {
             stats: lib.stats().unwrap_or_default(),
-            folders: lib.folders().unwrap_or_default(),
+            folders,
+            missing_folders,
             errors: lib.errors(50).unwrap_or_default(),
             model_installed: lib.model_installed(),
             installed_models: crate::model::registry::MODELS

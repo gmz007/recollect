@@ -124,7 +124,6 @@ pub(super) struct TimelineState {
     failed: Option<(TimelineFilter, Instant)>,
     pub(super) error: Option<String>,
     pub(super) grid: GridState,
-    expanded: HashSet<i32>,
     top_year: Option<i32>,
     top_item: Option<usize>,
     /// Item to scroll to once the layout is known; `true` aligns to its section header.
@@ -158,7 +157,6 @@ impl TimelineState {
             failed: None,
             error: None,
             grid: GridState::default(),
-            expanded: HashSet::new(),
             top_year: None,
             top_item: None,
             pending: None,

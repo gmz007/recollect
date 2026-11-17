@@ -79,6 +79,10 @@ fn the_activity_card_describes_what_is_happening() {
             folder: "/x".into(),
         },
     );
+    // The foot of the sidebar shows a ring; its details open on a click.
+    assert!(h.query_by_label("Pause").is_none());
+    h.get_by_label("Progress: Looking for new photos…").click();
+    h.run_steps(2);
     h.get_by_label("Looking for new photos…");
     h.get_by_label("Pause");
     h.get_by_label("Stop");
@@ -206,7 +210,8 @@ fn check_main_window(check: &mut dyn FnMut(&str, &Harness<'_>), dir: &std::path:
     let app = album_app(dir, true);
     let mut h = album_harness(&app);
     check("timeline", &h);
-    // Activity card in each state.
+    // Activity in each state.
+    let mut details_open = false;
     let lib = Arc::clone(&app.borrow().lib);
     for a in [
         Activity::Scanning {
@@ -228,6 +233,13 @@ fn check_main_window(check: &mut dyn FnMut(&str, &Harness<'_>), dir: &std::path:
         lib.update_status(|s| s.activity = a);
         h.run_steps(2);
         check("activity", &h);
+        if !details_open {
+            // The details (with Pause and Stop) open from the ring at the foot.
+            h.get_by_label_contains("Progress:").click();
+            h.run_steps(2);
+            check("activity details", &h);
+            details_open = true;
+        }
     }
     lib.update_status(|s| s.activity = Activity::Idle);
     h.run_steps(2);
@@ -394,7 +406,7 @@ fn the_main_screens_use_no_technical_words() {
     assert!(seen.iter().any(|t| t == "Recently added"));
     assert!(
         seen.iter()
-            .any(|t| t.starts_with("Getting your photos ready for search"))
+            .any(|t| t.contains("Getting your photos ready for search"))
     );
 }
 

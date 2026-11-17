@@ -3,7 +3,7 @@
 
 use super::App;
 use super::dialogs::{Confirmation, confirm_dialog, modal_window};
-use super::sidebar::nav_row;
+use super::sidebar::plain_row;
 use super::style::{self, icons};
 use egui::RichText;
 use std::path::PathBuf;
@@ -234,14 +234,13 @@ fn pick_folder_rows(ui: &mut egui::Ui, suggestions: &[(String, PathBuf)]) -> Opt
         ui.add_space(12.0);
         ui.label(style::semibold("Suggestions").size(14.0));
         for (name, path) in suggestions {
-            let (_, r) = nav_row(
+            let (_, r) = plain_row(
                 ui,
                 icons::ICON_FOLDER,
                 name,
                 &format!("Add {name}"),
                 Some(&path.display().to_string()),
                 false,
-                0.0,
             );
             if r.clicked() {
                 chosen = Some(path.clone());

@@ -8,10 +8,14 @@
 
 use super::App;
 use super::dialogs::{Confirmation, confirm_dialog, modal_window};
+use super::sidebar::{Leading, Row};
 use super::style::{self, icons};
 use super::timeline::{View, thousands};
+use super::workers::ThumbCache;
 use crate::library::{AlbumOp, AlbumWrite};
+use crate::media::MediaKind;
 use crate::store::db::{self, AlbumInfo};
+use crate::thumbs::ThumbKey;
 use egui::RichText;
 use std::collections::HashSet;
 
@@ -160,8 +164,23 @@ pub(super) fn album_menu_icon(
     choice
 }
 
+/// The key of the thumbnail that stands for an album: its cover when that is a photo.
+fn cover_key(album: &AlbumInfo) -> Option<ThumbKey> {
+    let c = album.cover.as_ref()?;
+    (c.kind == MediaKind::Image).then(|| ThumbKey {
+        path: c.path.clone(),
+        mtime: c.mtime,
+        t_ms: None,
+    })
+}
+
 /// The sidebar's album rows in a scroll area. Returns the album that was clicked.
-fn album_rows(ui: &mut egui::Ui, albums: &[AlbumInfo], current: View) -> Option<i64> {
+fn album_rows(
+    ui: &mut egui::Ui,
+    thumbs: &mut ThumbCache,
+    albums: &[AlbumInfo],
+    current: View,
+) -> Option<i64> {
     let mut open = None;
     egui::ScrollArea::vertical()
         .id_salt("albums")
@@ -170,16 +189,15 @@ fn album_rows(ui: &mut egui::Ui, albums: &[AlbumInfo], current: View) -> Option<
         .show(ui, |ui| {
             for a in albums {
                 let short = short_name(&a.name, SHORT_NAME_CHARS);
-                let count = thousands(a.count);
-                let (_, r) = super::sidebar::nav_row(
-                    ui,
-                    icons::ICON_PHOTO_ALBUM,
+                let accessible = format!("{short} ({})", thousands(a.count));
+                let key = cover_key(a);
+                let mut row = Row::new(
+                    Leading::Cover(key.as_ref()),
                     &short,
-                    &format!("{short} ({count})"),
-                    Some(&count),
                     current == View::Album(a.id),
-                    0.0,
                 );
+                row.accessible = &accessible;
+                let (_, r) = super::sidebar::nav_row(ui, Some(thumbs), &row);
                 if r.on_hover_text(&a.name).clicked() {
                     open = Some(a.id);
                 }
@@ -225,9 +243,15 @@ impl App {
             self.dialogs.new_album = Some(NewAlbum::default());
         }
         if self.albums.is_empty() {
-            ui.label(RichText::new("No albums yet.").weak());
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("No albums yet.")
+                        .color(super::style::Palette::of(ui.ctx()).muted),
+                );
+            });
         }
-        if let Some(id) = album_rows(ui, &self.albums, self.tl.view) {
+        if let Some(id) = album_rows(ui, &mut self.thumbs, &self.albums, self.tl.view) {
             self.set_view(View::Album(id));
         }
         self.inline_new_album(ui);

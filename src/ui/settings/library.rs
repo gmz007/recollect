@@ -34,13 +34,13 @@ pub(in crate::ui) fn counts_text(stats: &Stats, installed: bool) -> String {
 fn folder_card(ui: &mut egui::Ui, pal: Palette, name: &str, path: &str) -> bool {
     let mut stop = false;
     egui::Frame::new()
-        .fill(pal.raised)
+        .fill(pal.field)
         .corner_radius(CornerRadius::same(style::CARD_RADIUS))
         .inner_margin(Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(style::icon_text(icons::ICON_FOLDER, 22.0).color(pal.text_secondary));
+                ui.label(style::icon_text(icons::ICON_FOLDER, 22.0).color(pal.text2));
                 let stop_label = format!(
                     "Stop showing “{}”…",
                     crate::ui::albums::short_name(name, 24)
@@ -61,8 +61,7 @@ fn folder_card(ui: &mut egui::Ui, pal: Palette, name: &str, path: &str) -> bool 
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.add(egui::Label::new(style::semibold(name)).truncate());
                     ui.add(
-                        egui::Label::new(RichText::new(path).small().color(pal.text_secondary))
-                            .truncate(),
+                        egui::Label::new(RichText::new(path).small().color(pal.text2)).truncate(),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -134,7 +133,7 @@ impl App {
                 "These files couldn't be opened. They may be damaged or unsupported.",
             );
             egui::Frame::new()
-                .fill(pal.raised)
+                .fill(pal.field)
                 .corner_radius(CornerRadius::same(style::CARD_RADIUS))
                 .inner_margin(Margin::same(10))
                 .show(ui, |ui| {

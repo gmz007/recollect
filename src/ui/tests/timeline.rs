@@ -39,25 +39,25 @@ fn timeline_shows_month_headers_and_regroups() {
 }
 
 #[test]
-fn navigator_jumps_to_a_year() {
+fn the_top_bar_holds_only_help_and_settings_beside_the_search_field() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
-    let mut h = album_harness(&app);
-    assert!(h.query_by_label("December 2005 · 1").is_none());
-    // The date list is folded away until asked for.
-    assert!(h.query_by_label("2005 (12)").is_none());
-    h.get_by_label("Jump to date").click();
-    h.run();
-    // The sidebar's date list is short in a window this size: scroll the year into view.
-    h.get_by_label("2005 (12)").scroll_to_me();
-    h.run();
-    h.get_by_label("2005 (12)").click();
-    h.run();
-    h.run();
-    h.get_by_label("December 2005 · 1");
-    assert!(h.query_by_label("December 2019 · 1").is_none());
-    // The year stays expanded and its months are listed.
-    h.get_by_label("June (1)");
+    let h = album_harness(&app);
+    h.get_by_label("Help");
+    h.get_by_label("Settings");
+    // The type filter lives with the search results, not in the bar.
+    assert!(h.query_by_label("Everything").is_none());
+    assert!(h.query_by_label("Photos only").is_none());
+}
+
+#[test]
+fn the_sidebar_has_no_date_list() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let h = album_harness(&app);
+    assert!(h.query_by_label("Jump to date").is_none());
+    h.get_by_label("Recently added");
+    h.get_by_label("Favorites");
 }
 
 #[test]

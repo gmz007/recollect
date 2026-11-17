@@ -25,13 +25,13 @@ fn veil_buttons(ui: &mut egui::Ui, pal: Palette) {
         &mut v.widgets.hovered,
         &mut v.widgets.active,
     ] {
-        w.fg_stroke.color = pal.on_accent;
-        w.weak_bg_fill = pal.on_accent.gamma_multiply(0.16);
+        w.fg_stroke.color = pal.onaccent;
+        w.weak_bg_fill = pal.onaccent.gamma_multiply(0.16);
         w.bg_fill = w.weak_bg_fill;
     }
-    v.widgets.hovered.weak_bg_fill = pal.on_accent.gamma_multiply(0.28);
-    v.widgets.open.fg_stroke.color = pal.on_accent;
-    v.widgets.open.weak_bg_fill = pal.on_accent.gamma_multiply(0.28);
+    v.widgets.hovered.weak_bg_fill = pal.onaccent.gamma_multiply(0.28);
+    v.widgets.open.fg_stroke.color = pal.onaccent;
+    v.widgets.open.weak_bg_fill = pal.onaccent.gamma_multiply(0.28);
 }
 
 /// The accent bar that replaces the view header while items are selected.
@@ -54,7 +54,7 @@ pub(super) fn selection_bar(
                 ui.label(
                     style::semibold(format!("{} selected", thousands(count)))
                         .size(16.0)
-                        .color(pal.on_accent),
+                        .color(pal.onaccent),
                 );
                 ui.add_space(8.0);
                 if let Some(c) = album_menu(ui, albums) {

@@ -76,7 +76,7 @@ fn data_folder_row(ui: &mut egui::Ui, what: &str, desc: &str, dir: &Path) -> boo
     let pal = Palette::of(ui.ctx());
     let mut open = false;
     egui::Frame::new()
-        .fill(pal.raised)
+        .fill(pal.field)
         .corner_radius(CornerRadius::same(style::CARD_RADIUS))
         .inner_margin(Margin::symmetric(12, 8))
         .show(ui, |ui| {
@@ -91,7 +91,7 @@ fn data_folder_row(ui: &mut egui::Ui, what: &str, desc: &str, dir: &Path) -> boo
                         egui::Label::new(
                             RichText::new(dir.display().to_string())
                                 .small()
-                                .color(pal.text_secondary),
+                                .color(pal.text2),
                         )
                         .truncate(),
                     )

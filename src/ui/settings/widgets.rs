@@ -37,7 +37,7 @@ pub(super) fn segmented<T: Copy + PartialEq>(
     let pal = Palette::of(ui.ctx());
     let mut picked = None;
     egui::Frame::new()
-        .fill(pal.raised)
+        .fill(pal.field)
         .corner_radius(CornerRadius::same(style::CONTROL_RADIUS))
         .inner_margin(Margin::same(2))
         .show(ui, |ui| {
@@ -61,13 +61,13 @@ fn segment_button(ui: &mut egui::Ui, pal: Palette, label: &str, selected: bool) 
         .painter()
         .layout_no_wrap(label.to_string(), font, pal.text);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(g.size().x + 28.0, 30.0), Sense::click());
-    let fg = if selected { pal.on_accent } else { pal.text };
+    let fg = if selected { pal.onaccent } else { pal.text };
     if selected {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(7), pal.accent);
     } else if resp.hovered() {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(7), pal.border);
+            .rect_filled(rect, CornerRadius::same(7), pal.line);
     }
     let g = ui.painter().layout_no_wrap(
         label.to_string(),
@@ -114,7 +114,7 @@ impl CardText {
             blurb: painter.layout(
                 blurb.to_string(),
                 egui::TextStyle::Body.resolve(ui.style()),
-                pal.text_secondary,
+                pal.text2,
                 text_w,
             ),
             note: (!note.is_empty()).then(|| {
@@ -176,9 +176,9 @@ fn paint_choice_card_background(
         if selected {
             pal.accent.gamma_multiply(0.14)
         } else if hovered {
-            pal.border
+            pal.line
         } else {
-            pal.raised
+            pal.field
         },
     );
     if selected {
@@ -207,14 +207,7 @@ fn paint_choice_card_text(
     painter.circle_stroke(
         dot,
         9.0,
-        Stroke::new(
-            1.5,
-            if selected {
-                pal.accent
-            } else {
-                pal.text_secondary
-            },
-        ),
+        Stroke::new(1.5, if selected { pal.accent } else { pal.text2 }),
     );
     if selected {
         painter.circle_filled(dot, 5.0, pal.accent);
@@ -225,7 +218,7 @@ fn paint_choice_card_text(
     painter.galley(Pos2::new(x, y), text.title, pal.text);
     y += h;
     let h = text.blurb.size().y + 4.0;
-    painter.galley(Pos2::new(x, y), text.blurb, pal.text_secondary);
+    painter.galley(Pos2::new(x, y), text.blurb, pal.text2);
     y += h;
     if let Some(g) = text.note {
         painter.galley(Pos2::new(x, y), g, pal.accent);

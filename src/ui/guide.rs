@@ -157,7 +157,7 @@ fn sentence_job(
                     0.0,
                     egui::TextFormat {
                         font_id: style::icon_font_id(icons::ICON_STAR, 20.0),
-                        color: pal.favorite,
+                        color: pal.text,
                         valign: egui::Align::Center,
                         ..Default::default()
                     },
@@ -182,7 +182,7 @@ fn empty_state(ui: &mut egui::Ui, icon: MaterialIcon, sentence: &[Part<'_>], but
     let mut clicked = false;
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.22).min(140.0));
-        ui.label(style::icon_text(icon, 56.0).color(pal.text_secondary));
+        ui.label(style::icon_text(icon, 56.0).color(pal.text2));
         ui.add_space(12.0);
         let r = ui.add(egui::Label::new(job));
         // Assistive technology reads the whole sentence, with the star named.
@@ -353,7 +353,7 @@ fn suggestion_chip(
             0.0,
             egui::TextFormat {
                 font_id: style::icon_font_id(icon, 16.0),
-                color: pal.text_secondary,
+                color: pal.text2,
                 valign: egui::Align::Center,
                 ..Default::default()
             },
@@ -370,7 +370,7 @@ fn suggestion_chip(
         },
     );
     let b = egui::Button::new(job)
-        .fill(pal.raised)
+        .fill(pal.field)
         .corner_radius(CornerRadius::same(16))
         .min_size(Vec2::new(0.0, 30.0));
     let r = ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -431,14 +431,14 @@ fn help_sections(
     ui.label(
         RichText::new("Your searches stay on this computer.")
             .small()
-            .color(pal.text_secondary),
+            .color(pal.text2),
     );
     picks
 }
 
 /// A small heading of the search help.
 fn help_heading(ui: &mut egui::Ui, pal: &Palette, text: &str) {
-    ui.label(style::semibold(text).size(13.5).color(pal.text_secondary));
+    ui.label(style::semibold(text).size(13.5).color(pal.text2));
 }
 
 impl App {
@@ -538,8 +538,8 @@ impl App {
             .fixed_pos(Pos2::new(field.min.x, field.max.y + 6.0))
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(pal.surface)
-                    .stroke(Stroke::new(1.0, pal.border))
+                    .fill(pal.side)
+                    .stroke(Stroke::new(1.0, pal.line))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(14))
                     .shadow(ctx.global_style().visuals.popup_shadow)

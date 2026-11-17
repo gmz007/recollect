@@ -6,9 +6,12 @@ use super::timeline::{Group, View, thousands};
 use super::{App, NoticeAction, Notices};
 use crate::media::MediaKind;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
-use egui_material_icons::MaterialIcon;
 use std::time::Instant;
 
+/// The widest the search field gets, in points.
+const SEARCH_MAX_WIDTH: f32 = 520.0;
+/// Height of the search field.
+const SEARCH_HEIGHT: f32 = 34.0;
 /// Placeholder of the search field.
 const SEARCH_HINT: &str = "Search your photos — try “dog on the beach”";
 /// What assistive technology reads for the search field while smart search is off.
@@ -41,55 +44,6 @@ fn count_text(photos: usize, videos: usize) -> String {
     }
 }
 
-/// One segment of the photo/video filter. Returns true when clicked.
-fn segment(
-    ui: &mut egui::Ui,
-    icon: MaterialIcon,
-    text: &str,
-    accessible: &str,
-    selected: bool,
-) -> bool {
-    let pal = Palette::of(ui.ctx());
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_string(), font, pal.text);
-    let size = Vec2::new(galley.size().x + 44.0, 30.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    if ui.is_rect_visible(rect) {
-        let fg = if selected { pal.on_accent } else { pal.text };
-        if selected {
-            ui.painter()
-                .rect_filled(rect, CornerRadius::same(7), pal.accent);
-        } else if resp.hovered() {
-            ui.painter()
-                .rect_filled(rect, CornerRadius::same(7), pal.border);
-        }
-        ui.painter().text(
-            Pos2::new(rect.min.x + 17.0, rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            icon.codepoint,
-            style::icon_font_id(icon, 17.0),
-            fg,
-        );
-        let g = ui.painter().layout_no_wrap(
-            text.to_string(),
-            egui::TextStyle::Body.resolve(ui.style()),
-            fg,
-        );
-        ui.painter().galley(
-            Pos2::new(rect.min.x + 31.0, rect.center().y - g.size().y / 2.0),
-            g,
-            fg,
-        );
-    }
-    resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, accessible)
-    });
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
-}
-
 /// What happened in the search field's text box this frame.
 #[derive(Default)]
 struct SearchEdit {
@@ -105,24 +59,32 @@ struct ToastClicks {
 }
 
 impl App {
+    /// The top bar: the search field in the middle, Help and Settings on the right.
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let pal = Palette::of(ui.ctx());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            ui.label(style::icon_text(icons::ICON_PHOTO_LIBRARY, 26.0).color(pal.accent));
-            ui.label(style::semibold("Recollect").size(20.0));
-            let total = ui.available_width();
-            let (right_w, seg_w) = (96.0, 236.0);
-            let field_w = (total - right_w - seg_w - 120.0).clamp(220.0, 520.0);
-            let lead = ((total - right_w - field_w - seg_w - 12.0) / 2.0).max(8.0);
-            ui.add_space(lead);
+        if ui.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.dialogs.help_open = true;
+        }
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
+            self.open_settings();
+        }
+        let total = ui.available_width();
+        let icons_w = 2.0 * style::ICON_BUTTON + 4.0;
+        // Centred in the bar, and narrower when the window is.
+        let field_w = (total - 2.0 * (icons_w + 16.0)).clamp(180.0, SEARCH_MAX_WIDTH);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space(((total - field_w) / 2.0).max(0.0));
             self.search_field(ui, field_w);
-            self.type_filter(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if style::icon_button_framed(ui, icons::ICON_SETTINGS, "Settings").clicked() {
+                let settings = format!("Settings ({}+,)", style::command_key());
+                if style::top_bar_button(ui, icons::ICON_SETTINGS.outlined(), "Settings", &settings)
+                    .clicked()
+                {
                     self.open_settings();
                 }
-                if style::icon_button_framed(ui, icons::ICON_HELP, "Help").clicked() {
+                if style::top_bar_button(ui, icons::ICON_HELP.outlined(), "Help", "Help (F1)")
+                    .clicked()
+                {
                     self.dialogs.help_open = true;
                 }
             });
@@ -132,21 +94,21 @@ impl App {
     /// The search field while smart search is off: a prompt that opens Settings.
     fn search_field_off(&mut self, ui: &mut egui::Ui, width: f32) {
         let pal = Palette::of(ui.ctx());
-        let radius = CornerRadius::same(style::CONTROL_RADIUS);
+        let radius = CornerRadius::same(style::FIELD_RADIUS);
         // Searching needs smart search: the field invites turning it on instead.
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
-        ui.painter().rect_filled(rect, radius, pal.raised);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, SEARCH_HEIGHT), Sense::click());
+        ui.painter().rect_filled(rect, radius, pal.field);
         ui.painter().text(
             Pos2::new(rect.min.x + 20.0, rect.center().y),
             egui::Align2::CENTER_CENTER,
             icons::ICON_SEARCH.codepoint,
-            style::icon_font_id(icons::ICON_SEARCH, 20.0),
-            pal.text_secondary,
+            style::icon_font_id(icons::ICON_SEARCH, 16.0),
+            pal.text2,
         );
         let mut job = egui::text::LayoutJob::simple_singleline(
             SEARCH_OFF_HINT.to_string(),
             egui::TextStyle::Body.resolve(ui.style()),
-            pal.text_secondary,
+            pal.text2,
         );
         job.wrap.max_width = width - 44.0;
         job.wrap.max_rows = 1;
@@ -156,7 +118,7 @@ impl App {
         ui.painter().galley(
             Pos2::new(rect.min.x + 38.0, rect.center().y - g.size().y / 2.0),
             g,
-            pal.text_secondary,
+            pal.text2,
         );
         self.search_help.field = None;
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, SEARCH_OFF_LABEL));
@@ -170,7 +132,7 @@ impl App {
 
     fn search_field(&mut self, ui: &mut egui::Ui, width: f32) {
         let pal = Palette::of(ui.ctx());
-        let radius = CornerRadius::same(style::CONTROL_RADIUS);
+        let radius = CornerRadius::same(style::FIELD_RADIUS);
         if !self.snapshot.model_installed {
             self.search_field_off(ui, width);
             return;
@@ -178,14 +140,14 @@ impl App {
         let id = egui::Id::unique("search");
         let focused = ui.memory(|m| m.has_focus(id));
         let frame = egui::Frame::new()
-            .fill(pal.raised)
+            .fill(pal.field)
             .stroke(if focused {
                 Stroke::new(1.5, pal.accent)
             } else {
                 Stroke::NONE
             })
             .corner_radius(radius)
-            .inner_margin(Margin::symmetric(10, 2));
+            .inner_margin(Margin::symmetric(10, 0));
         let mut edit = SearchEdit::default();
         let shown = frame.show(ui, |ui| {
             ui.set_width(width - 20.0);
@@ -206,7 +168,7 @@ impl App {
         let pal = Palette::of(ui.ctx());
         let mut edit = SearchEdit::default();
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(style::icon_text(icons::ICON_SEARCH, 20.0).color(pal.text_secondary));
+        ui.label(style::icon_text(icons::ICON_SEARCH, 16.0).color(pal.muted));
         let edit_w = width - 20.0 - 28.0 - if self.query.is_empty() { 0.0 } else { 30.0 };
         let resp = ui.add(
             egui::TextEdit::singleline(&mut self.query)
@@ -216,7 +178,7 @@ impl App {
                 // Typed text, placeholder and cursor share one vertical centre
                 // with the search icon.
                 .align(egui::Align2::LEFT_CENTER)
-                .min_size(Vec2::new(0.0, 30.0))
+                .min_size(Vec2::new(0.0, SEARCH_HEIGHT))
                 .desired_width(edit_w),
         );
         resp.widget_info(|| {
@@ -254,48 +216,20 @@ impl App {
         }
     }
 
-    fn type_filter(&mut self, ui: &mut egui::Ui) {
-        let pal = Palette::of(ui.ctx());
+    /// The All / Photos / Videos chips of the search results.
+    fn type_chips(&mut self, ui: &mut egui::Ui) -> bool {
         let before = self.kind;
-        egui::Frame::new()
-            .fill(pal.raised)
-            .corner_radius(CornerRadius::same(style::CONTROL_RADIUS))
-            .inner_margin(Margin::same(2))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.horizontal(|ui| {
-                    if segment(
-                        ui,
-                        icons::ICON_APPS,
-                        "All",
-                        "Everything",
-                        self.kind.is_none(),
-                    ) {
-                        self.kind = None;
-                    }
-                    if segment(
-                        ui,
-                        icons::ICON_PHOTO,
-                        "Photos",
-                        "Photos only",
-                        self.kind == Some(MediaKind::Image),
-                    ) {
-                        self.kind = Some(MediaKind::Image);
-                    }
-                    if segment(
-                        ui,
-                        icons::ICON_MOVIE,
-                        "Videos",
-                        "Videos only",
-                        self.kind == Some(MediaKind::Video),
-                    ) {
-                        self.kind = Some(MediaKind::Video);
-                    }
-                });
-            });
-        if before != self.kind {
-            self.rerun();
+        // (Laid out right to left, so the last chip goes first.)
+        for (kind, text, accessible) in [
+            (Some(MediaKind::Video), "Videos", "Videos only"),
+            (Some(MediaKind::Image), "Photos", "Photos only"),
+            (None, "All", "Everything"),
+        ] {
+            if style::filter_chip(ui, text, accessible, self.kind == kind) {
+                self.kind = kind;
+            }
         }
+        before != self.kind
     }
 
     /// Title of the view the timeline area shows.
@@ -351,10 +285,10 @@ impl App {
                 }
             });
             if !subtitle.is_empty() {
-                ui.label(RichText::new(subtitle).color(pal.text_secondary));
+                ui.label(RichText::new(subtitle).color(pal.text2));
             } else if self.tl.error.is_some() {
                 ui.colored_label(
-                    pal.error,
+                    pal.danger,
                     "Couldn't load your photos. Please try again in a moment.",
                 );
             }
@@ -366,7 +300,7 @@ impl App {
     fn view_controls(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(style::icon_text(icons::ICON_IMAGE, 22.0).color(pal.text_secondary));
+        ui.label(style::icon_text(icons::ICON_IMAGE, 22.0).color(pal.text2));
         style::slider_scope(ui, |ui| {
             let r = ui
                 .add(
@@ -378,8 +312,8 @@ impl App {
             let v = f64::from(self.tl.tile_size);
             r.widget_info(|| egui::WidgetInfo::slider(true, v, "Thumbnail size"));
         });
-        ui.label(style::icon_text(icons::ICON_IMAGE, 14.0).color(pal.text_secondary));
-        ui.label(RichText::new("Size").color(pal.text_secondary));
+        ui.label(style::icon_text(icons::ICON_IMAGE, 14.0).color(pal.text2));
+        ui.label(RichText::new("Size").color(pal.text2));
         ui.add_space(8.0);
         if self.tl.headers() {
             self.sort_and_group_choices(ui);
@@ -437,7 +371,7 @@ impl App {
     }
 
     /// Header of the search results: what was asked, how many were found, and chips that
-    /// narrow and order them. (The photo/video filter lives in the top bar.)
+    /// narrow and order them (type, date, sort).
     pub(super) fn results_header(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let title = self.results_title();
@@ -462,9 +396,9 @@ impl App {
                     .as_ref()
                     .filter(|_| !self.res.hits.is_empty())
                 {
-                    ui.colored_label(pal.error, &e.text);
+                    ui.colored_label(pal.danger, &e.text);
                 } else if self.res.error.is_none() && !subtitle.is_empty() {
-                    ui.label(RichText::new(subtitle).color(pal.text_secondary));
+                    ui.label(RichText::new(subtitle).color(pal.text2));
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -474,6 +408,8 @@ impl App {
                 }
                 changed |= super::when::sort_ui(ui, &mut self.sort);
                 changed |= self.date.ui(ui, &self.known_years, year);
+                ui.add_space(8.0);
+                changed |= self.type_chips(ui);
             });
         });
         if changed {
@@ -498,8 +434,8 @@ impl App {
         let spec = self.lib.model();
         let (mut turn_on, mut not_now, mut learn_more) = (false, false, false);
         egui::Frame::new()
-            .fill(pal.surface)
-            .stroke(Stroke::new(1.0, pal.border))
+            .fill(pal.side)
+            .stroke(Stroke::new(1.0, pal.line))
             .corner_radius(CornerRadius::same(style::CARD_RADIUS))
             .inner_margin(Margin::symmetric(14, 8))
             .show(ui, |ui| {
@@ -507,7 +443,7 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(style::icon_text(icons::ICON_AUTO_AWESOME, 20.0).color(pal.accent));
                     ui.label(SEARCH_OFF_HINT);
-                    let on = egui::Button::new(RichText::new("Turn on").color(pal.on_accent))
+                    let on = egui::Button::new(RichText::new("Turn on").color(pal.onaccent))
                         .fill(pal.accent);
                     turn_on = ui
                         .add(on)
@@ -560,8 +496,8 @@ impl App {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(pal.raised)
-                    .stroke(Stroke::new(1.0, if error { pal.error } else { pal.border }))
+                    .fill(pal.field)
+                    .stroke(Stroke::new(1.0, if error { pal.danger } else { pal.line }))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::symmetric(16, 10))
                     .shadow(ctx.global_style().visuals.popup_shadow)
@@ -591,7 +527,7 @@ fn toast_contents(
     let mut clicks = ToastClicks::default();
     ui.horizontal(|ui| {
         let (icon, color) = if error {
-            (icons::ICON_ERROR, pal.error)
+            (icons::ICON_ERROR, pal.danger)
         } else {
             (icons::ICON_CHECK_CIRCLE, pal.accent)
         };

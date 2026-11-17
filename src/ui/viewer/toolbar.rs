@@ -67,7 +67,7 @@ impl Viewer {
             .layout_no_wrap(
                 pos.clone(),
                 egui::TextStyle::Body.resolve(ui.style()),
-                pal.text_secondary,
+                pal.text2,
             )
             .size()
             .x;
@@ -93,7 +93,7 @@ impl Viewer {
             );
             ui.put(
                 rect,
-                egui::Label::new(RichText::new(pos).color(pal.text_secondary)).selectable(false),
+                egui::Label::new(RichText::new(pos).color(pal.text2)).selectable(false),
             );
         }
     }
@@ -240,8 +240,8 @@ impl Viewer {
             ui,
             icons::ICON_PLAY_ARROW,
             20.0,
-            pal.on_accent,
-            Some((&label, pal.on_accent)),
+            pal.onaccent,
+            Some((&label, pal.onaccent)),
             4.0,
         );
         let b = egui::Button::new(job).fill(pal.accent);
@@ -256,12 +256,7 @@ impl Viewer {
         let e = self.current();
         let pal = style::Palette::of(ui.ctx());
         let (icon, label, short, color) = if e.favorite {
-            (
-                icons::ICON_STAR,
-                "Unfavorite",
-                "Favorited",
-                Some(pal.favorite),
-            )
+            (icons::ICON_STAR, "Unfavorite", "Favorited", Some(pal.text))
         } else {
             (icons::ICON_STAR.outlined(), "Favorite", "Favorite", None)
         };

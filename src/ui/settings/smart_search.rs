@@ -105,7 +105,7 @@ impl App {
                 let (icon, color) = if on {
                     (icons::ICON_CHECK_CIRCLE, pal.accent)
                 } else {
-                    (icons::ICON_AUTO_AWESOME, pal.text_secondary)
+                    (icons::ICON_AUTO_AWESOME, pal.text2)
                 };
                 ui.label(style::icon_text(icon, 22.0).color(color));
                 ui.label(style::semibold(status).size(15.0));
@@ -146,7 +146,7 @@ impl App {
         let pal = Palette::of(ui.ctx());
         ui.add_space(8.0);
         let label = format!("Download and turn on ({} MB)", self.lib.model().size_mb());
-        let b = egui::Button::new(RichText::new(&label).color(pal.on_accent)).fill(pal.accent);
+        let b = egui::Button::new(RichText::new(&label).color(pal.onaccent)).fill(pal.accent);
         let r = ui.add(b);
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         if r.clicked() {

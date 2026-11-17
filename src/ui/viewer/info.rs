@@ -61,8 +61,7 @@ fn info_heading(ui: &mut egui::Ui, e: &ViewerEntry) {
         ui.label(RichText::new(e.name()).strong());
         if e.favorite {
             ui.label(
-                style::icon_text(icons::ICON_STAR, 16.0)
-                    .color(style::Palette::of(ui.ctx()).favorite),
+                style::icon_text(icons::ICON_STAR, 16.0).color(style::Palette::of(ui.ctx()).text),
             );
         }
     });

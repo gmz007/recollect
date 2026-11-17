@@ -108,22 +108,30 @@ pub enum Theme {
     Dark,
 }
 
-/// How large text is drawn.
+/// How large text is drawn: a base size of 12, 13 or 15 points.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextSize {
+    Small,
+    /// Called "Normal" in older settings files.
     #[default]
-    Normal,
-    /// 15 % larger.
+    #[serde(alias = "Normal")]
+    Medium,
     Large,
 }
 
 impl TextSize {
-    /// The interface zoom factor for this size.
-    pub fn zoom(self) -> f32 {
+    /// The base text size in points.
+    pub fn base(self) -> f32 {
         match self {
-            Self::Normal => 1.0,
-            Self::Large => 1.15,
+            Self::Small => 12.0,
+            Self::Medium => 13.0,
+            Self::Large => 15.0,
         }
+    }
+
+    /// The interface zoom factor for this size (13 points is 1.0).
+    pub fn zoom(self) -> f32 {
+        self.base() / Self::Medium.base()
     }
 }
 
@@ -161,7 +169,7 @@ impl Default for Settings {
             index_threads: None,
             thumb_cache_mb: 1024,
             theme: Theme::System,
-            text_size: TextSize::Normal,
+            text_size: TextSize::Medium,
             search_prompt_dismissed: false,
             welcome_done: false,
             recent_searches: Vec::new(),
@@ -238,10 +246,15 @@ mod tests {
         assert_eq!(l.thumb_cache_mb, 1024);
         // Settings files from before the appearance options still load.
         assert_eq!(l.theme, Theme::System);
-        assert_eq!(l.text_size, TextSize::Normal);
+        assert_eq!(l.text_size, TextSize::Medium);
         std::fs::write(&p, "theme = \"Light\"\ntext_size = \"Large\"\n").unwrap();
         let l = Settings::load(&p).unwrap();
         assert_eq!((l.theme, l.text_size), (Theme::Light, TextSize::Large));
+        // The old name of the default size still loads.
+        std::fs::write(&p, "text_size = \"Normal\"\n").unwrap();
+        assert_eq!(Settings::load(&p).unwrap().text_size, TextSize::Medium);
+        assert!((TextSize::Small.zoom() - 12.0 / 13.0).abs() < 1e-6);
+        assert!((TextSize::Large.zoom() - 15.0 / 13.0).abs() < 1e-6);
     }
 
     #[test]

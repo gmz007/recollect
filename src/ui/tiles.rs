@@ -164,7 +164,7 @@ pub(super) fn click_plan(event: TileEvent, mods: ClickMods, picking: bool) -> Cl
 }
 
 /// UV rectangle that crops a texture of `size` to its centred square.
-fn square_uv(size: Vec2) -> Rect {
+pub(super) fn square_uv(size: Vec2) -> Rect {
     let (w, h) = (size.x.max(1.0), size.y.max(1.0));
     let (u, v) = if w > h {
         ((1.0 - h / w) / 2.0, 0.0)
@@ -318,7 +318,7 @@ fn paint_placeholder(
     pal: &Palette,
 ) {
     let radius = CornerRadius::same(style::TILE_RADIUS);
-    painter.rect_filled(rect, radius, pal.surface);
+    painter.rect_filled(rect, radius, pal.side);
     if failed {
         // A picture that is not there: the icon alone on small tiles, with a line of
         // text on larger ones.
@@ -329,20 +329,14 @@ fn paint_placeholder(
         } else {
             rect.center()
         };
-        paint_icon(
-            painter,
-            centre,
-            icons::ICON_BROKEN_IMAGE,
-            size,
-            pal.text_secondary,
-        );
+        paint_icon(painter, centre, icons::ICON_BROKEN_IMAGE, size, pal.text2);
         if wide {
             painter.text(
                 rect.center() + Vec2::new(0.0, size / 2.0 + 2.0),
                 egui::Align2::CENTER_CENTER,
                 "Preview unavailable",
                 egui::TextStyle::Small.resolve(ui.style()),
-                pal.text_secondary,
+                pal.text2,
             );
         }
     }
@@ -366,7 +360,7 @@ fn paint(
         paint_select_circle(&painter, rect, tile.checked(), pal);
     }
     if !small && (tile.favorite || hovered) {
-        paint_star(&painter, rect, tile.favorite, pal);
+        paint_star(&painter, rect, tile.favorite);
     }
     if let Some(text) = &tile.badge {
         paint_pill(&painter, rect, text);
@@ -413,7 +407,7 @@ fn paint_select_circle(painter: &egui::Painter, rect: Rect, checked: bool, pal: 
     let c = circle_center(rect);
     if checked {
         painter.circle_filled(c, CIRCLE_RADIUS, pal.accent);
-        paint_icon(painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.on_accent);
+        paint_icon(painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.onaccent);
     } else {
         painter.circle_filled(
             c,
@@ -425,7 +419,7 @@ fn paint_select_circle(painter: &egui::Painter, rect: Rect, checked: bool, pal: 
 }
 
 /// The star at the bottom left: filled for a favorite, an outline while hovered otherwise.
-fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool, pal: &Palette) {
+fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool) {
     let c = star_center(rect);
     painter.circle_filled(
         c,
@@ -433,7 +427,13 @@ fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool, pal: &Palette
         Color32::from_black_alpha(STAR_DISC_ALPHA),
     );
     if favorite {
-        paint_icon(painter, c, icons::ICON_STAR, STAR_SIZE, pal.favorite);
+        paint_icon(
+            painter,
+            c,
+            icons::ICON_STAR,
+            STAR_SIZE,
+            style::OVERLAY_WHITE,
+        );
     } else {
         paint_icon(
             painter,

@@ -1,6 +1,6 @@
 //! Drawing the grid of the current view and handling clicks and keys in it.
 
-use super::dates::{MonthEntry, date_of, fmt_taken, header_text, thousands, until_next_midnight};
+use super::dates::{date_of, fmt_taken, header_text, until_next_midnight};
 use super::layout::{HEADER_H, Layout, Row, reveal};
 use super::{TimelineState, View, file_name, thumb_key};
 use crate::media::MediaKind;
@@ -103,29 +103,6 @@ impl RowsView<'_> {
     }
 }
 
-/// What was clicked in the "Jump to date" list.
-#[derive(Default)]
-struct DateClicks {
-    /// The first item to scroll to.
-    jump: Option<usize>,
-    /// The year whose months are shown or hidden.
-    toggle: Option<i32>,
-}
-
-/// One indented month of the "Jump to date" list; true when it was clicked.
-fn month_row(ui: &mut egui::Ui, m: &MonthEntry) -> bool {
-    let name = u8::try_from(m.month)
-        .ok()
-        .and_then(|n| chrono::Month::try_from(n).ok())
-        .map_or("", |m| m.name());
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        ui.selectable_label(false, format!("{name} ({})", thousands(m.count)))
-            .clicked()
-    })
-    .inner
-}
-
 impl App {
     pub(in crate::ui) fn set_view(&mut self, view: View) {
         if self.tl.view != view {
@@ -136,51 +113,6 @@ impl App {
         }
         if self.searching() {
             self.clear_search();
-        }
-    }
-
-    /// Sidebar: years and months of the current view; clicking scrolls the grid there.
-    pub(in crate::ui) fn date_navigator(&mut self, ui: &mut egui::Ui) {
-        if self.tl.view == View::RecentlyAdded || self.tl.dates.is_empty() {
-            return;
-        }
-        let mut clicks = DateClicks::default();
-        egui::CollapsingHeader::new("Jump to date")
-            .id_salt("jump-to-date")
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("dates")
-                    .max_height(260.0)
-                    .show(ui, |ui| self.date_rows(ui, &mut clicks));
-            });
-        if let Some(y) = clicks.toggle
-            && !self.tl.expanded.remove(&y)
-        {
-            self.tl.expanded.insert(y);
-        }
-        if let Some(i) = clicks.jump {
-            self.tl.pending = Some((i, true));
-        }
-    }
-
-    /// One row per year, followed by its months while the year is expanded.
-    fn date_rows(&self, ui: &mut egui::Ui, clicks: &mut DateClicks) {
-        for y in &self.tl.dates {
-            let label = format!("{} ({})", y.year, thousands(y.count));
-            if ui
-                .selectable_label(self.tl.top_year == Some(y.year), label)
-                .clicked()
-            {
-                clicks.jump = Some(y.first);
-                clicks.toggle = Some(y.year);
-            }
-            if self.tl.expanded.contains(&y.year) {
-                for m in &y.months {
-                    if month_row(ui, m) {
-                        clicks.jump = Some(m.first);
-                    }
-                }
-            }
         }
     }
 

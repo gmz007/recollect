@@ -174,7 +174,7 @@ fn progress_dots(ui: &mut egui::Ui, step: Step) {
             ui.painter().circle_filled(c, 5.0, pal.accent);
         } else {
             ui.painter()
-                .circle_filled(c, 4.0, pal.text_secondary.gamma_multiply(0.45));
+                .circle_filled(c, 4.0, pal.text2.gamma_multiply(0.45));
         }
     }
     let label = format!("Step {} of {}", step.number() + 1, Step::COUNT);
@@ -258,7 +258,7 @@ fn welcome_added_folders(ui: &mut egui::Ui, w: &mut Welcome) {
     let mut remove = None;
     for (i, p) in w.added.iter().enumerate() {
         ui.horizontal(|ui| {
-            ui.label(style::icon_text(icons::ICON_FOLDER, 18.0).color(pal.text_secondary));
+            ui.label(style::icon_text(icons::ICON_FOLDER, 18.0).color(pal.text2));
             ui.vertical(|ui| {
                 let name = p.file_name().map_or_else(
                     || p.display().to_string(),
@@ -269,7 +269,7 @@ fn welcome_added_folders(ui: &mut egui::Ui, w: &mut Welcome) {
                     egui::Label::new(
                         RichText::new(p.display().to_string())
                             .small()
-                            .color(pal.text_secondary),
+                            .color(pal.text2),
                     )
                     .truncate(),
                 );
@@ -304,7 +304,7 @@ impl App {
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.background)
+                    .fill(pal.bg)
                     .inner_margin(Margin::symmetric(24, 18)),
             )
             .show(ui, |ui| {
@@ -321,7 +321,7 @@ impl App {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(pal.background)
+                    .fill(pal.bg)
                     .inner_margin(Margin::symmetric(24, 16)),
             )
             .show(ui, |ui| {
@@ -455,7 +455,7 @@ impl App {
             ui.label(
                 RichText::new("You can add folders later from the sidebar.")
                     .small()
-                    .color(pal.text_secondary),
+                    .color(pal.text2),
             );
         }
     }
@@ -469,7 +469,7 @@ impl App {
                 ui.label(
                     RichText::new("Or type a folder path")
                         .small()
-                        .color(pal.text_secondary),
+                        .color(pal.text2),
                 );
                 let mut add_typed = false;
                 ui.horizontal(|ui| {
@@ -528,13 +528,13 @@ impl App {
         }
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(style::icon_text(icons::ICON_LOCK, 18.0).color(pal.text_secondary));
+            ui.label(style::icon_text(icons::ICON_LOCK, 18.0).color(pal.text2));
             ui.label(
                 RichText::new(
                     "It downloads once. After that it works without the internet, and your \
                      photos never leave this computer.",
                 )
-                .color(pal.text_secondary),
+                .color(pal.text2),
             );
         });
     }

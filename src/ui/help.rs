@@ -2,7 +2,7 @@
 //! chosen topic on the right, all in plain words.
 
 use super::App;
-use super::sidebar::nav_row;
+use super::sidebar::plain_row;
 use super::style::{self, Palette, icons};
 use egui::{CornerRadius, Margin, RichText, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
@@ -73,7 +73,7 @@ fn step(ui: &mut egui::Ui, n: usize, title: &str, text: &str) {
 /// The topic list on the left of the sheet.
 fn help_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut HelpTopic, nav_w: f32, h: f32) {
     egui::Frame::new()
-        .fill(pal.raised)
+        .fill(pal.field)
         .corner_radius(CornerRadius {
             nw: 16,
             sw: 16,
@@ -90,14 +90,13 @@ fn help_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut HelpTopic, nav_w: f3
                 ui.label(style::semibold("Help").size(18.0));
                 ui.add_space(10.0);
                 for t in HelpTopic::ALL {
-                    let (_, r) = nav_row(
+                    let (_, r) = plain_row(
                         ui,
                         t.icon(),
                         t.name(),
                         &format!("{} help", t.name()),
                         None,
                         *current == t,
-                        0.0,
                     );
                     if r.clicked() {
                         *current = t;
@@ -156,8 +155,8 @@ impl App {
         let h = (screen.y - 48.0).clamp(320.0, 580.0);
         let nav_w = if w < 520.0 { 170.0 } else { 224.0 };
         let frame = egui::Frame::new()
-            .fill(pal.surface)
-            .stroke(Stroke::new(1.0, pal.border))
+            .fill(pal.side)
+            .stroke(Stroke::new(1.0, pal.line))
             .corner_radius(CornerRadius::same(16))
             .shadow(ctx.global_style().visuals.popup_shadow)
             .inner_margin(Margin::ZERO);

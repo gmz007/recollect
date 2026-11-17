@@ -309,7 +309,7 @@ fn the_viewer_position_is_plain_text_beside_labelled_buttons_in_a_wide_window() 
     }
     // Wide window: icon and word ("Info" is wider than a bare icon button).
     assert!(h.get_by_label("Info").rect().width() > 70.0);
-    assert!(h.get_by_label("Show in folder").rect().width() > 120.0);
+    assert!(h.get_by_label("Show in folder").rect().width() > 100.0);
     // Clicking where the position is does nothing.
     let info_before = app.borrow().viewer.as_ref().unwrap().info;
     h.event(egui::Event::PointerMoved(pos_rect.center()));

@@ -63,6 +63,8 @@ use when::DateFilter;
 pub use workers::Query;
 use workers::{SearchWorker, ThumbCache};
 
+/// Height of the top bar.
+const TOP_BAR_HEIGHT: f32 = 52.0;
 /// How often to look at the library while it is busy.
 const BUSY_POLL: Duration = Duration::from_millis(500);
 /// How old the results may get while files are being indexed before they are refreshed.
@@ -76,7 +78,8 @@ pub fn run(lib: Arc<Library>) -> anyhow::Result<()> {
             .with_title("Recollect")
             .with_app_id("recollect")
             .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([720.0, 480.0]),
+            .with_min_inner_size([720.0, 480.0])
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -85,6 +88,22 @@ pub fn run(lib: Arc<Library>) -> anyhow::Result<()> {
         Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, lib)))),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+}
+
+/// The window icon (the app mark on a rounded square).
+fn window_icon() -> egui::IconData {
+    let png = include_bytes!("../../assets/icon/recollect-256.png");
+    match image::load_from_memory(png) {
+        Ok(img) => {
+            let rgba = img.into_rgba8();
+            egui::IconData {
+                width: rgba.width(),
+                height: rgba.height(),
+                rgba: rgba.into_raw(),
+            }
+        }
+        Err(_) => egui::IconData::default(),
+    }
 }
 
 pub struct App {
@@ -441,19 +460,21 @@ impl App {
     /// The top bar, the sidebar and the central panel.
     fn show_panels(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let pal = style::Palette::of(ctx);
+        // The sidebar runs the full height; the top bar sits above the content only.
+        self.sidebar(ui);
         egui::Panel::top("top")
+            .exact_size(TOP_BAR_HEIGHT)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.surface)
-                    .inner_margin(egui::Margin::symmetric(16, 8)),
+                    .fill(pal.bg)
+                    .inner_margin(egui::Margin::symmetric(16, 0)),
             )
             .show(ui, |ui| self.top_bar(ui));
-        self.sidebar(ui);
         let has_folders = !self.snapshot.folders.is_empty();
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(pal.background)
+                    .fill(pal.bg)
                     .inner_margin(egui::Margin::symmetric(PANEL_MARGIN.0, PANEL_MARGIN.1)),
             )
             .show(ui, |ui| {

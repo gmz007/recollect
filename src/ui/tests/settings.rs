@@ -131,15 +131,15 @@ fn appearance_changes_apply_at_once() {
     h.get_by_label("Large").click();
     h.run();
     assert_eq!(lib.settings().text_size, TextSize::Large);
-    assert!((h.ctx.zoom_factor() - 1.15).abs() < 1e-6);
-    h.get_by_label("Normal").click();
+    assert!((h.ctx.zoom_factor() - 15.0 / 13.0).abs() < 1e-6);
+    h.get_by_label("Medium").click();
     h.run();
     assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
     // The choices are saved to disk, not only kept in memory.
     let saved = crate::config::Settings::load(&lib.paths().settings_path()).unwrap();
     assert_eq!(
         (saved.theme, saved.text_size),
-        (Theme::Light, TextSize::Normal)
+        (Theme::Light, TextSize::Medium)
     );
 }
 
@@ -364,19 +364,19 @@ fn the_theme_and_text_size_settings_apply() {
         h.ctx.global_style().visuals.panel_fill,
         egui::Color32::WHITE
     );
-    assert!((h.ctx.zoom_factor() - 1.15).abs() < 1e-6);
-    set(Theme::Dark, TextSize::Normal);
+    assert!((h.ctx.zoom_factor() - 15.0 / 13.0).abs() < 1e-6);
+    set(Theme::Dark, TextSize::Medium);
     h.run();
     assert!(h.ctx.global_style().visuals.dark_mode);
     assert_eq!(
         h.ctx.global_style().visuals.panel_fill,
-        egui::Color32::from_rgb(0x12, 0x12, 0x14)
+        egui::Color32::from_rgb(0x16, 0x16, 0x16)
     );
     assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
     // The text styles follow the spec.
     let style = h.ctx.global_style();
-    assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 14.5);
-    assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 22.0);
-    assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 12.5);
-    assert_eq!(style.text_styles[&crate::ui::style::section()].size, 17.0);
+    assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 13.0);
+    assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 20.0);
+    assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 12.0);
+    assert_eq!(style.text_styles[&crate::ui::style::section()].size, 14.0);
 }
