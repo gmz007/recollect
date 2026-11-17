@@ -94,7 +94,7 @@ pub struct Library {
     /// Favorite marks and album changes go to one writer thread in order (see
     /// [`Library::queue_favorite`] and [`Library::queue_album`]).
     write_tx: Sender<WriteMsg>,
-    favorite_results: Receiver<FavoriteWrite>,
+    favorite_results: Receiver<Vec<FavoriteWrite>>,
     album_results: Receiver<AlbumWrite>,
     next_ticket: AtomicU64,
     /// Incremented after each committed favorites write.
@@ -128,7 +128,7 @@ impl std::fmt::Debug for Library {
 /// The receiving and sending ends the writer thread works with.
 struct WriterEnds {
     requests: Receiver<WriteMsg>,
-    favorites: Sender<FavoriteWrite>,
+    favorites: Sender<Vec<FavoriteWrite>>,
     albums: Sender<AlbumWrite>,
 }
 

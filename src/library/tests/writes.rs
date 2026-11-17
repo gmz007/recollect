@@ -228,6 +228,29 @@ fn a_failed_favorite_write_is_reported() {
 }
 
 #[test]
+fn the_marks_of_one_action_are_written_and_reported_together() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = open(d.path());
+    seed_dated(&lib, &[]);
+    let ids: Vec<i64> = lib
+        .timeline(&TimelineFilter::default())
+        .unwrap()
+        .iter()
+        .map(|t| t.file_id)
+        .collect();
+    assert!(ids.len() >= 3);
+    lib.fail_favorites.store(true, Ordering::Release);
+    lib.queue_favorites(&ids, true);
+    lib.wait_writes();
+    // One message for the whole selection, however the writer thread was scheduled: the
+    // interface then reports one failure, not one per part.
+    let batches: Vec<Vec<FavoriteWrite>> = lib.favorite_results.try_iter().collect();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].len(), ids.len());
+    assert!(batches[0].iter().all(|w| w.fav && w.error.is_some()));
+}
+
+#[test]
 fn favorites_are_stored_and_found_in_search_hits_and_the_timeline() {
     let d = tempfile::tempdir().unwrap();
     let lib = open(d.path());

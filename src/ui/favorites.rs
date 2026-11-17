@@ -77,12 +77,12 @@ impl App {
             );
         }
         self.patch_lists();
-        for &file_id in file_ids {
-            if let Some(v) = &mut self.viewer {
+        if let Some(v) = &mut self.viewer {
+            for &file_id in file_ids {
                 v.set_favorite(file_id, fav);
             }
-            self.lib.queue_favorite(file_id, fav);
         }
+        self.lib.queue_favorites(file_ids, fav);
         if self.tl.view == View::Favorites && !fav {
             self.tl
                 .remove_files(&file_ids.iter().copied().collect::<HashSet<i64>>());

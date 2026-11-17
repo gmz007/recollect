@@ -12,7 +12,8 @@ use std::sync::atomic::Ordering;
 
 /// Work for the library writer thread.
 pub(super) enum WriteMsg {
-    Favorite(i64, bool),
+    /// Favorite marks set by one action, stored and reported together.
+    Favorites(Vec<i64>, bool),
     Album(u64, AlbumOp),
     /// Answered once everything queued before it has been written.
     Flush(Sender<()>),
@@ -85,7 +86,7 @@ struct Applied {
 pub(super) fn library_writer(
     lib: &std::sync::Weak<Library>,
     rx: &Receiver<WriteMsg>,
-    favorites: &Sender<FavoriteWrite>,
+    favorites: &Sender<Vec<FavoriteWrite>>,
     albums: &Sender<AlbumWrite>,
 ) {
     while let Ok(first) = rx.recv() {
@@ -100,8 +101,10 @@ pub(super) fn library_writer(
         let mut flushes = Vec::new();
         for m in batch {
             match m {
-                WriteMsg::Favorite(id, fav) => {
-                    run.insert(id, fav);
+                WriteMsg::Favorites(ids, fav) => {
+                    for id in ids {
+                        run.insert(id, fav);
+                    }
                 }
                 WriteMsg::Album(ticket, op) => {
                     write_favorites(&lib, &mut run, favorites);
@@ -119,8 +122,16 @@ pub(super) fn library_writer(
     }
 }
 
-fn write_favorites(lib: &Library, run: &mut HashMap<i64, bool>, results: &Sender<FavoriteWrite>) {
+/// Stores the collected marks and sends all their outcomes as one message, so the interface
+/// takes them in together (one notice for a whole selection, not one per batch the writer
+/// happened to see).
+fn write_favorites(
+    lib: &Library,
+    run: &mut HashMap<i64, bool>,
+    results: &Sender<Vec<FavoriteWrite>>,
+) {
     let latest = std::mem::take(run);
+    let mut outcomes = Vec::with_capacity(latest.len());
     for fav in [true, false] {
         let ids: Vec<i64> = latest
             .iter()
@@ -144,13 +155,14 @@ fn write_favorites(lib: &Library, run: &mut HashMap<i64, bool>, results: &Sender
         } else {
             lib.favorites_version.fetch_add(1, Ordering::AcqRel);
         }
-        for file_id in ids {
-            let _ = results.send(FavoriteWrite {
-                file_id,
-                fav,
-                error: error.clone(),
-            });
-        }
+        outcomes.extend(ids.into_iter().map(|file_id| FavoriteWrite {
+            file_id,
+            fav,
+            error: error.clone(),
+        }));
+    }
+    if !outcomes.is_empty() {
+        let _ = results.send(outcomes);
     }
 }
 
@@ -199,7 +211,17 @@ impl Library {
     /// in order; consecutive writes for one file collapse into the latest value. The outcome
     /// arrives through [`Self::take_favorite_results`].
     pub fn queue_favorite(&self, file_id: i64, fav: bool) {
-        let _ = self.write_tx.send(WriteMsg::Favorite(file_id, fav));
+        self.queue_favorites(&[file_id], fav);
+    }
+
+    /// [`Self::queue_favorite`] for the files of one action (a selection): they are stored in
+    /// one write and their outcomes arrive together.
+    pub fn queue_favorites(&self, file_ids: &[i64], fav: bool) {
+        if !file_ids.is_empty() {
+            let _ = self
+                .write_tx
+                .send(WriteMsg::Favorites(file_ids.to_vec(), fav));
+        }
     }
 
     /// Blocks until every write queued so far (favorites and album changes) has been written
@@ -315,7 +337,7 @@ impl Library {
 
     /// Outcomes of the favorites writes finished since the last call, oldest first.
     pub fn take_favorite_results(&self) -> Vec<FavoriteWrite> {
-        self.favorite_results.try_iter().collect()
+        self.favorite_results.try_iter().flatten().collect()
     }
 
     /// Changes after every committed favorites write: lists filtered by favorites are stale
