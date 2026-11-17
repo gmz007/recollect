@@ -334,7 +334,7 @@ impl App {
     }
 
     /// Shows `message` (with the technical detail behind "details") if `result` failed.
-    fn report<T>(&mut self, result: anyhow::Result<T>, message: &str) {
+    pub(in crate::ui) fn report<T>(&mut self, result: anyhow::Result<T>, message: &str) {
         if let Err(e) = result {
             self.notify_problem(message, format!("{e:#}"), None);
         }

@@ -4,6 +4,7 @@
 use super::style::{self, Palette, icons};
 use super::timeline::{View, thousands};
 use super::{App, NoticeAction};
+use crate::library::Activity;
 use crate::media::MediaKind;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
 use std::time::Instant;
@@ -12,6 +13,10 @@ use std::time::Instant;
 const SEARCH_MAX_WIDTH: f32 = 520.0;
 /// Height of the search field.
 const SEARCH_HEIGHT: f32 = 34.0;
+/// Size of the heading of the search results ("36 results").
+const HEADING_SIZE: f32 = 15.0;
+/// Size of the quiet note beside the filters.
+const NOTE_SIZE: f32 = 12.5;
 /// Placeholder of the search field while smart search is on.
 const SEARCH_HINT: &str = "Describe a moment…";
 /// What assistive technology reads for the search field while smart search is off.
@@ -310,60 +315,88 @@ impl App {
         });
     }
 
-    /// What was asked, as the heading of the results.
-    fn results_title(&self) -> String {
-        match &self.res.current {
-            Some(super::Query::Similar { label, .. }) => format!("Photos similar to {label}"),
-            Some(super::Query::Text(q)) => format!("Results for “{q}”"),
-            None => format!("Results for “{}”", self.query.trim()),
+    /// The heading of the results: how many are shown (after the filters), or "Similar
+    /// photos". `None` while the search failed and there is nothing to count.
+    fn results_heading(&self) -> Option<String> {
+        if matches!(self.res.current, Some(super::Query::Similar { .. })) {
+            return Some("Similar photos".to_string());
         }
+        let n = self.res.hits.len();
+        if n == 0 && self.res.awaiting.is_some() {
+            return Some("Searching…".to_string());
+        }
+        if n == 0 && self.res.error.is_some() {
+            return None;
+        }
+        Some(format!(
+            "{} {}",
+            thousands(n),
+            if n == 1 { "result" } else { "results" }
+        ))
     }
 
-    /// "12 photos and 3 videos" for the current results.
-    fn results_count_text(&self) -> String {
-        let photos = self
-            .res
-            .hits
-            .iter()
-            .filter(|h| h.kind == MediaKind::Image)
-            .count();
-        count_text(photos, self.res.hits.len() - photos)
+    /// While photos are still being made searchable: how many are left, so that a short list
+    /// of results is not taken for the whole answer.
+    fn preparing_note(&self) -> Option<String> {
+        let Activity::Indexing(p) = &self.status.activity else {
+            return None;
+        };
+        let left = p.total.saturating_sub(p.done);
+        (left > 0).then(|| {
+            format!(
+                "Still getting {} {} ready \u{2014} results may grow",
+                thousands(left),
+                if left == 1 { "photo" } else { "photos" }
+            )
+        })
     }
 
-    /// Header of the search results: what was asked, how many were found, and chips that
-    /// narrow and order them (type, date, sort).
+    /// The quiet note at the right of the filters.
+    fn preparing_note_ui(ui: &mut egui::Ui, note: &str) {
+        let pal = Palette::of(ui.ctx());
+        ui.add(egui::Label::new(RichText::new(note).size(NOTE_SIZE).color(pal.muted)).truncate());
+        ui.label(style::icon_text(icons::ICON_INFO.outlined(), NOTE_SIZE + 1.0).color(pal.muted));
+    }
+
+    /// Header of the search results: how many there are, and chips that narrow and order
+    /// them (type, date, sort).
     pub(super) fn results_header(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
-        let title = self.results_title();
-        let subtitle = self.results_count_text();
         let year = chrono::Datelike::year(&self.today());
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.add(
-                egui::Label::new(RichText::new(title).text_style(egui::TextStyle::Heading))
-                    .truncate(),
-            );
+            if let Some(title) = self.results_heading() {
+                ui.add(egui::Label::new(
+                    style::semibold(title).size(HEADING_SIZE).color(pal.text),
+                ));
+                // What the count is for, quieter: the words can scroll out of the field.
+                if let Some(super::Query::Text(q)) = &self.res.current {
+                    ui.add(
+                        egui::Label::new(RichText::new(format!("for “{q}”")).color(pal.muted))
+                            .truncate(),
+                    );
+                }
+            }
             if self.res.awaiting.is_some() {
                 ui.spinner();
             }
             // An empty result list shows the problem itself; don't say it twice.
             if let Some(e) = (self.res.error.as_ref()).filter(|_| !self.res.hits.is_empty()) {
                 ui.colored_label(pal.danger, &e.text);
-            } else if self.res.error.is_none() && !subtitle.is_empty() {
-                ui.label(RichText::new(subtitle).color(pal.text2));
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(6.0);
+        let note = self.preparing_note();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             changed |= self.type_chips(ui);
             ui.add_space(4.0);
             changed |= self.date.ui(ui, &self.known_years, year);
             changed |= super::when::sort_ui(ui, &mut self.sort);
-            // The search field has its own ✕ while it holds text; without text (results
-            // of "similar photos") this is the only way out.
-            if self.query.is_empty() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The search field has its own clear button while it holds text; without text (results
+                // of "similar photos") this is the only way out.
+                if self.query.is_empty() {
                     let r = ui.button("Clear");
                     r.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::Role::Button, true, "Clear search")
@@ -371,8 +404,11 @@ impl App {
                     if r.clicked() {
                         self.clear_search();
                     }
-                });
-            }
+                }
+                if let Some(note) = &note {
+                    Self::preparing_note_ui(ui, note);
+                }
+            });
         });
         if changed {
             self.rerun();

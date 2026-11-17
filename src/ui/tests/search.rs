@@ -27,8 +27,8 @@ fn results_show_a_plain_header_and_square_tiles() {
         .with_max_steps(super::MAX_STEPS)
         .build_ui(move |ui| app.show(ui));
     h.run();
-    h.get_by_label("Results for “a dragon”");
-    h.get_by_label("1 photo and 1 video");
+    h.get_by_label("2 results");
+    assert!(h.query_by_label_contains("Results for").is_none());
     h.get_by_label("Result movie.mp4");
     h.get_by_label("Result photo.jpg");
     h.get_by_label("Clear search");
@@ -263,8 +263,8 @@ fn results_header_titles_searches_and_similar_photos() {
     app.res.label = "similar to beach.jpg".into();
     let app = Rc::new(RefCell::new(app));
     let h = album_harness(&app);
-    h.get_by_label("Photos similar to beach.jpg");
-    h.get_by_label("3 photos");
+    h.get_by_label("Similar photos");
+    assert!(h.query_by_label_contains("results").is_none());
     h.get_by_label("Clear search");
     assert!(h.query_by_label_contains("score").is_none());
 }
@@ -312,21 +312,17 @@ fn each_grid_has_its_own_selection_mode() {
 }
 
 #[test]
-fn the_results_title_follows_the_current_query() {
+fn the_results_heading_follows_the_current_query_kind() {
     let d = tempfile::tempdir().unwrap();
-    let mut app = grid_app(d.path());
-    app.res.current = Some(crate::ui::Query::Text("a cat".into()));
-    app.res.label = "a dog".into();
-    let app = Rc::new(RefCell::new(app));
+    let app = Rc::new(RefCell::new(grid_app(d.path())));
     let mut h = album_harness(&app);
-    h.get_by_label("Results for “a cat”");
-    assert!(h.query_by_label("Results for “a dog”").is_none());
+    h.get_by_label("3 results");
     app.borrow_mut().res.current = Some(crate::ui::Query::Similar {
         item_id: 1,
         label: "beach.jpg".into(),
     });
     h.run_steps(2);
-    h.get_by_label("Photos similar to beach.jpg");
+    h.get_by_label("Similar photos");
 }
 
 #[test]
@@ -344,8 +340,8 @@ fn the_empty_search_field_offers_examples_and_remembers_searches() {
     for example in crate::ui::guide::EXAMPLE_SEARCHES {
         h.get_by_label(example);
     }
-    h.get_by_label("Try searching for");
-    assert!(h.query_by_label("Recent searches").is_none(), "nothing yet");
+    h.get_by_label("Try");
+    assert!(h.query_by_label("Recent").is_none(), "nothing yet");
     // A chip runs that search.
     h.get_by_label("snow").click();
     h.run_steps(3);
@@ -383,7 +379,7 @@ fn the_empty_search_field_offers_examples_and_remembers_searches() {
     h.run_steps(2);
     h.get_by_label("Search your photos").click();
     h.run_steps(3);
-    h.get_by_label("Recent searches");
+    h.get_by_label("Recent");
     h.get_by_label("Recent search: word 9");
     h.get_by_label("Clear recent searches").click();
     h.run_steps(3);
@@ -468,11 +464,11 @@ fn the_search_suggestions_work_with_the_keyboard() {
     );
     h.get_by_label("Search your photos").click();
     h.run_steps(3);
-    h.get_by_label("Try searching for");
+    h.get_by_label("Try");
     // Tab goes into the suggestions, which stay open.
     h.key_press(egui::Key::Tab);
     h.run_steps(4);
-    h.get_by_label("Try searching for");
+    h.get_by_label("Try");
     assert!(h.get_by_label(first).accesskit_node().is_focused());
     h.key_press(egui::Key::ArrowDown);
     h.run_steps(3);
@@ -480,7 +476,7 @@ fn the_search_suggestions_work_with_the_keyboard() {
     h.key_press(egui::Key::ArrowUp);
     h.run_steps(3);
     assert!(h.get_by_label(first).accesskit_node().is_focused());
-    h.get_by_label("Try searching for");
+    h.get_by_label("Try");
     // Enter runs the one that has focus.
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
@@ -492,7 +488,7 @@ fn the_search_suggestions_work_with_the_keyboard() {
     h.run_steps(3);
     h.key_press(egui::Key::Tab);
     h.run_steps(4);
-    h.get_by_label("Try searching for");
+    h.get_by_label("Try");
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(h.query_by_label("Try searching for").is_none());

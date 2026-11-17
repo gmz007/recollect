@@ -387,11 +387,27 @@ fn the_main_screens_use_no_technical_words() {
         let app = Rc::new(RefCell::new(app));
         let mut h = album_harness(&app);
         check("search results", &h);
+        let lib = Arc::clone(&app.borrow().lib);
+        lib.update_status(|s| {
+            s.activity = crate::library::Activity::Indexing(crate::library::IndexProgress {
+                done: 1,
+                total: 20,
+                ..Default::default()
+            });
+        });
+        h.run_steps(2);
+        h.get_by_label_contains("Still getting");
+        check("search results while preparing", &h);
+        lib.update_status(|s| s.activity = crate::library::Activity::Idle);
         let mut a = app.borrow_mut();
         a.res.hits = Arc::default();
         drop(a);
         h.run_steps(2);
         check("no results", &h);
+        app.borrow_mut().kind = Some(MediaKind::Video);
+        h.run_steps(2);
+        h.get_by_label("Clear filters");
+        check("no results with a filter", &h);
     }
     // The viewer, with its labelled toolbar and the details panel.
     {
@@ -555,13 +571,14 @@ fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
         ),
         (
             EmptyView::NoResults,
-            "No photos match “snow”. Try different words.",
-            "Start over",
+            "No photos match “snow”. Try describing the moment in other words.",
+            "",
         ),
         (
             EmptyView::NoResultsDated,
-            "No photos match “snow”. Try different words, or check the When filter.",
-            "Clear the date filter",
+            "Nothing matched those filters. Try a different time or type, or describe the \
+             moment in other words.",
+            "Clear filters",
         ),
         (
             EmptyView::SearchOff,
@@ -573,7 +590,10 @@ fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
         let d = tempfile::tempdir().unwrap();
         let (_app, h) = empty_view(d.path(), which);
         h.get_by_label(sentence);
-        h.get_all_by_label(button).last().unwrap();
+        // A search with nothing found and no filter on has a hint instead of a button.
+        if !button.is_empty() {
+            h.get_all_by_label(button).last().unwrap();
+        }
     }
 }
 
@@ -585,18 +605,13 @@ fn the_buttons_of_the_empty_states_work() {
     h.get_by_label("Go to Photos").click();
     h.run_steps(3);
     assert_eq!(app.borrow().tl.view, View::Timeline);
-    // No results: clearing the date filter keeps the words; clearing the search drops them.
+    // No results: clearing the filters keeps the words.
     let d = tempfile::tempdir().unwrap();
     let (app, mut h) = empty_view(d.path(), EmptyView::NoResultsDated);
-    h.get_by_label("Clear the date filter").click();
+    h.get_by_label("Clear filters").click();
     h.run_steps(3);
     assert_eq!(app.borrow().date, crate::ui::when::DateFilter::default());
     assert!(app.borrow().res.current.is_some());
-    let d = tempfile::tempdir().unwrap();
-    let (app, mut h) = empty_view(d.path(), EmptyView::NoResults);
-    h.get_by_label("Start over").click();
-    h.run_steps(3);
-    assert!(app.borrow().res.current.is_none() && app.borrow().query.is_empty());
     // Search off: opens Settings on smart search.
     let d = tempfile::tempdir().unwrap();
     let (app, mut h) = empty_view(d.path(), EmptyView::SearchOff);

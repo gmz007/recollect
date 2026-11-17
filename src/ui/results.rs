@@ -1,5 +1,7 @@
 //! Search: starting one when typing pauses, taking in the answer, and the results grid.
 
+#[cfg(not(test))]
+use super::platform;
 use super::ruler::{Mapping, Month, RulerState, month_at_fraction};
 use super::selection::ClickMods;
 use super::style::GAP;
@@ -65,6 +67,9 @@ pub(super) struct ResultsState {
     pub(super) selected_t: Option<f64>,
     /// Columns in the results grid as of the last layout (for up/down navigation).
     pub(super) cols: usize,
+    /// Videos the results asked to play (tests only: no player is started).
+    #[cfg(test)]
+    pub(super) played: Vec<(std::path::PathBuf, f64)>,
 }
 
 impl Default for ResultsState {
@@ -79,6 +84,8 @@ impl Default for ResultsState {
             last_answer_at: None,
             selected_t: None,
             cols: 1,
+            #[cfg(test)]
+            played: Vec::new(),
         }
     }
 }
@@ -230,6 +237,47 @@ impl App {
         if let Some((i, ev, mods)) = events.clicked {
             self.click_result(&results, i, ev, mods);
         }
+        if let Some((i, action)) = events.action {
+            self.result_action(&results[i], action);
+        }
+    }
+
+    /// What a click on a result's extra button does.
+    fn result_action(&mut self, hit: &SearchHit, action: tiles::TileAction) {
+        match action {
+            tiles::TileAction::FindSimilar => self.find_similar_to(hit),
+            tiles::TileAction::PlayAtBadge => self.play_result(hit),
+        }
+    }
+
+    /// Plays the video of `hit` at its matching moment, in the system's player.
+    fn play_result(&mut self, hit: &SearchHit) {
+        let t = hit.t_start.unwrap_or(0.0);
+        #[cfg(test)]
+        self.res.played.push((hit.path.clone(), t));
+        #[cfg(not(test))]
+        self.report(
+            platform::open_video_at(&hit.path, t),
+            "Couldn't play that video. Install a video player such as VLC, or open the file \
+             from its folder.",
+        );
+    }
+
+    /// Replaces the results with photos like `hit` (the field is emptied: nothing was typed).
+    pub(super) fn find_similar_to(&mut self, hit: &SearchHit) {
+        self.query.clear();
+        self.query_changed_at = None;
+        self.res.grid.clear();
+        self.res.selected_t = None;
+        let label = hit
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.submit(Query::Similar {
+            item_id: hit.item_id,
+            label,
+        });
     }
 
     /// Draws the rows of results that intersect `viewport`.
@@ -309,10 +357,9 @@ impl App {
             grid.picking || grid.sel.is_multi(),
         );
         let tile = Tile::new(&key, "Result", &name)
-            .badge(
-                (hit.kind == MediaKind::Video)
-                    .then(|| format!("at {}", fmt_time(hit.t_start.unwrap_or(0.0)))),
-            )
+            .find_similar()
+            .badge((hit.kind == MediaKind::Video).then(|| fmt_time(hit.t_start.unwrap_or(0.0))))
+            .plays_at_badge()
             .favorite(marked(&self.fav_marks, hit.file_id, hit.favorite))
             .selectable(mark);
         let id = ui.make_persistent_id(("result", i));

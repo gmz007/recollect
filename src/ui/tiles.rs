@@ -3,11 +3,14 @@
 //! favorite shows a small white heart (bottom left), and hovering any other tile offers an
 //! outlined one. Videos carry a duration pill.
 
+mod extras;
+
 use super::selection::ClickMods;
 use super::style::{self, Palette, icons};
 use super::workers::ThumbCache;
 use crate::thumbs::ThumbKey;
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
+use extras::{extra_zones, paint_pill, paint_similar};
 
 /// Size of the clickable areas of the circle and the heart.
 const ZONE: f32 = 34.0;
@@ -58,6 +61,16 @@ pub(super) struct Tile<'a> {
     mark: TileMark,
     /// Whether the tile has a selection circle (a tile that only opens has none).
     selectable: bool,
+    extras: Extras,
+}
+
+/// The extra buttons of a result tile.
+#[derive(Clone, Copy, Default)]
+struct Extras {
+    /// Hovering the tile offers "Find similar" (top right).
+    similar: bool,
+    /// The pill is a button that plays the video at the time it shows.
+    plays: bool,
 }
 
 impl<'a> Tile<'a> {
@@ -72,6 +85,7 @@ impl<'a> Tile<'a> {
             favorite: false,
             mark: TileMark::None,
             selectable: false,
+            extras: Extras::default(),
         }
     }
 
@@ -82,6 +96,18 @@ impl<'a> Tile<'a> {
 
     pub(super) fn badge(mut self, badge: Option<String>) -> Self {
         self.badge = badge;
+        self
+    }
+
+    /// Offers "Find similar" at the top right while hovered.
+    pub(super) fn find_similar(mut self) -> Self {
+        self.extras.similar = true;
+        self
+    }
+
+    /// Makes the pill a button that plays the video at the time it shows.
+    pub(super) fn plays_at_badge(mut self) -> Self {
+        self.extras.plays = true;
         self
     }
 
@@ -127,9 +153,19 @@ pub(super) enum TileEvent {
     Heart,
 }
 
+/// A click on one of the extra buttons a result tile can have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TileAction {
+    /// Search for photos like this one.
+    FindSimilar,
+    /// Play the video at the time on the pill.
+    PlayAtBadge,
+}
+
 pub(super) struct TileOut {
     pub resp: egui::Response,
     pub event: Option<(TileEvent, ClickMods)>,
+    pub action: Option<TileAction>,
 }
 
 /// What a tile event means for the selection.
@@ -209,14 +245,17 @@ pub(super) fn show(
     let small = rect.width() < 72.0;
     let (circle, heart) = interact_zones(ui, id, rect, tile, small);
     describe_zones(tile, small, &resp, &circle, &heart);
+    let extra = extra_zones(ui, id, rect, tile, small);
 
     if ui.is_rect_visible(rect) {
         paint(ui, thumbs, rect, tile, hovered, small, &pal);
     }
 
     let event = click_event(ui, &resp, &circle, &heart);
+    let action = extra.action();
     // The zones of small tiles are not drawn and take no clicks, so they are no controls.
-    let over_control = !small && ((tile.selectable && circle.hovered()) || heart.hovered());
+    let over_control =
+        !small && ((tile.selectable && circle.hovered()) || heart.hovered() || extra.hovered());
     if hovered && (over_control || resp.hovered()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -227,7 +266,11 @@ pub(super) fn show(
             ui.label(tile.tip.map_or_else(|| (tile.name)(), |tip| tip()));
         })
     };
-    TileOut { resp, event }
+    TileOut {
+        resp,
+        event,
+        action,
+    }
 }
 
 /// The areas of the selection circle and of the heart.
@@ -376,6 +419,9 @@ fn paint(
     if !small && (tile.favorite || hovered) {
         paint_heart(&painter, photo, tile.favorite);
     }
+    if tile.extras.similar && hovered && !small {
+        paint_similar(ui, &painter, photo);
+    }
     if let Some(text) = &tile.badge {
         paint_pill(&painter, photo, text);
     }
@@ -493,34 +539,6 @@ fn circle_center(rect: Rect, checked: bool) -> Pos2 {
 
 fn heart_center(rect: Rect) -> Pos2 {
     Pos2::new(rect.min.x + HEART_INSET, rect.max.y - HEART_INSET)
-}
-
-/// A dark pill with a play icon and `text` in the bottom right corner.
-fn paint_pill(painter: &egui::Painter, rect: Rect, text: &str) {
-    let font = egui::FontId::new(12.0, egui::FontFamily::Proportional);
-    let galley = painter.layout_no_wrap(text.to_string(), font, Color32::WHITE);
-    let icon = 14.0;
-    let size = Vec2::new(galley.size().x + icon + 14.0, 22.0);
-    let pill = Rect::from_min_size(rect.max - size - Vec2::splat(6.0), size);
-    if pill.width() > rect.width() - 8.0 {
-        return;
-    }
-    painter.rect_filled(pill, 11.0, Color32::from_black_alpha(165));
-    paint_icon(
-        painter,
-        Pos2::new(pill.min.x + 11.0, pill.center().y),
-        icons::ICON_PLAY_ARROW,
-        icon + 2.0,
-        Color32::WHITE,
-    );
-    painter.galley(
-        Pos2::new(
-            pill.min.x + 8.0 + icon,
-            pill.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        Color32::WHITE,
-    );
 }
 
 #[cfg(test)]

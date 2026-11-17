@@ -7,6 +7,7 @@ mod favorites;
 mod guide;
 mod photo_grid;
 mod pill;
+mod results;
 mod ruler;
 mod search;
 mod settings;

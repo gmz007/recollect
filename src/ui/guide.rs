@@ -289,32 +289,55 @@ impl App {
         }
     }
 
-    /// The search ran and found nothing.
+    /// The search ran and found nothing. With a filter on, the way out is clearing it;
+    /// otherwise the hint is to describe the moment in other words.
     fn no_match_state(&mut self, ui: &mut egui::Ui) {
-        let date_set = self.date != super::when::DateFilter::default();
-        let sentence = format!(
-            "No photos match “{}”. Try different words{}.",
-            super::albums::short_name(&self.res.label, 40),
-            if date_set {
-                ", or check the When filter"
-            } else {
-                ""
+        let filtered = self.kind.is_some() || self.date != super::when::DateFilter::default();
+        let sentence = match (&self.res.current, filtered) {
+            (Some(super::Query::Similar { .. }), _) => {
+                "No similar photos were found. Try another photo.".to_string()
             }
-        );
-        let button = if date_set {
-            "Clear the date filter"
-        } else {
-            "Start over"
+            (_, true) => "Nothing matched those filters. Try a different time or type, or \
+                          describe the moment in other words."
+                .to_string(),
+            (_, false) => format!(
+                "No photos match \u{201c}{}\u{201d}. Try describing the moment in other words.",
+                super::albums::short_name(&self.res.label, 40)
+            ),
         };
-        if empty_text(ui, icons::ICON_IMAGE_SEARCH, &sentence, button) {
-            if date_set {
-                self.date = super::when::DateFilter::default();
-                self.rerun();
-            } else {
-                self.clear_search();
-            }
+        if no_match_view(ui, &sentence, filtered.then_some("Clear filters")) {
+            self.clear_filters();
         }
     }
+
+    /// Back to all types, any time and best match first, and search again.
+    pub(super) fn clear_filters(&mut self) {
+        self.kind = None;
+        self.date = super::when::DateFilter::default();
+        self.sort = crate::search::SearchSort::default();
+        self.rerun();
+    }
+}
+
+/// The screen for a search that found nothing: an icon, one sentence and, when there is a way
+/// out, a quiet button. Returns true when the button was clicked.
+fn no_match_view(ui: &mut egui::Ui, sentence: &str, button: Option<&str>) -> bool {
+    let pal = Palette::of(ui.ctx());
+    let mut clicked = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.22).min(140.0));
+        ui.label(style::icon_text(icons::ICON_IMAGE_SEARCH, 56.0).color(pal.muted));
+        ui.add_space(12.0);
+        ui.scope(|ui| {
+            ui.set_max_width(360.0);
+            ui.label(RichText::new(sentence).color(pal.text2));
+        });
+        if let Some(button) = button {
+            ui.add_space(12.0);
+            clicked = ui.button(button).clicked();
+        }
+    });
+    clicked
 }
 
 // --- Search help -----------------------------------------------------------------------
@@ -337,46 +360,51 @@ pub(super) struct SearchHelp {
     pub suppressed: bool,
 }
 
-/// One small clickable suggestion.
-fn suggestion_chip(
+/// Height of a row of the suggestions.
+const SUGGESTION_ROW: f32 = 32.0;
+
+/// One row of the suggestions: a muted icon and the text, with a hover fill. `name` is what
+/// assistive technology reads.
+fn suggestion_row(
     ui: &mut egui::Ui,
-    icon: Option<MaterialIcon>,
+    icon: MaterialIcon,
     text: &str,
     name: &str,
     ids: &mut Vec<egui::Id>,
 ) -> bool {
     let pal = Palette::of(ui.ctx());
-    let mut job = egui::text::LayoutJob::default();
-    if let Some(icon) = icon {
-        job.append(
+    let (rect, r) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), SUGGESTION_ROW),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let fill = if r.is_pointer_button_down_on() {
+            pal.sel
+        } else if r.hovered() || r.has_focus() {
+            pal.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(style::CONTROL_RADIUS), fill);
+        painter.text(
+            Pos2::new(rect.min.x + 18.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
             icon.codepoint,
-            0.0,
-            egui::TextFormat {
-                font_id: style::icon_font_id(icon, 16.0),
-                color: pal.text2,
-                valign: egui::Align::Center,
-                ..Default::default()
-            },
+            style::icon_font_id(icon, 16.0),
+            pal.muted,
+        );
+        painter.text(
+            Pos2::new(rect.min.x + 36.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::TextStyle::Body.resolve(ui.style()),
+            pal.text,
         );
     }
-    job.append(
-        text,
-        if icon.is_some() { 6.0 } else { 0.0 },
-        egui::TextFormat {
-            font_id: egui::TextStyle::Body.resolve(ui.style()),
-            color: pal.text,
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    let b = egui::Button::new(job)
-        .fill(pal.field)
-        .corner_radius(CornerRadius::same(16))
-        .min_size(Vec2::new(0.0, 30.0));
-    let r = ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     ids.push(r.id);
-    r.clicked()
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 /// What the user picked in the search help.
@@ -388,7 +416,7 @@ struct HelpPicks {
     clear: bool,
 }
 
-/// The sections of the search help: examples, recent searches and the privacy note.
+/// The sections of the search help: recent searches, examples and the privacy note.
 /// `ids` collects the suggestions' ids for keyboard movement.
 fn help_sections(
     ui: &mut egui::Ui,
@@ -397,48 +425,53 @@ fn help_sections(
     ids: &mut Vec<egui::Id>,
 ) -> HelpPicks {
     let mut picks = HelpPicks::default();
-    help_heading(ui, pal, "Try searching for");
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-        for q in EXAMPLE_SEARCHES {
-            if suggestion_chip(ui, None, q, q, ids) {
-                picks.chosen = Some(q.to_string());
+    style::menu_body(ui);
+    if !recent.is_empty() {
+        help_heading(ui, pal, "Recent", 4.0);
+        for q in recent {
+            let name = format!("Recent search: {q}");
+            if suggestion_row(ui, icons::ICON_HISTORY, q, &name, ids) {
+                picks.chosen = Some(q.clone());
             }
         }
-    });
-    if !recent.is_empty() {
-        ui.add_space(10.0);
-        help_heading(ui, pal, "Recent searches");
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-            for q in recent {
-                let name = format!("Recent search: {q}");
-                if suggestion_chip(ui, Some(icons::ICON_HISTORY), q, &name, ids) {
-                    picks.chosen = Some(q.clone());
-                }
-            }
-        });
-        ui.add_space(6.0);
-        picks.clear = ui
-            .add(egui::Button::new(
-                RichText::new("Clear recent searches").color(pal.accent),
-            ))
-            .clicked();
     }
-    ui.add_space(8.0);
-    ui.label(
-        RichText::new("Your searches stay on this computer.")
-            .small()
-            .color(pal.text2),
-    );
+    help_heading(ui, pal, "Try", if recent.is_empty() { 4.0 } else { 10.0 });
+    for q in EXAMPLE_SEARCHES {
+        if suggestion_row(ui, icons::ICON_SEARCH, q, q, ids) {
+            picks.chosen = Some(q.to_string());
+        }
+    }
+    ui.add_space(6.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Searches never leave this computer.")
+                .size(12.0)
+                .color(pal.muted),
+        );
+        if !recent.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                picks.clear = ui
+                    .add(egui::Button::new(
+                        RichText::new("Clear recent searches")
+                            .size(12.0)
+                            .color(pal.accent),
+                    ))
+                    .clicked();
+            });
+        }
+    });
     picks
 }
 
-/// A small heading of the search help.
-fn help_heading(ui: &mut egui::Ui, pal: &Palette, text: &str) {
-    ui.label(style::semibold(text).size(13.5).color(pal.text2));
+/// A small heading of the search help, `above` points below the previous row.
+fn help_heading(ui: &mut egui::Ui, pal: &Palette, text: &str, above: f32) {
+    ui.add_space(above);
+    ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        ui.label(RichText::new(text).size(12.0).color(pal.muted));
+    });
 }
 
 impl App {
@@ -507,7 +540,7 @@ impl App {
         self.search_help.inside = target.is_some() || current.is_some();
     }
 
-    /// Examples and recent searches under the search field while it is focused and empty.
+    /// Recent and example searches under the search field while it is focused and empty.
     pub(super) fn search_help_dropdown(&mut self, ctx: &egui::Context) {
         let pointer_inside = self
             .search_help
@@ -538,13 +571,13 @@ impl App {
             .fixed_pos(Pos2::new(field.min.x, field.max.y + 6.0))
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(pal.side)
+                    .fill(pal.pop)
                     .stroke(Stroke::new(1.0, pal.line))
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(Margin::same(14))
+                    .corner_radius(CornerRadius::same(style::CARD_RADIUS))
+                    .inner_margin(Margin::same(6))
                     .shadow(ctx.global_style().visuals.popup_shadow)
                     .show(ui, |ui| {
-                        ui.set_width(field.width().max(480.0) - 28.0);
+                        ui.set_width(field.width() - 12.0);
                         picks = help_sections(ui, &pal, &recent, &mut ids);
                     });
             });

@@ -52,6 +52,8 @@ impl GridState {
 #[derive(Default)]
 pub(super) struct GridEvents {
     pub(super) clicked: Option<(usize, tiles::TileEvent, ClickMods)>,
+    /// A click on an extra button of tile `i` ("Find similar", the playable pill).
+    pub(super) action: Option<(usize, tiles::TileAction)>,
     pub(super) right_clicked: Option<usize>,
     pub(super) menu: Option<(usize, TileMenu)>,
     /// The circle of a day heading was clicked: the index of the day.
@@ -71,6 +73,9 @@ impl GridEvents {
     ) {
         if let Some((ev, mods)) = out.event {
             self.clicked = Some((i, ev, mods));
+        }
+        if let Some(a) = out.action {
+            self.action = Some((i, a));
         }
         if out.resp.secondary_clicked() {
             self.right_clicked = Some(i);
