@@ -9,7 +9,7 @@ use crate::media::MediaKind;
 use crate::store::db::{AlbumInfo, TimelineItem};
 use crate::ui::grid::grid_scroll_area;
 use crate::ui::selection::{self, ClickMods};
-use crate::ui::style::GAP;
+use crate::ui::style::{GAP, Palette};
 use crate::ui::tiles::{self, Tile, TileEvent, TileMark};
 use crate::ui::workers::ThumbCache;
 use crate::ui::{App, ClickOutcome, FavMark, GridEvents, fmt_time, marked};
@@ -160,12 +160,28 @@ fn scrolled_content(
     ui.spacing_mut().item_spacing = Vec2::ZERO;
     let mut banner_event = None;
     if let Some(b) = banner {
-        banner_event = banner::show(ui, pics, items, b, rows.width);
+        if viewport.min.y >= BANNER_HEIGHT {
+            // Scrolled past it: keep its space, but don't ask for its picture.
+            ui.add_space(BANNER_HEIGHT);
+        } else {
+            banner_event = banner::show(ui, pics, items, b, rows.width);
+        }
         ui.add_space(BANNER_GAP);
     }
     let lead = rows.tl.lead;
     let events = rows.show(ui, pics.thumbs, viewport.translate(egui::vec2(0.0, -lead)));
     (events, banner_event)
+}
+
+/// A quiet spinner and "Loading…" where the grid will appear.
+fn loading_indicator(ui: &mut egui::Ui) {
+    let pal = Palette::of(ui.ctx());
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * 0.3);
+        ui.spinner();
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Loading…").color(pal.text2));
+    });
 }
 
 impl App {
@@ -187,16 +203,15 @@ impl App {
         // view's items laid out under the new view's rules.
         let wanted = self.tl.filter();
         if !self.tl.loaded || !self.tl.matches(&wanted) {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.3);
-                ui.spinner();
-            });
+            loading_indicator(ui);
             return;
         }
         self.timeline_header(ui);
         if self.tl.items.is_empty() {
             if self.tl.awaiting.is_none() {
                 self.timeline_empty_state(ui);
+            } else {
+                loading_indicator(ui);
             }
             return;
         }

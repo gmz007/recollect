@@ -215,3 +215,72 @@ fn the_banner_asks_for_a_large_preview() {
         "no large preview was asked for: {sides:?}"
     );
 }
+
+#[test]
+fn the_banner_stops_asking_for_its_picture_once_scrolled_out_of_view() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("On this day");
+    assert_eq!(app.borrow().previews.frames_since_last_request(), Some(0));
+    app.borrow_mut().tl.grid.scroll_to = Some(1500.0);
+    settle(&mut h, || tl_offset(&app) > 1000.0);
+    h.run_steps(3);
+    let idle = app.borrow().previews.frames_since_last_request();
+    assert!(idle.is_some_and(|n| n >= 3), "{idle:?}");
+}
+
+#[test]
+fn leaving_search_with_a_ruler_stop_focused_leaves_the_grid_shortcuts_working() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    {
+        let mut a = app.borrow_mut();
+        a.res.hits = Arc::new(
+            (0..300)
+                .map(|i| {
+                    let mut h = hit(&format!("/nowhere/{i}.jpg"), MediaKind::Image, None);
+                    h.file_id = i64::from(i) + 1000;
+                    h
+                })
+                .collect(),
+        );
+        a.res.current = Some(super::super::Query::Text("a dragon".into()));
+    }
+    let mut h = album_harness(&app);
+    h.get_by_label("Scroll to 0%").focus();
+    h.run_steps(3);
+    // A key meant for the ruler is not taken by the results grid.
+    command_key_on(&mut h, egui::Key::A);
+    assert!(tl_selection(&app).is_empty());
+    // Back to the timeline: the stop is gone, and so must be its hold on the keys.
+    app.borrow_mut().clear_search();
+    h.run_steps(3);
+    command_key_on(&mut h, egui::Key::A);
+    assert_eq!(tl_selection(&app).len(), 240);
+}
+
+fn command_key_on(h: &mut Harness<'_>, key: egui::Key) {
+    h.key_combination_modifiers(egui::Modifiers::COMMAND, &[key]);
+    h.run_steps(3);
+}
+
+#[test]
+fn resting_the_pointer_on_the_ruler_needs_no_more_frames() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    h.hover_at(on_ruler(NEAR_TOP));
+    h.run_steps(3);
+    h.get_by_label("December 2019");
+    // Nothing is moving, so the app does not ask for another frame: this would fail if it
+    // kept repainting for the chip.
+    h.try_run()
+        .expect("the screen settles while the pointer rests");
+    // Neither does holding the button down without moving.
+    press(&mut h, 440.0);
+    settle(&mut h, || tl_offset(&app) > 100.0);
+    h.try_run()
+        .expect("the screen settles while the button is held still");
+}

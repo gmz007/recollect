@@ -15,7 +15,7 @@ pub struct OnThisDay {
 }
 
 /// Most entries the "On this day" banner shows.
-pub(super) const ON_THIS_DAY_MAX: usize = 30;
+pub(super) const ON_THIS_DAY_MAX: usize = 200;
 
 /// Items taken on the same month and day as `today` in earlier years, newest first (at most
 /// [`ON_THIS_DAY_MAX`]). `index` points into `items`, whatever order they are in. Items whose
@@ -80,8 +80,9 @@ impl App {
         }
         let entries = self.tl.on_this_day(today);
         let first = entries.first()?;
+        let one_year = entries.iter().all(|e| e.years_ago == first.years_ago);
         Some(Banner {
-            years_ago: first.years_ago,
+            years_ago: one_year.then_some(first.years_ago),
             entries: entries.iter().map(|e| e.index).collect(),
             date: today,
         })

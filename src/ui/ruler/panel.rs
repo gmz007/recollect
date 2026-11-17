@@ -1,6 +1,6 @@
 //! The ruler column beside whichever grid is shown.
 
-use super::{WIDTH, WIDTH_SEARCH, show};
+use super::{WIDTH, WIDTH_SEARCH, clear_stops, show};
 use crate::ui::App;
 use crate::ui::style::Palette;
 
@@ -21,8 +21,7 @@ impl App {
     /// window there is no ruler at all.
     pub(in crate::ui) fn ruler_panel(&mut self, ui: &mut egui::Ui) {
         let Some(width) = self.ruler_width() else {
-            self.res.grid.ruler.focused = false;
-            self.tl.grid.ruler.focused = false;
+            clear_stops(ui.ctx());
             return;
         };
         let pal = Palette::of(ui.ctx());
@@ -40,7 +39,9 @@ impl App {
                 }
             })
             .inner;
-        if let Some(y) = target {
+        // Holding the pointer still on the ruler asks for the same offset every frame: only an
+        // offset that differs from where the grid is needs another frame.
+        if let Some(y) = target.filter(|y| (y - self.grid().ruler.offset()).abs() > 0.5) {
             self.active_grid().scroll_to = Some(y);
             ui.ctx().request_repaint();
         }

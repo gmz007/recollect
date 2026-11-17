@@ -198,3 +198,31 @@ fn unreadable_folders_are_found_by_a_background_check() {
     // of reading them.
     assert!(!app.borrow().folder_check.is_pending());
 }
+
+#[test]
+fn folders_are_not_checked_while_the_window_has_no_focus() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = files_app(d.path(), 2);
+    let shown = Rc::clone(&app);
+    let live = Rc::new(std::cell::Cell::new(false));
+    let live_in_closure = Rc::clone(&live);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| {
+            // The frames drawn while the harness is built belong to the setup.
+            if live_in_closure.get() {
+                shown.borrow_mut().show(ui);
+            }
+        });
+    live.set(true);
+    // The input of a frame is taken for that frame only, so every frame says it again.
+    for _ in 0..8 {
+        h.input_mut().focused = false;
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    assert!(app.borrow().folder_watch_idle());
+    // Back in front, the check runs.
+    h.input_mut().focused = true;
+    settle(&mut h, || app.borrow().missing_folders == [1]);
+}

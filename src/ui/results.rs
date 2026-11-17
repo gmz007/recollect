@@ -1,6 +1,6 @@
 //! Search: starting one when typing pauses, taking in the answer, and the results grid.
 
-use super::ruler::{Mapping, Month, RulerState};
+use super::ruler::{Mapping, Month, RulerState, month_at_fraction};
 use super::selection::ClickMods;
 use super::style::GAP;
 use super::tiles::{Tile, TileMark};
@@ -91,11 +91,8 @@ impl ResultsState {
         f: impl FnOnce(&mut RulerState, &dyn Fn(f32) -> Option<Month>) -> R,
     ) -> R {
         let hits = &self.hits;
-        let date_at = |frac: f32| {
-            let last = hits.len().checked_sub(1)?;
-            let at = (frac.clamp(0.0, 1.0) * last as f32).round() as usize;
-            Month::of_timestamp(hits.get(at)?.taken_at)
-        };
+        let date_at =
+            |frac: f32| month_at_fraction(hits.len(), frac, |i| hits.get(i).map(|h| h.taken_at));
         f(&mut self.grid.ruler, &date_at)
     }
 }

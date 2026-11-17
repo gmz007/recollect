@@ -239,8 +239,12 @@ fn interact_zones(
     small: bool,
 ) -> (egui::Response, egui::Response) {
     let circle_zone = Rect::from_min_size(rect.min, Vec2::splat(ZONE));
-    let heart_zone =
-        Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - ZONE), Vec2::splat(ZONE));
+    // The heart is drawn on the photo, which is smaller than the tile while selected.
+    let photo = picture_area(rect, tile.checked());
+    let heart_zone = Rect::from_min_size(
+        Pos2::new(photo.min.x, photo.max.y - ZONE),
+        Vec2::splat(ZONE),
+    );
     // The circle and the heart are not drawn on small tiles, so their zones must not take
     // clicks there either: the click then goes to the tile itself.
     let circle_sense = if tile.selectable && !small {
@@ -592,6 +596,12 @@ mod tests {
 
     /// Clicks the bottom-left corner of a tile of `side` points and returns what it reported.
     fn corner_click(side: f32) -> Option<TileEvent> {
+        corner_click_of(side, TileMark::None)
+    }
+
+    /// Like [`corner_click`], for a tile with `mark`; the click lands on the
+    /// heart as drawn (on the photo, which is smaller than the tile while selected).
+    fn corner_click_of(side: f32, mark: TileMark) -> Option<TileEvent> {
         use egui_kittest::Harness;
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -608,8 +618,12 @@ mod tests {
         let mut h = Harness::builder()
             .with_size(Vec2::new(300.0, 300.0))
             .build_ui(move |ui| {
+                // The fonts of the style are there from the second frame on.
+                if ui.ctx().cumulative_pass_nr() < 3 {
+                    return;
+                }
                 let name = || "a.jpg".to_string();
-                let tile = Tile::new(&key, "Item", &name).selectable(TileMark::None);
+                let tile = Tile::new(&key, "Item", &name).selectable(mark);
                 let out = show(ui, &mut thumbs, ui.scope_id().with("tile"), rect, &tile);
                 if let Some((event, _)) = out.event {
                     *sink.borrow_mut() = Some(event);
@@ -621,7 +635,8 @@ mod tests {
             crate::config::TextSize::default(),
         );
         h.run();
-        let pos = Pos2::new(rect.min.x + 6.0, rect.max.y - 6.0);
+        let photo = picture_area(rect, mark == TileMark::Checked);
+        let pos = heart_center(photo);
         h.hover_at(pos);
         h.run_steps(2);
         for pressed in [true, false] {
@@ -644,5 +659,16 @@ mod tests {
     #[test]
     fn the_corner_of_a_large_tile_still_clicks_the_star() {
         assert_eq!(corner_click(120.0), Some(TileEvent::Heart));
+    }
+
+    #[test]
+    fn the_heart_of_a_selected_tile_is_clicked_where_it_is_drawn() {
+        for side in [120.0, 320.0] {
+            assert_eq!(
+                corner_click_of(side, TileMark::Checked),
+                Some(TileEvent::Heart),
+                "tile of {side} points"
+            );
+        }
     }
 }

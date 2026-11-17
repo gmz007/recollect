@@ -244,6 +244,13 @@ impl Previews {
         self.loader.states.keys().map(|k| k.side).collect()
     }
 
+    /// How many frames ago a preview was last asked for (tests); `None` if none was.
+    #[cfg(test)]
+    pub(super) fn frames_since_last_request(&self) -> Option<u64> {
+        let newest = self.loader.states.values().map(|(_, f)| *f).max()?;
+        Some(self.loader.frame - newest)
+    }
+
     /// Number of previews and details held (tests).
     #[cfg(test)]
     pub(super) fn cached(&self) -> usize {

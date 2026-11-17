@@ -9,6 +9,10 @@ use chrono::{Datelike, NaiveDate};
 
 /// Smallest distance between two dashes, in points.
 pub(super) const MIN_SPACING: f32 = 3.5;
+/// Months without photos beyond which a stretch is shown as a short gap, and how many slots
+/// that gap takes.
+const MAX_EMPTY_MONTHS: usize = 12;
+const GAP_SLOTS: usize = 3;
 /// Smallest distance between two year labels, in points.
 const LABEL_SPACING: f32 = 14.0;
 /// Dashes of a ruler that follows the scroll position.
@@ -72,6 +76,9 @@ impl Month {
 pub enum Mapping {
     /// The ruler is the scroll range, evenly.
     Flat,
+    /// Like [`Self::Flat`], for a list in date order, with the years written where they start
+    /// (year and scroll offset, newest first).
+    Dated(Vec<(i32, f32)>),
     /// The ruler is the range of months of the library.
     Time(TimeScale),
 }
@@ -81,7 +88,7 @@ impl Mapping {
     /// scroll to at most `max`.
     pub fn offset_at(&self, frac: f32, max: f32) -> f32 {
         match self {
-            Self::Flat => frac.clamp(0.0, 1.0) * max.max(0.0),
+            Self::Flat | Self::Dated(_) => frac.clamp(0.0, 1.0) * max.max(0.0),
             Self::Time(t) => t.offset_at(frac, max),
         }
     }
@@ -89,18 +96,30 @@ impl Mapping {
     /// The point of the ruler for a scroll offset.
     pub fn fraction_at(&self, offset: f32, max: f32) -> f32 {
         match self {
-            Self::Flat if max > 0.0 => (offset / max).clamp(0.0, 1.0),
-            Self::Flat => 0.0,
+            Self::Flat | Self::Dated(_) if max > 0.0 => (offset / max).clamp(0.0, 1.0),
+            Self::Flat | Self::Dated(_) => 0.0,
             Self::Time(t) => t.fraction_at(offset, max),
         }
     }
 }
 
-/// Months of a library, newest first, with the scroll offset where each starts.
+/// What one slot of the ruler stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// A calendar month, by [`Month::index`].
+    Month(i32),
+    /// Part of a long stretch of months without photos, shown as a short gap. It stands for
+    /// the month after the stretch (by index), which is where pressing on it lands.
+    Gap(i32),
+}
+
+/// Months of a library, newest first, with the scroll offset where each starts. Stretches of
+/// more than [`MAX_EMPTY_MONTHS`] months without photos (one photo with a wrong date can leave
+/// decades) are shortened to [`GAP_SLOTS`] slots.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeScale {
-    newest: i32,
-    /// `months + 1` ascending offsets: where each month starts, and the end of the content. An
+    slots: Vec<Slot>,
+    /// `slots + 1` ascending offsets: where each slot starts, and the end of the content. An
     /// empty month starts where the next older one does.
     tops: Vec<f32>,
 }
@@ -118,22 +137,36 @@ impl TimeScale {
             let slot = &mut starts[m.min(count - 1)];
             slot.get_or_insert(top);
         }
-        let mut tops = vec![total; count + 1];
+        // Where every calendar month starts (an empty one where the next older one does).
+        let mut month_tops = vec![total; count + 1];
         let mut next = total;
         for m in (0..count).rev() {
             next = starts[m].unwrap_or(next).min(next);
-            tops[m] = next;
+            month_tops[m] = next;
         }
-        tops[0] = 0.0;
-        Some(Self {
-            newest: first,
-            tops,
-        })
+        month_tops[0] = 0.0;
+        let (mut slots, mut tops) = (Vec::new(), Vec::new());
+        let mut m = 0;
+        while m < count {
+            let run = starts[m..].iter().take_while(|s| s.is_none()).count();
+            if run > MAX_EMPTY_MONTHS {
+                let landing = first - i32::try_from(m + run).ok()?;
+                slots.extend(std::iter::repeat_n(Slot::Gap(landing), GAP_SLOTS));
+                tops.extend(std::iter::repeat_n(month_tops[m + run], GAP_SLOTS));
+                m += run;
+            } else {
+                slots.push(Slot::Month(first - i32::try_from(m).ok()?));
+                tops.push(month_tops[m]);
+                m += 1;
+            }
+        }
+        tops.push(total);
+        Some(Self { slots, tops })
     }
 
     /// Number of calendar months covered.
     pub fn months(&self) -> usize {
-        self.tops.len() - 1
+        self.slots.len()
     }
 
     /// The month at the point `frac` of the ruler.
@@ -141,9 +174,15 @@ impl TimeScale {
         self.month_of_slot(self.slot(frac))
     }
 
-    /// The month of slot `m` (0 is the newest).
+    /// The month of slot `m` (0 is the newest); for a gap, the month after it.
     fn month_of_slot(&self, m: usize) -> Month {
-        Month::from_index(self.newest - i32::try_from(m).unwrap_or(i32::MAX))
+        match self.slots[m] {
+            Slot::Month(i) | Slot::Gap(i) => Month::from_index(i),
+        }
+    }
+
+    fn is_gap(&self, m: usize) -> bool {
+        matches!(self.slots[m], Slot::Gap(_))
     }
 
     fn slot(&self, frac: f32) -> usize {
@@ -215,11 +254,36 @@ pub struct Dash {
     pub stop: Option<Stop>,
 }
 
-/// The dashes of a ruler `height` points tall, top to bottom.
-pub fn dashes(mapping: &Mapping, height: f32) -> Vec<Dash> {
+/// The dashes of a ruler `height` points tall, top to bottom, for content that can scroll
+/// `max` points.
+pub fn dashes(mapping: &Mapping, height: f32, max: f32) -> Vec<Dash> {
     match mapping {
         Mapping::Flat => flat_dashes(height),
+        Mapping::Dated(years) => {
+            let mut out = flat_dashes(height);
+            label_years(&mut out, years, height, max);
+            out
+        }
         Mapping::Time(t) => time_dashes(t, height),
+    }
+}
+
+/// Writes each year beside the dash nearest to where it starts, unless that is too close to the
+/// label above.
+fn label_years(dashes: &mut [Dash], years: &[(i32, f32)], height: f32, max: f32) {
+    if max <= 0.0 || dashes.is_empty() {
+        return;
+    }
+    let n = dashes.len();
+    let mut last_label = f32::NEG_INFINITY;
+    for &(year, offset) in years {
+        let at = (((offset / max).clamp(0.0, 1.0) * n as f32) as usize).min(n - 1);
+        let y = dashes[at].frac * height;
+        if dashes[at].year.is_none() && y - last_label >= LABEL_SPACING {
+            dashes[at].year = Some(year);
+            dashes[at].size = DashSize::Year;
+            last_label = y;
+        }
     }
 }
 
@@ -261,18 +325,35 @@ fn density(months: usize, height: f32) -> (usize, usize) {
     (per_month, thin)
 }
 
+/// For each slot, whether it is the first month of a year (a gap never is, and a year that
+/// lies entirely in a gap has no slot).
+fn year_starts(t: &TimeScale) -> Vec<bool> {
+    let mut prev_year = None;
+    (0..t.months())
+        .map(|m| {
+            if t.is_gap(m) {
+                return false;
+            }
+            let year = t.month_of_slot(m).year;
+            let starts = prev_year != Some(year);
+            prev_year = Some(year);
+            starts
+        })
+        .collect()
+}
+
 fn time_dashes(t: &TimeScale, height: f32) -> Vec<Dash> {
     let n = t.months();
     let (per_month, thin) = density(n, height);
-    let year_starts = |m: usize| m == 0 || t.month_of_slot(m).year != t.month_of_slot(m - 1).year;
-    let years = (0..n).filter(|&m| year_starts(m)).count();
+    let year_start = year_starts(t);
+    let years = year_start.iter().filter(|&&y| y).count();
     let mut out = Vec::new();
     let mut last_label = f32::NEG_INFINITY;
-    for m in (0..n).filter(|&m| year_starts(m) || m % thin == 0) {
+    for m in (0..n).filter(|&m| !t.is_gap(m) && (year_start[m] || m % thin == 0)) {
         let month = t.month_of_slot(m);
         let target = m as f32 / n as f32;
         let at = |sub: usize| (m as f32 + (sub as f32 + 0.5) / per_month as f32) / n as f32;
-        let starts_year = year_starts(m);
+        let starts_year = year_start[m];
         let mut year = None;
         if starts_year && at(0) * height - last_label >= LABEL_SPACING {
             year = Some(month.year);

@@ -1,7 +1,8 @@
 //! What the timeline tells its ruler: the months and where they start in the layout.
 
-use super::TimelineState;
-use crate::ui::ruler::{Mapping, Month, RulerState, TimeScale, key_of};
+use super::View;
+use super::{Layout, TimelineState};
+use crate::ui::ruler::{Mapping, Month, RulerState, TimeScale, key_of, month_at_fraction};
 
 impl TimelineState {
     /// Whether the ruler has something to do: items are shown and they do not all fit.
@@ -31,9 +32,32 @@ impl TimelineState {
             });
             TimeScale::build(sections, layout.total + lead).map_or(Mapping::Flat, Mapping::Time)
         } else {
-            Mapping::Flat
+            self.dated_mapping(layout)
         };
         self.grid.ruler.set_mapping(key, mapping);
+    }
+
+    /// The ruler of a list that follows the scroll position. Albums are in date order (newest
+    /// first), so their ruler writes each year where it starts; the other lists are in the
+    /// order files were added, which says nothing about dates, so they get no labels.
+    fn dated_mapping(&self, layout: &Layout) -> Mapping {
+        if !matches!(self.view, View::Album(_)) {
+            return Mapping::Flat;
+        }
+        let mut years: Vec<(i32, f32)> = Vec::new();
+        for (i, item) in self.items.iter().enumerate() {
+            let Some(month) = Month::of_timestamp(item.taken_at) else {
+                continue;
+            };
+            if years.last().is_none_or(|&(y, _)| y != month.year) {
+                years.push((month.year, layout.reveal_span(i).0 + self.lead));
+            }
+        }
+        if years.is_empty() {
+            Mapping::Flat
+        } else {
+            Mapping::Dated(years)
+        }
     }
 
     /// Runs `f` with the ruler's state and a way to find the date of the photo at a point of
@@ -45,9 +69,7 @@ impl TimelineState {
     ) -> R {
         let items = &self.items;
         let date_at = |frac: f32| {
-            let last = items.len().checked_sub(1)?;
-            let at = (frac.clamp(0.0, 1.0) * last as f32).round() as usize;
-            Month::of_timestamp(items.get(at)?.taken_at)
+            month_at_fraction(items.len(), frac, |i| items.get(i).map(|it| it.taken_at))
         };
         f(&mut self.grid.ruler, &date_at)
     }

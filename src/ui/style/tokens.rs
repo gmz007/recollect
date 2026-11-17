@@ -58,14 +58,9 @@ const fn rgb(hex: u32) -> Color32 {
 pub const SWITCH_ON: Color32 = rgb(0x3366E6);
 /// White overlays on photos (94 %).
 pub const OVERLAY_WHITE: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 240);
+/// Text on a white overlay: dark in both themes.
+pub const OVERLAY_WHITE_TEXT: Color32 = rgb(0x1C1C1B);
 /// Black overlays on photos (55 %).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "defined with the other theme values; used as screens adopt them"
-    )
-)]
 pub const OVERLAY_BLACK: Color32 = Color32::from_rgba_unmultiplied_const(0, 0, 0, 140);
 /// The Settings window and the backdrop behind it in the dark theme.
 #[cfg_attr(

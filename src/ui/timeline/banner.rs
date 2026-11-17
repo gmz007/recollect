@@ -29,18 +29,19 @@ const SEE_HEIGHT: f32 = 32.0;
 pub(super) struct Banner {
     /// Indexes of the day's photos in the timeline, newest first.
     pub entries: Vec<usize>,
-    pub years_ago: i32,
+    /// How many years ago the photos were taken, when they all are from one year.
+    pub years_ago: Option<i32>,
     pub date: NaiveDate,
 }
 
 impl Banner {
-    /// "17 November, 3 years ago".
+    /// "17 November, 3 years ago", or "17 November over the years" for photos of several years.
     fn title(&self) -> String {
-        format!(
-            "{}, {}",
-            self.date.format("%-d %B"),
-            years_ago_text(self.years_ago)
-        )
+        let day = self.date.format("%-d %B");
+        match self.years_ago {
+            Some(n) => format!("{day}, {}", years_ago_text(n)),
+            None => format!("{day} over the years"),
+        }
     }
 
     /// "See 12 photos".
@@ -68,8 +69,7 @@ pub(super) fn show(
     let pal = Palette::of(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, BANNER_HEIGHT), Sense::hover());
     let text_top = rect.max.y - TEXT_HEIGHT;
-    let photo = Rect::from_min_max(rect.min, egui::pos2(rect.max.x, text_top));
-    paint_photo(ui, pics, items.get(banner.entries[0]), photo, &pal);
+    paint_photo(ui, pics, items.get(banner.entries[0]), rect, &pal);
     ui.painter().rect_filled(
         Rect::from_min_max(egui::pos2(rect.min.x, text_top), rect.max),
         CornerRadius {
@@ -78,12 +78,12 @@ pub(super) fn show(
             sw: RADIUS,
             se: RADIUS,
         },
-        pal.pill,
+        style::OVERLAY_BLACK,
     );
     let text_area = Rect::from_min_max(egui::pos2(rect.min.x, text_top), rect.max)
         .shrink2(Vec2::new(TEXT_MARGIN, 0.0));
     let mut event = None;
-    if paint_text(ui, text_area, banner, &pal) {
+    if paint_text(ui, text_area, banner) {
         event = Some(BannerEvent::See);
     }
     if hide_button(ui, rect) {
@@ -112,7 +112,7 @@ fn preview_key(item: &TimelineItem, width: f32, ppp: f32) -> PreviewKey {
     }
 }
 
-/// The photo, cropped to fill `area`, with rounded top corners.
+/// The photo, cropped to fill `area`, with rounded corners.
 fn paint_photo(
     ui: &egui::Ui,
     pics: &mut Pictures<'_>,
@@ -120,12 +120,7 @@ fn paint_photo(
     area: Rect,
     pal: &Palette,
 ) {
-    let radius = CornerRadius {
-        nw: RADIUS,
-        ne: RADIUS,
-        sw: 0,
-        se: 0,
-    };
+    let radius = CornerRadius::same(RADIUS);
     let ppp = ui.ctx().pixels_per_point();
     let sharp = item.and_then(|it| {
         match pics
@@ -165,7 +160,7 @@ fn cover_uv(tex: Vec2, target: Vec2) -> Rect {
 }
 
 /// The two lines of text and the "See" button; true when the button was clicked.
-fn paint_text(ui: &mut egui::Ui, area: Rect, banner: &Banner, pal: &Palette) -> bool {
+fn paint_text(ui: &mut egui::Ui, area: Rect, banner: &Banner) -> bool {
     let left = Rect::from_min_max(
         area.min + Vec2::new(0.0, 14.0),
         egui::pos2(area.max.x - 140.0, area.max.y - 10.0),
@@ -180,9 +175,13 @@ fn paint_text(ui: &mut egui::Ui, area: Rect, banner: &Banner, pal: &Palette) -> 
     text.label(
         style::semibold(banner.title())
             .size(20.0)
-            .color(pal.pilltext),
+            .color(Color32::WHITE),
     );
-    text.label(RichText::new("On this day").size(12.0).color(pal.pilltext));
+    text.label(
+        RichText::new("On this day")
+            .size(12.0)
+            .color(Color32::WHITE),
+    );
     let right = Rect::from_min_max(
         egui::pos2(area.max.x - 240.0, area.max.y - 18.0 - SEE_HEIGHT),
         egui::pos2(area.max.x, area.max.y - 18.0),
@@ -192,10 +191,11 @@ fn paint_text(ui: &mut egui::Ui, area: Rect, banner: &Banner, pal: &Palette) -> 
             .max_rect(right)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
-    let button = egui::Button::new(RichText::new(banner.see_text()).color(pal.pill))
-        .fill(pal.pilltext)
-        .corner_radius(CornerRadius::same(16))
-        .min_size(Vec2::new(0.0, SEE_HEIGHT));
+    let button =
+        egui::Button::new(RichText::new(banner.see_text()).color(style::OVERLAY_WHITE_TEXT))
+            .fill(style::OVERLAY_WHITE)
+            .corner_radius(CornerRadius::same(16))
+            .min_size(Vec2::new(0.0, SEE_HEIGHT));
     action.add(button).clicked()
 }
 
@@ -249,14 +249,19 @@ mod tests {
     fn the_banner_reads_naturally() {
         let b = Banner {
             entries: vec![3, 9],
-            years_ago: 3,
+            years_ago: Some(3),
             date: NaiveDate::from_ymd_opt(2026, 11, 17).unwrap(),
         };
         assert_eq!(b.title(), "17 November, 3 years ago");
         assert_eq!(b.see_text(), "See 2 photos");
+        let several = Banner {
+            years_ago: None,
+            ..b.clone()
+        };
+        assert_eq!(several.title(), "17 November over the years");
         let one = Banner {
             entries: vec![1],
-            years_ago: 1,
+            years_ago: Some(1),
             ..b
         };
         assert_eq!(one.title(), "17 November, 1 year ago");

@@ -6,10 +6,12 @@
 //! colours live in [`tokens`] so every screen draws from one palette.
 
 mod controls;
+mod fading;
 mod mark;
 mod tokens;
 
 pub use controls::{PILL_HEIGHT, chip, filter_chip, menu_body, pill_buttons, pill_frame, switch};
+pub use fading::{fade_opacity, pill_chip};
 pub use mark::app_mark;
 pub use tokens::*;
 

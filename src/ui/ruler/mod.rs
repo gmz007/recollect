@@ -12,7 +12,7 @@ mod scale;
 
 pub use scale::{Mapping, Month, TimeScale};
 
-use crate::ui::style::Palette;
+use crate::ui::style::{Palette, fade_opacity, pill_chip};
 use egui::{Align2, CursorIcon, Id, Rect, Sense, Stroke, Vec2};
 use scale::{Dash, MIN_SPACING};
 use std::hash::{Hash, Hasher};
@@ -44,7 +44,7 @@ pub(super) struct RulerState {
     /// What the mapping was built for (see [`key_of`]).
     model_key: Option<u64>,
     dashes: Vec<Dash>,
-    dashes_for: Option<(u64, i32)>,
+    dashes_for: Option<(u64, i32, i32)>,
     revision: u64,
     /// Where the grid is scrolled, how far it can scroll and how tall its view is, as of the
     /// last time it was drawn.
@@ -54,8 +54,20 @@ pub(super) struct RulerState {
     last_offset: Option<f32>,
     /// When the pointer or the scrolling last moved something.
     active_at: Option<Instant>,
-    /// Whether a dash had keyboard focus in the last frame.
-    pub(super) focused: bool,
+    was_on_ruler: bool,
+}
+
+/// The month of the entry at the point `frac` (0 the first, 1 the last) of a list of `len`
+/// entries, for rulers that follow the scroll position. `taken_at` gives the capture time of
+/// an entry.
+pub(super) fn month_at_fraction(
+    len: usize,
+    frac: f32,
+    taken_at: impl Fn(usize) -> Option<i64>,
+) -> Option<Month> {
+    let last = len.checked_sub(1)?;
+    let at = (frac.clamp(0.0, 1.0) * last as f32).round() as usize;
+    Month::of_timestamp(taken_at(at)?)
 }
 
 /// A fingerprint of everything a mapping was built from.
@@ -89,19 +101,19 @@ impl RulerState {
         self.measured && self.max <= 1.0
     }
 
-    /// The scroll offset the grid reported last (tests).
-    #[cfg(test)]
+    /// The scroll offset the grid reported last.
     pub(in crate::ui) fn offset(&self) -> f32 {
         self.offset
     }
 
     fn ensure_dashes(&mut self, height: f32) {
-        let key = (self.revision, height as i32);
+        let key = (self.revision, height as i32, self.max as i32);
         if self.dashes_for != Some(key) {
+            let max = self.max;
             self.dashes = self
                 .mapping
                 .as_ref()
-                .map_or_else(Vec::new, |m| scale::dashes(m, height));
+                .map_or_else(Vec::new, |m| scale::dashes(m, height, max));
             self.dashes_for = Some(key);
         }
     }
@@ -138,7 +150,7 @@ pub(super) fn show(
     let mut target = request_from_pointer(ui, st, &resp, &pointer);
     let focus_jump = stops(ui, st, rect, track, id);
     target = focus_jump.or(target);
-    let hot = resp.hovered() || pointer.pressed || st.focused;
+    let hot = resp.hovered() || pointer.pressed || stop_focused(ui.ctx());
     let opacity = REST_OPACITY
         + (1.0 - REST_OPACITY) * ui.ctx().animate_bool_with_time(id.with("hot"), hot, 0.12);
     let marker = marker_frac(st, &pointer);
@@ -191,7 +203,7 @@ fn request_from_pointer(
 /// The keyboard stops: Tab reaches them, Enter scrolls to the one in focus.
 fn stops(ui: &mut egui::Ui, st: &mut RulerState, rect: Rect, track: Rect, id: Id) -> Option<f32> {
     let mut jump = None;
-    let mut focused = false;
+    let mut ids = Vec::with_capacity(st.dashes.len());
     let pal = Palette::of(ui.ctx());
     for (i, dash) in st.dashes.iter().enumerate() {
         let Some(stop) = &dash.stop else { continue };
@@ -204,8 +216,8 @@ fn stops(ui: &mut egui::Ui, st: &mut RulerState, rect: Rect, track: Rect, id: Id
             Sense::focusable_noninteractive(),
         );
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &stop.label));
+        ids.push(r.id);
         if r.has_focus() {
-            focused = true;
             let to = egui::pos2(track.right(), y);
             ui.painter().hline(
                 to.x - 28.0..=to.x,
@@ -218,8 +230,28 @@ fn stops(ui: &mut egui::Ui, st: &mut RulerState, rect: Rect, track: Rect, id: Id
             }
         }
     }
-    st.focused = focused;
+    ui.ctx().data_mut(|d| d.insert_temp(stop_ids_key(), ids));
     jump
+}
+
+fn stop_ids_key() -> Id {
+    Id::NULL.with("ruler-stop-ids")
+}
+
+/// Whether the widget with keyboard focus is one of the ruler's stops, as of the last time a
+/// ruler was drawn. Asking egui, not remembering a flag, keeps this right when the ruler of
+/// one grid goes away while another is shown.
+pub(super) fn stop_focused(ctx: &egui::Context) -> bool {
+    let Some(focus) = ctx.memory(egui::Memory::focused) else {
+        return false;
+    };
+    ctx.data(|d| d.get_temp::<Vec<Id>>(stop_ids_key()))
+        .is_some_and(|ids| ids.contains(&focus))
+}
+
+/// Forgets the stops (no ruler is shown).
+pub(super) fn clear_stops(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove_temp::<Vec<Id>>(stop_ids_key()));
 }
 
 /// Where the current position is: under the pointer while it presses, else where the grid is.
@@ -298,21 +330,23 @@ fn chip(
     let moved = st.last_offset.is_some_and(|o| (o - st.offset).abs() > 0.5);
     st.last_offset = Some(st.offset);
     let on_ruler = (hovered || pointer.pressed) && pointer.at.is_some();
-    if on_ruler || moved {
+    // The chip lingers from the moment the pointer leaves, not from the last frame it was on
+    // (frames stop while the pointer rests).
+    if on_ruler || moved || st.was_on_ruler {
         st.active_at = Some(Instant::now());
     }
+    st.was_on_ruler = on_ruler;
+    // While the pointer rests on the ruler the chip stays as it is: nothing needs redrawing.
     let alpha = if on_ruler {
         1.0
     } else {
         st.active_at.map_or(0.0, |t| {
-            let left = CHIP_FOR.saturating_sub(t.elapsed());
-            (left.as_secs_f32() / CHIP_FADE.as_secs_f32()).min(1.0)
+            fade_opacity(ui.ctx(), t.elapsed(), CHIP_FOR, CHIP_FADE)
         })
     };
     if alpha <= 0.0 {
         return;
     }
-    ui.ctx().request_repaint_after(Duration::from_millis(30));
     let frac = pointer
         .at
         .filter(|_| on_ruler)
@@ -322,33 +356,22 @@ fn chip(
     };
     let y = track.top() + frac * track.height();
     let pos = egui::pos2(rect.right() - CHIP_INSET, y);
-    egui::Area::new(ui.make_persistent_id("timeline-ruler-chip"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(pos)
-        .pivot(Align2::RIGHT_CENTER)
-        .interactable(false)
-        .show(ui.ctx(), |ui| {
-            ui.set_opacity(alpha);
-            draw_chip(ui, &text);
-        });
+    pill_chip(
+        ui.ctx(),
+        ui.make_persistent_id("timeline-ruler-chip"),
+        pos,
+        Align2::RIGHT_CENTER,
+        alpha,
+        |ui, pal| {
+            ui.label(egui::RichText::new(text).size(11.5).color(pal.pilltext));
+        },
+    );
 }
 
 /// What the chip says for the point `frac` of the ruler.
 fn chip_text(st: &RulerState, frac: f32, date_at: &dyn Fn(f32) -> Option<Month>) -> Option<String> {
     match st.mapping.as_ref()? {
         Mapping::Time(t) => Some(t.month_at(frac).name()),
-        Mapping::Flat => date_at(frac).map(Month::name),
+        Mapping::Flat | Mapping::Dated(_) => date_at(frac).map(Month::name),
     }
-}
-
-fn draw_chip(ui: &mut egui::Ui, text: &str) {
-    let pal = Palette::of(ui.ctx());
-    egui::Frame::new()
-        .fill(pal.pill)
-        .corner_radius(egui::CornerRadius::same(12))
-        .inner_margin(egui::Margin::symmetric(10, 4))
-        .shadow(ui.ctx().global_style().visuals.popup_shadow)
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(11.5).color(pal.pilltext));
-        });
 }

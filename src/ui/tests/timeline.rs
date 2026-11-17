@@ -119,7 +119,7 @@ fn the_on_this_day_banner_opens_the_viewer_on_its_own_list() {
     let mut h = album_harness(&app);
     h.get_by_label("On this day");
     // The newest of them is from 2019.
-    h.get_by_label("15 March, 7 years ago");
+    h.get_by_label("15 March over the years");
     h.get_by_label("See 20 photos").click();
     h.run_steps(3);
     // March 2019 is img10 in `spread_items` (Dec = 1).
@@ -167,4 +167,70 @@ fn there_is_no_on_this_day_banner_without_photos_from_that_day() {
     let h = album_harness(&app);
     assert!(h.query_by_label("On this day").is_none());
     assert!(h.query_by_label_contains("See ").is_none());
+}
+
+#[test]
+fn the_on_this_day_banner_names_one_year_when_all_photos_are_from_it() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut items = spread_items();
+    // Only 2019 has a photo on 15 March; the rest are moved off that day.
+    for it in &mut items {
+        if it.taken_at < titem(0, 2019, 1, 1).taken_at {
+            it.taken_at += 86_400;
+        }
+    }
+    app.borrow_mut().inject_timeline(items);
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("15 March, 7 years ago");
+    h.get_by_label("See 1 photo").click();
+    h.run_steps(3);
+    h.get_by_label("1 of 1");
+}
+
+#[test]
+fn the_on_this_day_count_is_what_the_viewer_opens() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    // More photos of one day than the old limit of 30, all in one year.
+    let items: Vec<_> = (0..45)
+        .map(|n| {
+            let mut it = titem(n + 1, 2019, 3, 15);
+            it.taken_at += n;
+            it
+        })
+        .collect();
+    app.borrow_mut().inject_timeline(items);
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("15 March, 7 years ago");
+    h.get_by_label("See 45 photos").click();
+    h.run_steps(3);
+    h.get_by_label("1 of 45");
+}
+
+#[test]
+fn photos_shows_that_it_is_loading_while_a_load_is_pending() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    {
+        let mut a = app.borrow_mut();
+        a.tl.view = View::Favorites;
+        a.inject_timeline(Vec::new());
+        // A load is on its way (the answer never comes in this test).
+        let filter = a.tl.filter();
+        a.tl.awaiting = Some((u64::MAX, filter));
+    }
+    // The spinner never rests, so the frames are stepped by hand.
+    let shown = Rc::clone(&app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    h.run_steps(3);
+    h.get_by_label("Loading…");
+    // Once the load is over, it gives way to the empty state.
+    app.borrow_mut().tl.awaiting = None;
+    h.run_steps(3);
+    assert!(h.query_by_label("Loading…").is_none());
 }

@@ -163,11 +163,10 @@ pub struct App {
     snapshot: Snapshot,
     snapshot_read: BgRead<Snapshot>,
     /// Folders that cannot be read now (an unplugged drive), found by a background check that
-    /// runs when the folders change and then every half minute.
+    /// runs when the folders change and then every half minute (less often while nothing changes).
     missing_folders: Vec<i64>,
     folder_check: BgRead<Vec<i64>>,
-    /// The folders the last check was started for, and when.
-    folders_checked: Option<(Vec<i64>, Instant)>,
+    folder_watch: snapshot::FolderWatch,
     /// When the photo size last changed and whether it is saved.
     size_change: photo_size::SizeChange,
     ctx: egui::Context,
@@ -229,7 +228,7 @@ impl Workers {
         });
         let folder_check = BgRead::new(ctx, "folder-check", {
             let lib = Arc::clone(lib);
-            move || snapshot::missing_folders(&lib)
+            snapshot::folder_check_job(lib)
         });
         Self {
             search,
@@ -290,7 +289,7 @@ impl App {
             snapshot_read: w.snapshot_read,
             missing_folders: Vec::new(),
             folder_check: w.folder_check,
-            folders_checked: None,
+            folder_watch: snapshot::FolderWatch::default(),
             size_change: photo_size::SizeChange::default(),
             ctx: ctx.clone(),
             status: Status::default(),

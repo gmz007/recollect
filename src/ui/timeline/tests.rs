@@ -350,13 +350,14 @@ fn on_this_day_lists_earlier_years_newest_first() {
 #[test]
 fn on_this_day_is_capped_and_ignores_the_list_order() {
     let today = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
-    // 40 earlier years on the same day, oldest first.
-    let items: Vec<_> = (1980..2020).map(|y| item(ts(y, 7, 4, 12, 0, 0))).collect();
+    // Many photos on the same day of one year each, oldest first.
+    let items: Vec<_> = (0..ON_THIS_DAY_MAX + 20)
+        .map(|n| item(ts(2019, 7, 4, 0, 0, 0) + n as i64))
+        .collect();
     let got = on_this_day(&items, today);
     assert_eq!(got.len(), ON_THIS_DAY_MAX);
-    assert_eq!(items[got[0].index].taken_at, ts(2019, 7, 4, 12, 0, 0));
+    assert_eq!(got[0].index, ON_THIS_DAY_MAX + 19);
     assert_eq!(got[0].years_ago, 7);
-    assert_eq!(got.last().unwrap().years_ago, 7 + 29);
 }
 
 #[test]

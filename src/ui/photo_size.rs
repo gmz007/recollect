@@ -2,10 +2,10 @@
 //! wheel, and Ctrl/Cmd with `=`, `-` and `0` change it; a small "Photo size" chip shows the
 //! level while it changes. Settings has the same choice as Small, Medium and Large.
 
-use super::style::Palette;
+use super::style::{Palette, fade_opacity, pill_chip};
 use super::{App, TOP_BAR_HEIGHT};
 use crate::config::{PHOTO_SIZE_DEFAULT, PHOTO_SIZE_MAX, PHOTO_SIZE_MIN, clamp_photo_size};
-use egui::{CornerRadius, Margin, Vec2};
+use egui::{CornerRadius, Vec2};
 use std::time::{Duration, Instant};
 
 /// The sizes the keys step through.
@@ -198,23 +198,20 @@ impl App {
             }
             return;
         }
-        let left = CHIP_FOR.saturating_sub(age);
-        let alpha = (left.as_secs_f32() / CHIP_FADE.as_secs_f32()).min(1.0);
+        let alpha = fade_opacity(ctx, age, CHIP_FOR, CHIP_FADE);
         let x = self
             .pill_anchor
             .map_or_else(|| ctx.content_rect().center().x, |a| a.x);
         let pos = egui::pos2(x, TOP_BAR_HEIGHT + CHIP_TOP);
         let level = (self.tl.tile_size - PHOTO_SIZE_MIN) / (PHOTO_SIZE_MAX - PHOTO_SIZE_MIN);
-        egui::Area::new(egui::Id::unique("photo-size-chip"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .pivot(egui::Align2::CENTER_TOP)
-            .interactable(false)
-            .show(ctx, |ui| {
-                ui.set_opacity(alpha);
-                draw_chip(ui, level);
-            });
-        ctx.request_repaint_after(Duration::from_millis(30));
+        pill_chip(
+            ctx,
+            egui::Id::NULL.with("photo-size-chip"),
+            pos,
+            egui::Align2::CENTER_TOP,
+            alpha,
+            |ui, pal| draw_chip(ui, pal, level),
+        );
     }
 
     /// Whether the chip is gone (tests wait for it to fade).
@@ -233,31 +230,24 @@ impl App {
     }
 }
 
-/// The chip: "Photo size" and a bar that shows where the size is between smallest and largest.
-fn draw_chip(ui: &mut egui::Ui, level: f32) {
-    let pal = Palette::of(ui.ctx());
-    egui::Frame::new()
-        .fill(pal.pill)
-        .corner_radius(CornerRadius::same(14))
-        .inner_margin(Margin::symmetric(14, 6))
-        .shadow(ui.ctx().global_style().visuals.popup_shadow)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                ui.label(
-                    egui::RichText::new("Photo size")
-                        .size(12.0)
-                        .color(pal.pilltext),
-                );
-                let (rect, _) = ui.allocate_exact_size(BAR, egui::Sense::hover());
-                let round = CornerRadius::same(2);
-                ui.painter()
-                    .rect_filled(rect, round, pal.pilltext.gamma_multiply(0.3));
-                let mut filled = rect;
-                filled.max.x = rect.min.x + rect.width() * level.clamp(0.0, 1.0);
-                ui.painter().rect_filled(filled, round, pal.pilltext);
-            });
-        });
+/// The contents of the chip: "Photo size" and a bar that shows where the size is between
+/// smallest and largest.
+fn draw_chip(ui: &mut egui::Ui, pal: &Palette, level: f32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.label(
+            egui::RichText::new("Photo size")
+                .size(12.0)
+                .color(pal.pilltext),
+        );
+        let (rect, _) = ui.allocate_exact_size(BAR, egui::Sense::hover());
+        let round = CornerRadius::same(2);
+        ui.painter()
+            .rect_filled(rect, round, pal.pilltext.gamma_multiply(0.3));
+        let mut filled = rect;
+        filled.max.x = rect.min.x + rect.width() * level.clamp(0.0, 1.0);
+        ui.painter().rect_filled(filled, round, pal.pilltext);
+    });
 }
 
 #[cfg(test)]
