@@ -450,8 +450,8 @@ fn visible_text(h: &Harness<'_>) -> Vec<String> {
 fn banned_words_in(texts: &[String]) -> Vec<String> {
     let mut found = Vec::new();
     for t in texts {
-        // File system paths are shown as they are (Settings > Storage).
-        if t.starts_with('/') {
+        // File system paths are shown as they are (Settings > Storage), on Windows too.
+        if std::path::Path::new(t).is_absolute() {
             continue;
         }
         for word in t

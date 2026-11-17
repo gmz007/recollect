@@ -116,10 +116,7 @@ fn empty_mount_point_keeps_the_index_and_missing_files_stay_pending() {
         .unwrap();
     }
     let sum = crate::indexer::run(&lib).unwrap();
-    assert_eq!(
-        sum.skipped_folders,
-        vec![std::fs::canonicalize(&media).unwrap()]
-    );
+    assert_eq!(sum.skipped_folders, vec![canonical_path(&media).unwrap()]);
     assert_eq!(lib.stats().unwrap().indexed, 1, "index kept");
 
     // A file that vanishes between scan and decode is not marked as failed.

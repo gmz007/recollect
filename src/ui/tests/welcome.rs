@@ -188,8 +188,8 @@ fn continuing_without_ticks_adds_nothing_and_ticked_folders_are_added_exactly() 
     let mut got: Vec<_> = lib.folders().unwrap().into_iter().map(|f| f.path).collect();
     got.sort();
     let mut want = vec![
-        std::fs::canonicalize(pictures.path()).unwrap(),
-        std::fs::canonicalize(desktop.path()).unwrap(),
+        crate::library::canonical_path(pictures.path()).unwrap(),
+        crate::library::canonical_path(desktop.path()).unwrap(),
     ];
     want.sort();
     assert_eq!(got, want);
