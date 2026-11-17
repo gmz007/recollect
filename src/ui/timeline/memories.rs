@@ -88,7 +88,7 @@ impl App {
         ui.label(RichText::new("On this day").text_style(style::section()));
         ui.add_space(4.0);
         let mut open = None;
-        let mut star = None;
+        let mut heart = None;
         egui::ScrollArea::horizontal()
             .id_salt("on-this-day")
             .auto_shrink([false, true])
@@ -97,14 +97,14 @@ impl App {
                     ui.spacing_mut().item_spacing.x = GAP;
                     for (pos, e) in entries.iter().enumerate() {
                         match self.on_this_day_entry(ui, pos, e) {
-                            Some(TileEvent::Star) => star = Some(e.index),
+                            Some(TileEvent::Heart) => heart = Some(e.index),
                             Some(_) => open = Some(pos),
                             None => {}
                         }
                     }
                 });
             });
-        if let Some(i) = star {
+        if let Some(i) = heart {
             let it = &self.tl.items[i];
             self.toggle_favorite(it.file_id, it.favorite);
         }

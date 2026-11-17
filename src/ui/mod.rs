@@ -156,6 +156,8 @@ pub struct App {
     /// Bottom centre of the grid area, where the selection bar and confirmations float
     /// (set while a grid is drawn, used once per frame).
     pill_anchor: Option<egui::Pos2>,
+    /// Where the selection bar was drawn this frame, if it was (a toast then floats above it).
+    bar_anchor: Option<egui::Pos2>,
     snapshot: Snapshot,
     snapshot_read: BgRead<Snapshot>,
     ctx: egui::Context,
@@ -267,6 +269,7 @@ impl App {
             notices: Notices::default(),
             silent_album_writes: HashSet::new(),
             pill_anchor: None,
+            bar_anchor: None,
             snapshot: Snapshot::default(),
             snapshot_read: w.snapshot_read,
             ctx: ctx.clone(),

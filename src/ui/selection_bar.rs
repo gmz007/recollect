@@ -92,10 +92,12 @@ impl App {
             in_album,
             all_favorite,
         };
+        self.bar_anchor = self.pill_anchor;
         let ctx = ui.ctx().clone();
-        if let Some(a) = toast::pill_area(&ctx, bar_id(&state), self.pill_anchor, |ui| {
-            selection_bar(ui, &state)
-        }) {
+        let id = egui::Id::unique("selection-bar");
+        if let Some(a) =
+            toast::pill_area(&ctx, id, self.pill_anchor, |ui| selection_bar(ui, &state)).inner
+        {
             self.bulk_action(a);
         }
     }
@@ -122,14 +124,4 @@ impl App {
             BulkAction::Clear => self.clear_selection(),
         }
     }
-}
-
-/// The selection bar's area changes with what changes its width (see [`toast::pill_area`]).
-fn bar_id(state: &BarState<'_>) -> egui::Id {
-    egui::Id::unique((
-        "selection-bar",
-        state.count,
-        state.in_album,
-        state.all_favorite,
-    ))
 }

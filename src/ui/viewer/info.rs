@@ -54,14 +54,15 @@ impl Viewer {
     }
 }
 
-/// The file's name (with a star when it is a favorite) and, below it, its folder's name; the
+/// The file's name (with a heart when it is a favorite) and, below it, its folder's name; the
 /// whole path shows on hover.
 fn info_heading(ui: &mut egui::Ui, e: &ViewerEntry) {
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(e.name()).strong());
         if e.favorite {
             ui.label(
-                style::icon_text(icons::ICON_STAR, 16.0).color(style::Palette::of(ui.ctx()).text),
+                style::icon_text(icons::ICON_FAVORITE, 16.0)
+                    .color(style::Palette::of(ui.ctx()).text),
             );
         }
     });

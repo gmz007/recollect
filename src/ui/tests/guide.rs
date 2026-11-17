@@ -86,6 +86,12 @@ fn the_activity_card_describes_what_is_happening() {
     h.get_by_label("Looking for new photos…");
     h.get_by_label("Pause");
     h.get_by_label("Stop");
+    // Paused work says so in the foot, not only in the details.
+    lib.update_status(|s| s.paused = true);
+    h.run_steps(2);
+    h.get_by_label("Progress: Paused — Looking for new photos…");
+    lib.update_status(|s| s.paused = false);
+    h.run_steps(2);
     show(
         &mut h,
         Activity::ReadingDates {
@@ -165,7 +171,7 @@ fn help_has_a_section_for_each_question() {
         ),
         ("Searching", "Narrow the results", "When"),
         ("Searching", "Moments in videos", "at 1:23"),
-        ("Organizing", "Favorites", "star"),
+        ("Organizing", "Favorites", "heart"),
         ("Organizing", "Albums", "Add to album"),
         ("Organizing", "Selecting several photos", "circle"),
         ("Keyboard shortcuts", "Arrow keys", "Move between photos"),
@@ -518,7 +524,7 @@ fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
         ),
         (
             EmptyView::Favorites,
-            "Click the star on any photo to add it here.",
+            "Click the heart on any photo to add it here.",
             "Go to Photos",
         ),
         (

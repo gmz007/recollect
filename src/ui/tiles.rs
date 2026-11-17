@@ -1,5 +1,5 @@
 //! Photo and video tiles for the grids: a square centre-cropped thumbnail with a selection
-//! circle (top left) and a favorite star (bottom left) that appear on hover, and a duration pill
+//! circle (top left) and a favorite heart (bottom left) that appear on hover, and a duration pill
 //! on videos.
 
 use super::selection::ClickMods;
@@ -8,17 +8,17 @@ use super::workers::ThumbCache;
 use crate::thumbs::ThumbKey;
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 
-/// Size of the clickable areas of the circle and the star.
+/// Size of the clickable areas of the circle and the heart.
 const ZONE: f32 = 34.0;
-/// Radius of the selection circle and of the dark disc behind the star.
+/// Radius of the selection circle and of the dark disc behind the heart.
 const CIRCLE_RADIUS: f32 = 11.0;
-const STAR_DISC_RADIUS: f32 = 12.0;
-/// Size of the check mark and of the star.
+const HEART_DISC_RADIUS: f32 = 12.0;
+/// Size of the check mark and of the heart.
 const CHECK_SIZE: f32 = 16.0;
-const STAR_SIZE: f32 = 18.0;
-/// Opacity (0-255) of the dark discs behind the circle and the star.
+const HEART_SIZE: f32 = 18.0;
+/// Opacity (0-255) of the dark discs behind the circle and the heart.
 const CIRCLE_DISC_ALPHA: u8 = 70;
-const STAR_DISC_ALPHA: u8 = 90;
+const HEART_DISC_ALPHA: u8 = 90;
 /// The shades at the top and bottom edge while hovered: height and opacity at the edge.
 const SHADE_HEIGHT: f32 = 64.0;
 const SHADE_ALPHA: u8 = 105;
@@ -118,8 +118,8 @@ pub(super) enum TileEvent {
     Click,
     /// Click on the selection circle.
     Circle,
-    /// Click on the star.
-    Star,
+    /// Click on the heart.
+    Heart,
 }
 
 pub(super) struct TileOut {
@@ -144,7 +144,7 @@ pub(super) enum ClickPlan {
 /// range.
 pub(super) fn click_plan(event: TileEvent, mods: ClickMods, picking: bool) -> ClickPlan {
     match event {
-        TileEvent::Star => ClickPlan::Favorite,
+        TileEvent::Heart => ClickPlan::Favorite,
         TileEvent::Click if mods.is_plain() && !picking => ClickPlan::Open,
         _ if mods.range => ClickPlan::Select {
             mods: ClickMods {
@@ -202,16 +202,16 @@ pub(super) fn show(
     let resp = ui.interact(rect, id, Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
     let small = rect.width() < 72.0;
-    let (circle, star) = interact_zones(ui, id, rect, tile, small);
-    describe_zones(tile, small, &resp, &circle, &star);
+    let (circle, heart) = interact_zones(ui, id, rect, tile, small);
+    describe_zones(tile, small, &resp, &circle, &heart);
 
     if ui.is_rect_visible(rect) {
         paint(ui, thumbs, rect, tile, hovered, small, &pal);
     }
 
-    let event = click_event(ui, &resp, &circle, &star);
+    let event = click_event(ui, &resp, &circle, &heart);
     // The zones of small tiles are not drawn and take no clicks, so they are no controls.
-    let over_control = !small && ((tile.selectable && circle.hovered()) || star.hovered());
+    let over_control = !small && ((tile.selectable && circle.hovered()) || heart.hovered());
     if hovered && (over_control || resp.hovered()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -225,7 +225,7 @@ pub(super) fn show(
     TileOut { resp, event }
 }
 
-/// The areas of the selection circle and of the star.
+/// The areas of the selection circle and of the heart.
 fn interact_zones(
     ui: &egui::Ui,
     id: egui::Id,
@@ -234,9 +234,9 @@ fn interact_zones(
     small: bool,
 ) -> (egui::Response, egui::Response) {
     let circle_zone = Rect::from_min_size(rect.min, Vec2::splat(ZONE));
-    let star_zone =
+    let heart_zone =
         Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - ZONE), Vec2::splat(ZONE));
-    // The circle and the star are not drawn on small tiles, so their zones must not take
+    // The circle and the heart are not drawn on small tiles, so their zones must not take
     // clicks there either: the click then goes to the tile itself.
     let circle_sense = if tile.selectable && !small {
         Sense::click()
@@ -244,23 +244,23 @@ fn interact_zones(
         Sense::hover()
     };
     let circle = ui.interact(circle_zone, id.with("select"), circle_sense);
-    let star_sense = if small {
+    let heart_sense = if small {
         Sense::hover()
     } else {
         Sense::click()
     };
-    let star = ui.interact(star_zone, id.with("favorite"), star_sense);
-    (circle, star)
+    let heart = ui.interact(heart_zone, id.with("favorite"), heart_sense);
+    (circle, heart)
 }
 
-/// What assistive technology reads for the circle, the star and the tile itself. Small tiles
-/// draw neither the circle nor the star, so only the tile is described there.
+/// What assistive technology reads for the circle, the heart and the tile itself. Small tiles
+/// draw neither the circle nor the heart, so only the tile is described there.
 fn describe_zones(
     tile: &Tile<'_>,
     small: bool,
     resp: &egui::Response,
     circle: &egui::Response,
-    star: &egui::Response,
+    heart: &egui::Response,
 ) {
     if tile.selectable && !small {
         circle.widget_info(|| {
@@ -270,7 +270,7 @@ fn describe_zones(
         });
     }
     if !small {
-        star.widget_info(|| {
+        heart.widget_info(|| {
             let name = (tile.name)();
             let label = if tile.favorite {
                 format!("Remove {name} from favorites")
@@ -291,17 +291,17 @@ fn describe_zones(
     });
 }
 
-/// The click on the circle, the star or the picture, if there was one this frame.
+/// The click on the circle, the heart or the picture, if there was one this frame.
 fn click_event(
     ui: &egui::Ui,
     resp: &egui::Response,
     circle: &egui::Response,
-    star: &egui::Response,
+    heart: &egui::Response,
 ) -> Option<(TileEvent, ClickMods)> {
     if circle.clicked() {
         Some((TileEvent::Circle, ClickMods::of_click(ui.ctx())))
-    } else if star.clicked() {
-        Some((TileEvent::Star, ClickMods::default()))
+    } else if heart.clicked() {
+        Some((TileEvent::Heart, ClickMods::default()))
     } else if resp.clicked() {
         Some((TileEvent::Click, ClickMods::of_click(ui.ctx())))
     } else {
@@ -360,7 +360,7 @@ fn paint(
         paint_select_circle(&painter, rect, tile.checked(), pal);
     }
     if !small && (tile.favorite || hovered) {
-        paint_star(&painter, rect, tile.favorite);
+        paint_heart(&painter, rect, tile.favorite);
     }
     if let Some(text) = &tile.badge {
         paint_pill(&painter, rect, text);
@@ -388,7 +388,7 @@ fn paint_picture(
     }
 }
 
-/// Soft shades at the top and bottom keep the circle, the star and the time readable on
+/// Soft shades at the top and bottom keep the circle, the heart and the time readable on
 /// bright photos, without a visible edge.
 fn paint_shades(painter: &egui::Painter, rect: Rect) {
     for top in [true, false] {
@@ -418,31 +418,20 @@ fn paint_select_circle(painter: &egui::Painter, rect: Rect, checked: bool, pal: 
     }
 }
 
-/// The star at the bottom left: filled for a favorite, an outline while hovered otherwise.
-fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool) {
-    let c = star_center(rect);
+/// The heart at the bottom left: filled for a favorite, an outline while hovered otherwise.
+fn paint_heart(painter: &egui::Painter, rect: Rect, favorite: bool) {
+    let c = heart_center(rect);
     painter.circle_filled(
         c,
-        STAR_DISC_RADIUS,
-        Color32::from_black_alpha(STAR_DISC_ALPHA),
+        HEART_DISC_RADIUS,
+        Color32::from_black_alpha(HEART_DISC_ALPHA),
     );
-    if favorite {
-        paint_icon(
-            painter,
-            c,
-            icons::ICON_STAR,
-            STAR_SIZE,
-            style::OVERLAY_WHITE,
-        );
+    let icon = if favorite {
+        icons::ICON_FAVORITE
     } else {
-        paint_icon(
-            painter,
-            c,
-            icons::ICON_STAR.outlined(),
-            STAR_SIZE,
-            Color32::WHITE,
-        );
-    }
+        icons::ICON_FAVORITE.outlined()
+    };
+    paint_icon(painter, c, icon, HEART_SIZE, style::OVERLAY_WHITE);
 }
 
 /// The ring around a checked tile (thick) or the tile the keyboard is on (thin).
@@ -500,7 +489,7 @@ fn circle_center(rect: Rect) -> Pos2 {
     rect.min + Vec2::splat(ZONE / 2.0)
 }
 
-fn star_center(rect: Rect) -> Pos2 {
+fn heart_center(rect: Rect) -> Pos2 {
     Pos2::new(rect.min.x + ZONE / 2.0, rect.max.y - ZONE / 2.0)
 }
 
@@ -549,7 +538,7 @@ mod tests {
         };
         assert_eq!(click_plan(TileEvent::Click, plain, false), ClickPlan::Open);
         assert_eq!(
-            click_plan(TileEvent::Star, plain, false),
+            click_plan(TileEvent::Heart, plain, false),
             ClickPlan::Favorite
         );
         // The circle starts a fresh selection, then adds to it.
@@ -656,6 +645,6 @@ mod tests {
 
     #[test]
     fn the_corner_of_a_large_tile_still_clicks_the_star() {
-        assert_eq!(corner_click(120.0), Some(TileEvent::Star));
+        assert_eq!(corner_click(120.0), Some(TileEvent::Heart));
     }
 }

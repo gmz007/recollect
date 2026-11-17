@@ -1,6 +1,6 @@
 //! Drawing the grid of the current view and handling clicks and keys in it.
 
-use super::dates::{date_of, fmt_taken, header_text, until_next_midnight};
+use super::dates::{fmt_taken, header_text, until_next_midnight};
 use super::layout::{HEADER_H, Layout, Row, reveal};
 use super::{TimelineState, View, file_name, thumb_key};
 use crate::media::MediaKind;
@@ -11,7 +11,6 @@ use crate::ui::style::{self, GAP};
 use crate::ui::tiles::{self, Tile, TileEvent, TileMark};
 use crate::ui::workers::ThumbCache;
 use crate::ui::{App, ClickOutcome, FavMark, GridEvents, fmt_time, marked};
-use chrono::Datelike;
 use egui::{RichText, Sense, Vec2};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -120,7 +119,7 @@ impl App {
     pub(in crate::ui) fn timeline_view(&mut self, ui: &mut egui::Ui) {
         // Until items for the selected view arrive, show a spinner rather than the previous
         // view's items laid out under the new view's rules.
-        let wanted = self.tl.filter(self.kind);
+        let wanted = self.tl.filter();
         if !self.tl.loaded || !self.tl.matches(&wanted) {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() * 0.3);
@@ -174,10 +173,6 @@ impl App {
             events = rows.show(ui, &mut self.thumbs, viewport);
         });
         self.tl.top_item = events.top_item;
-        self.tl.top_year = events
-            .top_item
-            .and_then(|i| self.tl.items.get(i))
-            .map(|it| date_of(it.taken_at).year());
         self.follow_keyboard_selection(ui, &out);
         if self.tl.pending.is_some() {
             ui.ctx().request_repaint();

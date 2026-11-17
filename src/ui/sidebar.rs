@@ -311,9 +311,35 @@ fn short_label(a: &Activity) -> &'static str {
     }
 }
 
+/// Whether the user can pause what the activity is doing.
+fn is_pausable(a: &Activity) -> bool {
+    matches!(
+        a,
+        Activity::Scanning { .. }
+            | Activity::ReadingDates { .. }
+            | Activity::LoadingModel
+            | Activity::Indexing(_)
+    )
+}
+
+/// The foot's label: "Paused" while the work is paused, else what is going on.
+fn row_label(a: &Activity, paused: bool) -> &'static str {
+    if paused && is_pausable(a) {
+        "Paused"
+    } else {
+        short_label(a)
+    }
+}
+
 /// A small ring: the `ring` track with an accent arc for `fraction`, or a turning arc when the
-/// progress is not known.
-fn paint_progress_ring(ui: &egui::Ui, centre: Pos2, radius: f32, fraction: Option<f32>) {
+/// progress is not known (and the work is not paused).
+fn paint_progress_ring(
+    ui: &egui::Ui,
+    centre: Pos2,
+    radius: f32,
+    fraction: Option<f32>,
+    paused: bool,
+) {
     let pal = Palette::of(ui.ctx());
     let width = 2.5;
     ui.painter()
@@ -324,8 +350,12 @@ fn paint_progress_ring(ui: &egui::Ui, centre: Pos2, radius: f32, fraction: Optio
             f.clamp(0.0, 1.0) * std::f32::consts::TAU,
         )
     } else {
-        ui.ctx().request_repaint();
-        let t = ui.input(|i| i.time) as f32;
+        let t = if paused {
+            0.0
+        } else {
+            ui.ctx().request_repaint();
+            ui.input(|i| i.time) as f32
+        };
         (t * std::f32::consts::TAU, std::f32::consts::PI * 0.75)
     };
     let steps = 32;
@@ -536,17 +566,19 @@ impl App {
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(style::CONTROL_RADIUS), pal.hover);
         }
+        let paused = self.status.paused && is_pausable(&self.status.activity);
         paint_progress_ring(
             ui,
             Pos2::new(rect.min.x + 20.0, rect.center().y),
             7.5,
             fraction,
+            paused,
         );
         let font = egui::TextStyle::Body.resolve(ui.style());
         ui.painter().text(
             Pos2::new(rect.min.x + LABEL_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            short_label(&self.status.activity),
+            row_label(&self.status.activity, paused),
             font.clone(),
             pal.text2,
         );
@@ -559,7 +591,11 @@ impl App {
                 pal.muted,
             );
         }
-        let accessible = format!("Progress: {text}");
+        let accessible = if paused {
+            format!("Progress: Paused — {text}")
+        } else {
+            format!("Progress: {text}")
+        };
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &accessible));
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         egui::Popup::from_toggle_button_response(&resp)
@@ -571,13 +607,7 @@ impl App {
     /// What is going on in words, with Pause and Stop.
     fn activity_details(&mut self, ui: &mut egui::Ui, text: &str, fraction: Option<f32>) {
         let downloading = matches!(self.status.activity, Activity::Downloading { .. });
-        let pausable = matches!(
-            self.status.activity,
-            Activity::Scanning { .. }
-                | Activity::ReadingDates { .. }
-                | Activity::LoadingModel
-                | Activity::Indexing(_)
-        );
+        let pausable = is_pausable(&self.status.activity);
         let paused = self.status.paused;
         let shown = if paused && pausable {
             format!("Paused — {text}")
@@ -628,6 +658,15 @@ mod tests {
     #[test]
     fn activity_is_described_in_plain_words() {
         assert_eq!(activity_text(&Activity::Idle), None);
+        assert_eq!(row_label(&Activity::LoadingModel, true), "Paused");
+        assert_eq!(row_label(&Activity::LoadingModel, false), "Getting ready");
+        // A download cannot be paused, so the flag does not change its label.
+        let dl = Activity::Downloading {
+            done: 0,
+            total: 1,
+            model: String::new(),
+        };
+        assert_eq!(row_label(&dl, true), "Downloading");
         let scanning = Activity::Scanning {
             folder: "/x".into(),
         };

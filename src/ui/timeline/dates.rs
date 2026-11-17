@@ -1,11 +1,10 @@
-//! Dates as the album shows them: section keys and headings, the year and month index,
+//! Dates as the album shows them: section keys and headings,
 //! and how a capture time is written out.
 
 use super::Group;
 use crate::media::metadata::DateSource;
 use crate::store::db::TimelineItem;
 use chrono::{Datelike, NaiveDate};
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub(super) fn date_of(taken_at: i64) -> NaiveDate {
@@ -57,54 +56,6 @@ pub fn header_text(group: Group, key: i64, count: usize) -> String {
 }
 
 /// Years (newest first) with their months, for the date navigator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct YearEntry {
-    pub year: i32,
-    pub count: usize,
-    /// Index of the year's first item in display order.
-    pub first: usize,
-    pub months: Vec<MonthEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonthEntry {
-    pub month: u32,
-    pub count: usize,
-    pub first: usize,
-}
-
-pub fn date_index(items: &[TimelineItem]) -> Vec<YearEntry> {
-    let mut by_month: BTreeMap<(i32, u32), (usize, usize)> = BTreeMap::new();
-    for (i, it) in items.iter().enumerate() {
-        let d = date_of(it.taken_at);
-        let e = by_month.entry((d.year(), d.month())).or_insert((0, i));
-        e.0 += 1;
-        e.1 = e.1.min(i);
-    }
-    let mut years: Vec<YearEntry> = Vec::new();
-    for (&(year, month), &(count, first)) in by_month.iter().rev() {
-        let m = MonthEntry {
-            month,
-            count,
-            first,
-        };
-        match years.last_mut() {
-            Some(y) if y.year == year => {
-                y.count += count;
-                y.first = y.first.min(first);
-                y.months.push(m);
-            }
-            _ => years.push(YearEntry {
-                year,
-                count,
-                first,
-                months: vec![m],
-            }),
-        }
-    }
-    years
-}
-
 pub(super) fn fmt_taken(item: &TimelineItem) -> String {
     fmt_taken_at(item.taken_at, Some(item.date_source))
 }

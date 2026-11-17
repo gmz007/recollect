@@ -234,6 +234,13 @@ pub fn icon_label_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> 
     r
 }
 
+/// `color` moved `amount` (0 to 1) of the way toward black, still opaque when it was.
+fn darken(color: Color32, amount: f32) -> Color32 {
+    let keep = 1.0 - amount;
+    let dim = |c: u8| (f32::from(c) * keep).round() as u8;
+    Color32::from_rgba_unmultiplied(dim(color.r()), dim(color.g()), dim(color.b()), color.a())
+}
+
 /// The one main button of a screen: accent fill, no border, a little darker on hover.
 /// Named `label` for assistive technology.
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> Response {
@@ -242,8 +249,8 @@ pub fn primary_button(ui: &mut egui::Ui, label: &str) -> Response {
         .scope(|ui| {
             let w = &mut ui.visuals_mut().widgets;
             w.inactive.weak_bg_fill = pal.accent;
-            w.hovered.weak_bg_fill = pal.accent.gamma_multiply(0.88);
-            w.active.weak_bg_fill = pal.accent.gamma_multiply(0.78);
+            w.hovered.weak_bg_fill = darken(pal.accent, 0.12);
+            w.active.weak_bg_fill = darken(pal.accent, 0.22);
             let b =
                 egui::Button::new(medium(label).color(pal.onaccent)).min_size(Vec2::new(0.0, 32.0));
             ui.add(b)
@@ -429,4 +436,21 @@ fn square_icon_button(
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     r.on_hover_text(tooltip)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_darkened_accent_stays_opaque_and_gets_darker() {
+        for accent in [Palette::light().accent, Palette::dark().accent] {
+            for amount in [0.12, 0.22] {
+                let d = darken(accent, amount);
+                assert_eq!(d.a(), 255);
+                assert!(d.r() < accent.r() && d.g() < accent.g() && d.b() < accent.b());
+            }
+            assert!(darken(accent, 0.22).g() < darken(accent, 0.12).g());
+        }
+    }
 }

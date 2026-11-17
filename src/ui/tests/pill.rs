@@ -159,3 +159,50 @@ fn settle_on_label(h: &mut Harness<'_>, label: &str) {
     }
     panic!("{label:?} not shown in time");
 }
+
+#[test]
+fn the_photo_and_video_choice_of_a_search_does_not_filter_browsing() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = files_app(d.path(), 5);
+    // Videos was chosen in an earlier search; the timeline still lists the photos.
+    app.borrow_mut().kind = Some(crate::media::MediaKind::Video);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 5);
+    app.borrow_mut().kind = Some(crate::media::MediaKind::Image);
+    h.run_steps(3);
+    assert_eq!(app.borrow().tl.items.len(), 5);
+}
+
+#[test]
+fn f1_and_the_settings_shortcut_wait_while_a_dialog_is_open() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = album_harness(&app);
+    app.borrow_mut().dialogs.new_album = Some(crate::ui::albums::NewAlbum::with_items(Vec::new()));
+    h.run_steps(3);
+    h.key_press(egui::Key::F1);
+    h.run_steps(3);
+    h.key_press_modifiers(CTRL, egui::Key::Comma);
+    h.run_steps(3);
+    assert!(!app.borrow().dialogs.help_open);
+    assert!(!app.borrow().dialogs.settings_open);
+    app.borrow_mut().dialogs.new_album = None;
+    h.run_steps(3);
+    h.key_press(egui::Key::F1);
+    settle(&mut h, || app.borrow().dialogs.help_open);
+}
+
+#[test]
+fn a_selection_change_keeps_the_bar_in_the_same_area() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = files_app(d.path(), 5);
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().tl.items.len() == 5);
+    click_with(&mut h, "Item p0.jpg", CTRL);
+    h.get_by_label("1 selected");
+    let areas = |h: &Harness<'_>| h.ctx.memory(|m| m.areas().visible_layer_ids().len());
+    let before = areas(&h);
+    click_with(&mut h, "Item p1.jpg", CTRL);
+    h.get_by_label("2 selected");
+    assert_eq!(areas(&h), before, "no new area per count");
+}

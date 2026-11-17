@@ -1,7 +1,7 @@
 //! Browsing: the timeline, recently added, favorites, per-folder and per-album views.
 //!
 //! Files are loaded in the background (`load`), grouped by capture day, month or year in
-//! memory (`dates`) and laid out as rows (section headers and rows of tiles) with known
+//! memory and laid out as rows (section headers and rows of tiles) with known
 //! vertical offsets (`layout`). Only the rows inside the scroll viewport are drawn (`view`),
 //! found by binary search, so very large libraries stay smooth. `memories` is the "On this
 //! day" strip.
@@ -12,7 +12,7 @@ mod load;
 mod memories;
 mod view;
 
-pub use dates::{DATE_FROM_FILE, YearEntry, date_index, fmt_date, thousands};
+pub use dates::{DATE_FROM_FILE, fmt_date, thousands};
 pub use layout::{GroupSpan, Layout, compute_groups};
 pub use memories::{OnThisDay, on_this_day};
 
@@ -107,7 +107,6 @@ pub(super) struct TimelineState {
     pub(super) generation: u64,
     groups: Vec<GroupSpan>,
     groups_key: Option<(u64, Group, bool)>,
-    pub(super) dates: Vec<YearEntry>,
     /// How many of the loaded items are photos and how many are videos.
     pub(super) n_photos: usize,
     pub(super) n_videos: usize,
@@ -124,7 +123,6 @@ pub(super) struct TimelineState {
     failed: Option<(TimelineFilter, Instant)>,
     pub(super) error: Option<String>,
     pub(super) grid: GridState,
-    top_year: Option<i32>,
     top_item: Option<usize>,
     /// Item to scroll to once the layout is known; `true` aligns to its section header.
     pending: Option<(usize, bool)>,
@@ -143,7 +141,6 @@ impl TimelineState {
             generation: 0,
             groups: Vec::new(),
             groups_key: None,
-            dates: Vec::new(),
             n_photos: 0,
             n_videos: 0,
             layout: None,
@@ -157,7 +154,6 @@ impl TimelineState {
             failed: None,
             error: None,
             grid: GridState::default(),
-            top_year: None,
             top_item: None,
             pending: None,
         }
@@ -189,13 +185,15 @@ impl TimelineState {
         self.otd.as_ref().map_or(&[], |o| o.2.as_slice())
     }
 
-    pub(super) fn filter(&self, kind: Option<MediaKind>) -> TimelineFilter {
+    /// What the current view loads. The photo/video choice of the search results does not apply
+    /// here: browsing always shows everything.
+    pub(super) fn filter(&self) -> TimelineFilter {
         TimelineFilter {
             folder: match self.view {
                 View::Folder(id) => Some(id),
                 _ => None,
             },
-            kind,
+            kind: None,
             favorites_only: self.view == View::Favorites,
             album: match self.view {
                 View::Album(id) => Some(id),
@@ -221,7 +219,6 @@ impl TimelineState {
             .map(|it| it.file_id);
         self.items = Arc::new(items);
         self.generation += 1;
-        self.dates = date_index(&self.items);
         self.recount();
         self.grid.selected = prev.and_then(|f| self.items.iter().position(|it| it.file_id == f));
         // Several selected items stay selected by file id; those that are gone are dropped.
@@ -264,7 +261,6 @@ impl TimelineState {
         Arc::make_mut(&mut self.items).retain(|it| !ids.contains(&it.file_id));
         self.grid.sel.remove_all(ids);
         self.generation += 1;
-        self.dates = date_index(&self.items);
         self.recount();
         let len = self.items.len();
         self.grid.selected = match (primary, sel_shift) {

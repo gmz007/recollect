@@ -5,6 +5,7 @@ use super::notices::Undo;
 use super::style::{self, Palette, icons};
 use super::{App, NoticeAction, Notices};
 use egui::{Align, Layout, RichText};
+use std::time::Instant;
 
 /// Distance between the pill and the bottom edge.
 const PILL_MARGIN: f32 = 20.0;
@@ -21,23 +22,23 @@ struct ToastClicks {
     undo: bool,
 }
 
-/// Shows `add_contents` in a pill that floats at the bottom centre of `anchor` (the area of
-/// the grid; the window's bottom centre when there is none).
+/// Shows `add_contents` in a pill that floats at the bottom centre of `anchor` (the window's
+/// bottom centre when there is none).
 ///
-/// The pill is centred using its size from the frame before, so `id` must change whenever the
-/// contents change width (a new message): a new area is measured once, invisibly, before it
-/// shows, instead of appearing off-centre for a frame.
+/// egui centres the pill using its size from the frame before. When the contents change width
+/// (a new message, another count) the frame is laid out once more with the new size, so the
+/// pill never shows off-centre. `id` stays the same for what the pill stands for.
 pub(super) fn pill_area<R>(
     ctx: &egui::Context,
     id: egui::Id,
     anchor: Option<egui::Pos2>,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
+) -> egui::InnerResponse<R> {
     let pos = anchor.unwrap_or_else(|| {
         let r = ctx.content_rect();
         egui::pos2(r.center().x, r.bottom() - PILL_MARGIN)
     });
-    egui::Area::new(id)
+    let out = egui::Area::new(id)
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::CENTER_BOTTOM)
         .fixed_pos(pos)
@@ -50,31 +51,41 @@ pub(super) fn pill_area<R>(
                         .inner
                 })
                 .inner
-        })
-        .inner
+        });
+    let width_key = id.with("pill-width");
+    let width = out.response.rect.width();
+    let before = ctx.data_mut(|d| {
+        let before = d.get_temp::<f32>(width_key);
+        d.insert_temp(width_key, width);
+        before
+    });
+    if before.is_some_and(|b| (b - width).abs() > 0.5) {
+        ctx.request_discard("pill width changed");
+    }
+    out
 }
 
-/// Where the pill floats: bottom centre of the grid area, [`PILL_MARGIN`] above its edge.
+/// Where the pill floats: the horizontal centre of the grid area, [`PILL_MARGIN`] above the
+/// bottom edge of the window.
 pub(super) fn pill_anchor_of(ui: &egui::Ui) -> egui::Pos2 {
-    let r = ui.max_rect();
-    egui::pos2(r.center().x, r.bottom() - PILL_MARGIN)
+    let bottom = ui.ctx().content_rect().bottom();
+    egui::pos2(ui.max_rect().center().x, bottom - PILL_MARGIN)
 }
 
 impl App {
     /// The current notice as a pill at the bottom of the window.
     pub(super) fn toasts(&mut self, ctx: &egui::Context) {
-        // While the selection bar shows, a plain toast floats just above it.
-        let anchor = self.pill_anchor.take().map(|a| {
-            if self.confirmation_showing() {
-                a
-            } else {
-                egui::pos2(a.x, a.y - style::PILL_HEIGHT - PILL_GAP)
-            }
-        });
+        // While the selection bar is drawn, a plain toast floats just above it.
+        let spot = self.pill_anchor.take();
+        let anchor = match self.bar_anchor.take() {
+            Some(a) => Some(egui::pos2(a.x, a.y - style::PILL_HEIGHT - PILL_GAP)),
+            None => spot,
+        };
         let Some(n) = self.notices.current_notice() else {
+            self.notices.set_hovered(false, Instant::now());
             return;
         };
-        let id = egui::Id::unique(("toast", n.at));
+        let id = egui::Id::unique("toast");
         let (text, error, details, action, undo) = (
             n.text.clone(),
             n.error,
@@ -83,7 +94,7 @@ impl App {
             n.undo.clone(),
         );
         let pal = Palette::of(ctx);
-        let clicks = pill_area(ctx, id, anchor, |ui| {
+        let shown = pill_area(ctx, id, anchor, |ui| {
             ui.set_max_width(TOAST_MAX_WIDTH);
             toast_contents(
                 ui,
@@ -95,6 +106,11 @@ impl App {
                 undo.as_ref(),
             )
         });
+        let hovered = ctx
+            .pointer_hover_pos()
+            .is_some_and(|p| shown.response.rect.contains(p));
+        self.notices.set_hovered(hovered, Instant::now());
+        let clicks = shown.inner;
         if clicks.dismiss || clicks.retry.is_some() || clicks.undo {
             self.notices.dismiss_current();
         }
@@ -152,7 +168,7 @@ fn toast_contents(
     }
     if undo.is_some() {
         ui.label(RichText::new("·").color(pal.pilltext.gamma_multiply(0.6)));
-        let b = ui.add(egui::Button::new(style::semibold("Undo")));
+        let b = ui.add(egui::Button::new(style::medium("Undo")).frame_when_inactive(false));
         b.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Undo"));
         clicks.undo = b.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
     } else if style::icon_button(ui, icons::ICON_CLOSE, "Dismiss").clicked() {

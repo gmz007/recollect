@@ -7,7 +7,7 @@ use anyhow::Result;
 #[cfg(test)]
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Sender};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 /// Work for the library writer thread.
@@ -297,18 +297,7 @@ impl Library {
                 changed_files: Vec::new(),
                 modified: db.delete_album(*id)?,
             },
-            AlbumOp::Add { album, files } => {
-                let before = db.album_members_among(*album, files)?;
-                let n = db.add_to_album(*album, files)?;
-                let mut changed_files = db.album_members_among(*album, files)?;
-                changed_files.retain(|f| !before.contains(f));
-                Applied {
-                    album: Some(*album),
-                    changed: n,
-                    changed_files,
-                    modified: n > 0,
-                }
-            }
+            AlbumOp::Add { album, files } => Self::add_members(&mut db, *album, files)?,
             AlbumOp::Remove { album, files } => {
                 let changed_files = db.album_members_among(*album, files)?;
                 let n = db.remove_from_album(*album, files)?;
@@ -319,6 +308,20 @@ impl Library {
                     modified: n > 0,
                 }
             }
+        })
+    }
+
+    /// Puts `files` into `album`; `changed_files` are those that were not in it yet.
+    fn add_members(db: &mut crate::store::db::Db, album: i64, files: &[i64]) -> Result<Applied> {
+        let before: HashSet<i64> = db.album_members_among(album, files)?.into_iter().collect();
+        let n = db.add_to_album(album, files)?;
+        let mut changed_files = db.album_members_among(album, files)?;
+        changed_files.retain(|f| !before.contains(f));
+        Ok(Applied {
+            album: Some(album),
+            changed: n,
+            changed_files,
+            modified: n > 0,
         })
     }
 

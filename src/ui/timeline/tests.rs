@@ -318,22 +318,6 @@ fn reload_keeps_the_photo_at_the_top_in_view() {
 }
 
 #[test]
-fn date_index_lists_newest_year_first() {
-    let items = vec![
-        item(ts(2021, 3, 1, 0, 0, 0)),
-        item(ts(2020, 12, 31, 0, 0, 0)),
-        item(ts(2020, 1, 5, 0, 0, 0)),
-        item(ts(2020, 1, 4, 0, 0, 0)),
-    ];
-    let d = date_index(&items);
-    assert_eq!(d.len(), 2);
-    assert_eq!((d[0].year, d[0].count, d[0].first), (2021, 1, 0));
-    assert_eq!((d[1].year, d[1].count, d[1].first), (2020, 3, 1));
-    let months: Vec<_> = d[1].months.iter().map(|m| (m.month, m.count)).collect();
-    assert_eq!(months, [(12, 1), (1, 2)]);
-}
-
-#[test]
 fn reveal_scrolls_minimally() {
     assert_eq!(reveal(100.0, 50.0, 400.0, 0.0), None);
     assert_eq!(reveal(500.0, 50.0, 400.0, 0.0), Some(150.0));

@@ -632,6 +632,9 @@ fn album_items_are_idempotent_and_the_cover_is_the_newest() {
         db.album_members_among(album, &[c, 777, a, c]).unwrap(),
         [c, a]
     );
+    // More ids than one query holds.
+    let many: Vec<i64> = (10_000..11_200).chain([a]).collect();
+    assert_eq!(db.album_members_among(album, &many).unwrap(), [a]);
     assert_eq!(db.remove_from_album(album, &[c, 777]).unwrap(), 1);
     assert_eq!(db.album_members_among(album, &[c, a]).unwrap(), [a]);
     let info = &db.albums().unwrap()[0];

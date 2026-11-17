@@ -230,7 +230,7 @@ fn organizing(ui: &mut egui::Ui) {
     point(
         ui,
         "Favorites",
-        "Click the star on a photo, or press F, to mark it as a favorite. All your favorites \
+        "Click the heart on a photo, or press F, to mark it as a favorite. All your favorites \
          are together under Favorites in the left panel.",
     );
     point(

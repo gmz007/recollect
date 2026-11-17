@@ -119,12 +119,12 @@ pub(super) fn album_problem(kind: Option<&AlbumError>, reason: &str) -> (String,
 /// A piece of the sentence of an empty state.
 pub(super) enum Part<'a> {
     Text(&'a str),
-    /// The star icon (the symbol itself may be missing from the text font).
-    Star,
+    /// The heart icon (the symbol itself may be missing from the text font).
+    Heart,
 }
 
 /// The sentence of an empty-state screen laid out for display, and the same sentence in
-/// plain text for assistive technology (the star named).
+/// plain text for assistive technology (the heart named).
 fn sentence_job(
     ui: &egui::Ui,
     sentence: &[Part<'_>],
@@ -151,18 +151,18 @@ fn sentence_job(
                 );
                 plain.push_str(t);
             }
-            Part::Star => {
+            Part::Heart => {
                 job.append(
-                    icons::ICON_STAR.codepoint,
+                    icons::ICON_FAVORITE.codepoint,
                     0.0,
                     egui::TextFormat {
-                        font_id: style::icon_font_id(icons::ICON_STAR, 20.0),
+                        font_id: style::icon_font_id(icons::ICON_FAVORITE, 20.0),
                         color: pal.text,
                         valign: egui::Align::Center,
                         ..Default::default()
                     },
                 );
-                plain.push_str("star");
+                plain.push_str("heart");
             }
         }
     }
@@ -185,7 +185,7 @@ fn empty_state(ui: &mut egui::Ui, icon: MaterialIcon, sentence: &[Part<'_>], but
         ui.label(style::icon_text(icon, 56.0).color(pal.text2));
         ui.add_space(12.0);
         let r = ui.add(egui::Label::new(job));
-        // Assistive technology reads the whole sentence, with the star named.
+        // Assistive technology reads the whole sentence, with the heart named.
         ui.ctx().accesskit_node_builder(r.id, |b| {
             b.set_value(plain.clone());
             b.set_label(plain.clone());
@@ -222,10 +222,10 @@ impl App {
             ),
             View::Favorites => empty_state(
                 ui,
-                icons::ICON_STAR,
+                icons::ICON_FAVORITE,
                 &[
                     Part::Text("Click the "),
-                    Part::Star,
+                    Part::Heart,
                     Part::Text(" on any photo to add it here."),
                 ],
                 "Go to Photos",

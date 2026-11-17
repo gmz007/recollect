@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub(super) struct Notices {
     pub(super) items: Vec<Notice>,
+    /// While the pointer rests on the toast: since when. Timers stand still meanwhile.
+    held_since: Option<Instant>,
 }
 
 /// What the "Undo" button of a confirmation puts back.
@@ -85,7 +87,24 @@ impl Notices {
         }
     }
 
+    /// Pauses every timer while `hovered` (the pointer is on the toast) and, once it leaves,
+    /// gives each message the time it was held.
+    pub(super) fn set_hovered(&mut self, hovered: bool, now: Instant) {
+        match (hovered, self.held_since) {
+            (true, None) => self.held_since = Some(now),
+            (false, Some(since)) => {
+                self.held_since = None;
+                let held = now.saturating_duration_since(since);
+                for n in &mut self.items {
+                    n.at += held;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn expire(&mut self, now: Instant) {
+        let now = self.held_since.unwrap_or(now);
         self.items
             .retain(|n| now.saturating_duration_since(n.at) < Self::ttl(n));
     }
@@ -107,6 +126,9 @@ impl Notices {
 
     /// Time until the next message disappears (to schedule a repaint).
     fn next_expiry(&self, now: Instant) -> Option<Duration> {
+        if self.held_since.is_some() {
+            return None;
+        }
         self.items
             .iter()
             .map(|n| Self::ttl(n).saturating_sub(now.saturating_duration_since(n.at)))
@@ -256,5 +278,23 @@ mod tests {
         n.push("one".into(), false, at(20));
         n.push("two".into(), false, at(21));
         assert_eq!(n.current(), Some("two"));
+    }
+
+    #[test]
+    fn a_message_stays_while_the_pointer_is_on_it() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut n = Notices::default();
+        n.push("Added 2 items".into(), false, t0);
+        n.set_hovered(true, at(3));
+        n.expire(at(30));
+        assert_eq!(n.current(), Some("Added 2 items"));
+        assert_eq!(n.next_expiry(at(30)), None);
+        // Released after 7 s: the 2 s it had left are still ahead.
+        n.set_hovered(false, at(10));
+        n.expire(at(11));
+        assert_eq!(n.current(), Some("Added 2 items"));
+        n.expire(at(13));
+        assert_eq!(n.current(), None);
     }
 }

@@ -446,6 +446,7 @@ impl App {
     }
 
     fn report_album_write(&mut self, w: &AlbumWrite) {
+        let silent = self.silent_album_writes.remove(&w.ticket);
         if let Some(e) = &w.error {
             let (text, details) = super::guide::album_problem(w.error_kind.as_ref(), e);
             self.notify_problem(text, details.unwrap_or_default(), None);
@@ -456,7 +457,6 @@ impl App {
             .album
             .and_then(|id| self.album_name(id))
             .map(|n| short_name(n, 40));
-        let silent = self.silent_album_writes.remove(&w.ticket);
         match &w.op {
             AlbumOp::Create { name, add } if !add.is_empty() => {
                 self.notify(format!(
@@ -480,19 +480,28 @@ impl App {
             }
             AlbumOp::Remove { album: id, files } => {
                 if !silent {
-                    let from = album.unwrap_or_else(|| "the album".into());
-                    let text = format!("Removed {} from {from}", thousands(w.changed));
-                    let undo = Undo::PutBackInAlbum {
-                        album: *id,
-                        files: w.changed_files.clone(),
-                    };
-                    self.notify_undoable(text, undo);
+                    self.report_removal(*id, w, album);
                 }
                 self.drop_removed_from_view(*id, files);
             }
             AlbumOp::Delete { id } => self.album_deleted(*id),
             _ => {}
         }
+    }
+
+    /// "Removed 3 from X" with Undo, or a plain note when nothing was in the album.
+    fn report_removal(&mut self, id: i64, w: &AlbumWrite, album: Option<String>) {
+        let from = album.unwrap_or_else(|| "the album".into());
+        if w.changed_files.is_empty() {
+            self.notify(format!("Nothing to remove from {from}"));
+            return;
+        }
+        let text = format!("Removed {} from {from}", thousands(w.changed));
+        let undo = Undo::PutBackInAlbum {
+            album: id,
+            files: w.changed_files.clone(),
+        };
+        self.notify_undoable(text, undo);
     }
 
     /// Nothing was changed: puts back what the user was working on.

@@ -256,9 +256,19 @@ impl Viewer {
         let e = self.current();
         let pal = style::Palette::of(ui.ctx());
         let (icon, label, short, color) = if e.favorite {
-            (icons::ICON_STAR, "Unfavorite", "Favorited", Some(pal.text))
+            (
+                icons::ICON_FAVORITE,
+                "Unfavorite",
+                "Favorited",
+                Some(pal.text),
+            )
         } else {
-            (icons::ICON_STAR.outlined(), "Favorite", "Favorite", None)
+            (
+                icons::ICON_FAVORITE.outlined(),
+                "Favorite",
+                "Favorite",
+                None,
+            )
         };
         let tip = if e.favorite {
             "Remove from favorites"

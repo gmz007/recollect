@@ -222,17 +222,27 @@ impl Db {
 
     /// Which of `file_ids` are in the album, each once, in the order given.
     pub fn album_members_among(&self, album: i64, file_ids: &[i64]) -> Result<Vec<i64>> {
-        let mut q = self
-            .conn
-            .prepare("SELECT 1 FROM album_items WHERE album_id = ?1 AND file_id = ?2")?;
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for &id in file_ids {
-            if seen.insert(id) && q.exists(params![album, id])? {
-                out.push(id);
+        /// Ids per query; SQLite limits the number of bound parameters.
+        const CHUNK: usize = 500;
+        let mut members = std::collections::HashSet::new();
+        for chunk in file_ids.chunks(CHUNK) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT file_id FROM album_items WHERE album_id = ?1 AND file_id IN ({marks})"
+            );
+            let mut q = self.conn.prepare(&sql)?;
+            let args = std::iter::once(&album).chain(chunk.iter());
+            let rows = q.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
+            for row in rows {
+                members.insert(row?);
             }
         }
-        Ok(out)
+        let mut seen = std::collections::HashSet::new();
+        Ok(file_ids
+            .iter()
+            .copied()
+            .filter(|id| members.contains(id) && seen.insert(*id))
+            .collect())
     }
 
     /// Takes files out of an album (they stay in the library). Returns how many were removed.

@@ -87,12 +87,12 @@ fn clicking_opens_the_viewer_and_the_info_panel_toggles() {
 }
 
 #[test]
-fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
+fn the_heart_marks_a_favorite_and_the_favorites_view_lists_it() {
     let d = tempfile::tempdir().unwrap();
     let (lib, app) = favorites_app(d.path());
     let mut h = album_harness(&app);
     settle(&mut h, || app.borrow().tl.items.len() == 3);
-    // The star in the corner of a tile toggles its favorite mark without opening it.
+    // The heart in the corner of a tile toggles its favorite mark without opening it.
     h.get_by_label("Add b.jpg to favorites").click();
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
@@ -112,7 +112,7 @@ fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
     h.get_by_label("1 photo");
     h.get_by_label("Item b.jpg");
     assert!(h.query_by_label("Item a.jpg").is_none());
-    // The star again removes the mark; the item leaves the view right away.
+    // The heart again removes the mark; the item leaves the view right away.
     h.get_by_label("Remove b.jpg from favorites").click();
     h.run_steps(3);
     assert!(h.query_by_label("Item b.jpg").is_none());
@@ -124,7 +124,7 @@ fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
             && a.tl.awaiting.is_none()
     });
     h.run_steps(2);
-    h.get_by_label("Click the star on any photo to add it here.");
+    h.get_by_label("Click the heart on any photo to add it here.");
     h.get_by_label("Go to Photos");
     assert_eq!(app.borrow().tl.grid.selected, None);
     settle(&mut h, || lib.timeline(&fav).unwrap().is_empty());

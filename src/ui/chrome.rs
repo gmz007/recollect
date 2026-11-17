@@ -12,8 +12,8 @@ use std::time::Instant;
 const SEARCH_MAX_WIDTH: f32 = 520.0;
 /// Height of the search field.
 const SEARCH_HEIGHT: f32 = 34.0;
-/// Placeholder of the search field.
-const SEARCH_HINT: &str = "Search your photos — try “dog on the beach”";
+/// Placeholder of the search field while smart search is on.
+const SEARCH_HINT: &str = "Describe a moment…";
 /// What assistive technology reads for the search field while smart search is off.
 pub(super) const SEARCH_OFF_LABEL: &str =
     "Search your photos (smart search is off, press to turn it on)";
@@ -54,10 +54,14 @@ struct SearchEdit {
 impl App {
     /// The top bar: the search field in the middle, Help and Settings on the right.
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        if ui.input(|i| i.key_pressed(egui::Key::F1)) {
+        // The sheets must not stack on top of a dialog, Settings or a menu.
+        let sheets_allowed = !(self.dialogs.settings_open
+            || self.dialog_open()
+            || egui::Popup::is_any_open(ui.ctx()));
+        if sheets_allowed && ui.input(|i| i.key_pressed(egui::Key::F1)) {
             self.dialogs.help_open = true;
         }
-        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
+        if sheets_allowed && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
             self.open_settings();
         }
         let total = ui.available_width();
@@ -397,11 +401,19 @@ impl App {
             ui.add_space(4.0);
             changed |= self.date.ui(ui, &self.known_years, year);
             changed |= super::when::sort_ui(ui, &mut self.sort);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if style::icon_button(ui, icons::ICON_CLOSE, "Clear search").clicked() {
-                    self.clear_search();
-                }
-            });
+            // The search field has its own ✕ while it holds text; without text (results
+            // of "similar photos") this is the only way out.
+            if self.query.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let r = ui.button("Clear");
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, "Clear search")
+                    });
+                    if r.clicked() {
+                        self.clear_search();
+                    }
+                });
+            }
         });
         if changed {
             self.rerun();
