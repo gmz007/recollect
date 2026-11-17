@@ -20,7 +20,28 @@ pub fn is_installed(models_root: &Path, spec: &ModelSpec) -> bool {
     let dir = model_dir(models_root, spec);
     spec.files
         .iter()
-        .all(|f| std::fs::metadata(dir.join(f.local)).is_ok_and(|m| m.len() == f.size))
+        .all(|f| is_complete(&dir.join(f.local), f))
+}
+
+/// True if `path` holds all of `f` (its expected size).
+fn is_complete(path: &Path, f: &ModelFile) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() == f.size || placeholders_count())
+}
+
+/// Lets tests stand in empty placeholder files for a model. Full-size placeholders are free
+/// where files can be sparse, but on Windows they take the model's whole size on disk, and
+/// tests running side by side would fill it.
+#[cfg(test)]
+pub static PLACEHOLDERS_COUNT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+fn placeholders_count() -> bool {
+    PLACEHOLDERS_COUNT.load(Ordering::Relaxed)
+}
+
+#[cfg(not(test))]
+const fn placeholders_count() -> bool {
+    false
 }
 
 /// Progress callback: (bytes done across all files, total bytes).
@@ -40,7 +61,7 @@ pub fn download(
     let mut done = 0u64;
     for f in spec.files {
         let dest = dir.join(f.local);
-        if std::fs::metadata(&dest).is_ok_and(|m| m.len() == f.size) {
+        if is_complete(&dest, f) {
             done += f.size;
             progress(done, total);
             continue;

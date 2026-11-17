@@ -56,15 +56,13 @@ fn library(dir: &std::path::Path) -> Arc<Library> {
     Library::open(Paths::under(dir), Some(registry::CLIP_B32.id)).unwrap()
 }
 
-/// Creates sparse placeholder model files so the app believes the model is installed.
+/// Creates empty placeholder model files so the app believes the model is installed.
 fn fake_install(lib: &Library) {
+    download::PLACEHOLDERS_COUNT.store(true, std::sync::atomic::Ordering::Relaxed);
     let dir = download::model_dir(&lib.paths().models_dir(), lib.model());
     std::fs::create_dir_all(&dir).unwrap();
     for f in lib.model().files {
-        std::fs::File::create(dir.join(f.local))
-            .unwrap()
-            .set_len(f.size)
-            .unwrap();
+        std::fs::File::create(dir.join(f.local)).unwrap();
     }
     assert!(lib.model_installed());
 }
