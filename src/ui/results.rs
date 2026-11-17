@@ -1,12 +1,13 @@
 //! Search: starting one when typing pauses, taking in the answer, and the results grid.
 
+use super::ruler::{Mapping, Month, RulerState};
 use super::selection::ClickMods;
 use super::style::GAP;
 use super::tiles::{Tile, TileMark};
 use super::workers::Query;
 use super::{
     App, ClickOutcome, GridEvents, GridState, fmt_time, grid::grid_scroll_area, guide, marked,
-    scroll_offset_for_row, selection, step, style, tiles, to_millis,
+    scroll_offset_for_row, selection, step, tiles, to_millis,
 };
 use crate::media::MediaKind;
 use crate::search::{SearchHit, SearchOptions};
@@ -35,7 +36,7 @@ struct ResultsMetrics {
 impl ResultsMetrics {
     /// For `width` points of space, `len` results and tiles of about `tile_size` points.
     fn new(width: f32, len: usize, tile_size: f32) -> Self {
-        let avail = width - style::SCROLLBAR_ALLOWANCE;
+        let avail = width;
         let cols = (((avail + GAP) / (tile_size + GAP)).floor() as usize).max(1);
         let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(tile_size * 0.6);
         Self {
@@ -79,6 +80,23 @@ impl Default for ResultsState {
             selected_t: None,
             cols: 1,
         }
+    }
+}
+
+impl ResultsState {
+    /// Runs `f` with the ruler's state and a way to find the date of the result at a point of
+    /// the ruler (the first result at the top, the last at the bottom).
+    pub(super) fn with_ruler<R>(
+        &mut self,
+        f: impl FnOnce(&mut RulerState, &dyn Fn(f32) -> Option<Month>) -> R,
+    ) -> R {
+        let hits = &self.hits;
+        let date_at = |frac: f32| {
+            let last = hits.len().checked_sub(1)?;
+            let at = (frac.clamp(0.0, 1.0) * last as f32).round() as usize;
+            Month::of_timestamp(hits.get(at)?.taken_at)
+        };
+        f(&mut self.grid.ruler, &date_at)
     }
 }
 
@@ -196,6 +214,9 @@ impl App {
         }
         let m = ResultsMetrics::new(ui.available_width(), self.res.hits.len(), self.tl.tile_size);
         self.res.cols = m.cols;
+        if self.res.grid.ruler.needs_mapping(0) {
+            self.res.grid.ruler.set_mapping(0, Mapping::Flat);
+        }
         self.res.grid.shown = true;
         let area = grid_scroll_area("results", &mut self.res.grid.scroll_to);
         let results = Arc::clone(&self.res.hits);
@@ -203,6 +224,10 @@ impl App {
         let out = area.show_viewport(ui, |ui, viewport| {
             self.result_rows(ui, viewport, &m, &results, &mut events);
         });
+        self.res.grid.ruler.observe(
+            out.state.clamped_offset().y,
+            out.content_size.y - out.inner_rect.height(),
+        );
         self.follow_result_selection(ui, &out, &m);
         self.apply_menu_events(&mut events);
         if let Some((i, ev, mods)) = events.clicked {

@@ -4,6 +4,7 @@
 use super::memories::years_ago_text;
 use super::thumb_key;
 use crate::store::db::TimelineItem;
+use crate::ui::preview::{self, Preview, PreviewKey, Previews};
 use crate::ui::style::{self, Palette, icons};
 use crate::ui::workers::ThumbCache;
 use chrono::NaiveDate;
@@ -59,7 +60,7 @@ pub(super) enum BannerEvent {
 /// Draws the banner across `width` and reports a click on one of its buttons.
 pub(super) fn show(
     ui: &mut egui::Ui,
-    thumbs: &mut ThumbCache,
+    pics: &mut Pictures<'_>,
     items: &[TimelineItem],
     banner: &Banner,
     width: f32,
@@ -68,7 +69,7 @@ pub(super) fn show(
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, BANNER_HEIGHT), Sense::hover());
     let text_top = rect.max.y - TEXT_HEIGHT;
     let photo = Rect::from_min_max(rect.min, egui::pos2(rect.max.x, text_top));
-    paint_photo(ui, thumbs, items.get(banner.entries[0]), photo, &pal);
+    paint_photo(ui, pics, items.get(banner.entries[0]), photo, &pal);
     ui.painter().rect_filled(
         Rect::from_min_max(egui::pos2(rect.min.x, text_top), rect.max),
         CornerRadius {
@@ -91,10 +92,30 @@ pub(super) fn show(
     event
 }
 
+/// Where the banner gets its picture: a large preview when it is ready, the grid's thumbnail
+/// until then.
+pub(super) struct Pictures<'a> {
+    pub thumbs: &'a mut ThumbCache,
+    pub previews: &'a mut Previews,
+}
+
+/// The preview that keeps the banner sharp across `width` points.
+fn preview_key(item: &TimelineItem, width: f32, ppp: f32) -> PreviewKey {
+    let side = preview::fit_side(Vec2::new(width, BANNER_HEIGHT), ppp);
+    PreviewKey {
+        path: item.path.clone(),
+        mtime: item.mtime,
+        t_ms: thumb_key(item).t_ms,
+        side,
+        min_side: preview::min_side_for(item.width.zip(item.height), side),
+        zoom: false,
+    }
+}
+
 /// The photo, cropped to fill `area`, with rounded top corners.
 fn paint_photo(
     ui: &egui::Ui,
-    thumbs: &mut ThumbCache,
+    pics: &mut Pictures<'_>,
     item: Option<&TimelineItem>,
     area: Rect,
     pal: &Palette,
@@ -105,7 +126,17 @@ fn paint_photo(
         sw: 0,
         se: 0,
     };
-    let tex = item.and_then(|it| thumbs.get(&thumb_key(it)));
+    let ppp = ui.ctx().pixels_per_point();
+    let sharp = item.and_then(|it| {
+        match pics
+            .previews
+            .get_urgent(&preview_key(it, area.width(), ppp))
+        {
+            Preview::Ready(t) => Some(t.clone()),
+            Preview::Loading | Preview::Failed => None,
+        }
+    });
+    let tex = sharp.or_else(|| item.and_then(|it| pics.thumbs.get(&thumb_key(it)).cloned()));
     match tex {
         Some(tex) => {
             let uv = cover_uv(tex.size_vec2(), area.size());

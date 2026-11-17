@@ -128,7 +128,7 @@ more than a few hundred lines of code.
 | `media/` | `scan`, `image`, `metadata` (capture dates), `video/` (`stream`, `convert`, `sample`, `still`) |
 | `model/` | `registry`, `download`, `embedder` |
 | `search.rs` | turning index candidates into hits |
-| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/`, and one file per remaining screen or widget |
+| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `ruler/` (the timeline ruler that replaces the scroll bar), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/`, and one file per remaining screen or widget |
 | `cli.rs`, `bench.rs`, `eval.rs` | command-line entry points |
 
 Functions are kept to 50 lines of code (a clippy threshold); longer scenario tests are the
@@ -152,6 +152,20 @@ setting for every grid; a pinch or Ctrl/Cmd and scroll changes it smoothly and i
 it stops changing. Whether library folders can still be read is checked on a background thread
 when the folder list changes and then every 30 seconds, so a slow network drive never holds up a
 frame or the library facts the screens read.
+
+The scroll bar of every grid is hidden; the ruler (`ui/ruler/`) is a column beside it that reads
+and sets its scroll offset. Views grouped by day (Photos, Favorites, folders) give it a time scale:
+one slot per calendar month between the newest and the oldest photo, empty months included, built
+from the layout's section offsets when the layout changes. A point of the ruler maps to the
+offset by binary search over those offsets (the position within a month maps to the position
+within that month's rows; an empty month lands where the next older one starts), and the top of
+the ruler is the top of the page, the bottom the end. Albums, Recently added and search results
+have no day sections, so there the ruler is the plain scroll fraction and its date label is the
+date of the photo at that fraction of the list. Dash positions are cached per layout and ruler
+height; per frame only the dashes are drawn and one binary search finds the marker. With nothing
+to scroll the ruler is left out. The dashes at years (or months, with three years or fewer) are
+keyboard stops. The "On this day" banner asks for a large preview through the viewer's preview
+cache and shows the grid thumbnail until it arrives.
 
 ## Incremental scanning and robustness
 

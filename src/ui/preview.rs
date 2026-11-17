@@ -238,6 +238,12 @@ impl Previews {
         }
     }
 
+    /// Longest sides of the previews requested so far (tests).
+    #[cfg(test)]
+    pub(super) fn requested_sides(&self) -> Vec<u32> {
+        self.loader.states.keys().map(|k| k.side).collect()
+    }
+
     /// Number of previews and details held (tests).
     #[cfg(test)]
     pub(super) fn cached(&self) -> usize {

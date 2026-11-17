@@ -23,7 +23,13 @@ computer.
   hold Ctrl/Cmd and scroll, or press Ctrl/Cmd with `=`, `-` and `0`, to change the photo size
   (also in **Settings** as Small, Medium or Large). Browsing works before smart search is turned
   on.
-- **Jump to date** in the sidebar: jump to any year or month.
+- **Timeline ruler** at the right edge instead of a scroll bar: a column of small dashes with the
+  years written beside them. Press or drag anywhere on it to scroll; in Photos the position on it
+  is a point in time, so you can scrub to any month. A small label names the date while you point
+  at it or scroll. In albums, Recently added and search results it follows the scroll position.
+  Press `Tab` to reach the years and `Enter` to jump to one. It is not shown when everything fits
+  in the window.
+- **Albums** show a plain grid without day headings (Favorites and folders keep them).
 - **Folders** (click one in the sidebar; **+** opens *Add a folder* with your Pictures, Videos,
   Desktop and Downloads folders as suggestions; hover a folder and click **×** to stop showing
   it, your files are never touched) and **Recently added**.

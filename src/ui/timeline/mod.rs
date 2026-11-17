@@ -12,6 +12,7 @@ mod header;
 mod layout;
 mod load;
 mod memories;
+mod ruler;
 mod view;
 
 pub use dates::{DATE_FROM_FILE, fmt_date, thousands};
@@ -118,7 +119,7 @@ pub(super) struct TimelineState {
     failed: Option<(TimelineFilter, Instant)>,
     pub(super) error: Option<String>,
     pub(super) grid: GridState,
-    top_item: Option<usize>,
+    pub(super) top_item: Option<usize>,
     /// Item to scroll to once the layout is known; `true` aligns to its section header.
     pending: Option<(usize, bool)>,
 }
@@ -163,8 +164,10 @@ impl TimelineState {
         self.n_photos = self.items.len() - self.n_videos;
     }
 
+    /// Whether photos are grouped under day headings: not in Recently added (ordered by when
+    /// files were added) and not in albums (a plain grid).
     pub(super) fn headers(&self) -> bool {
-        self.view != View::RecentlyAdded
+        !matches!(self.view, View::RecentlyAdded | View::Album(_))
     }
 
     /// Entries of the "On this day" banner, recomputed only when the items or the date change.

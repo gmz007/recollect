@@ -61,6 +61,8 @@ impl App {
             || ctx.text_edit_focused()
             || self.search_help.inside
             || egui::Popup::is_any_open(ctx)
+            || self.tl.grid.ruler.focused
+            || self.res.grid.ruler.focused
     }
 }
 

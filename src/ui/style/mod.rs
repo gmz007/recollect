@@ -37,8 +37,6 @@ pub const FIELD_RADIUS: u8 = 8;
 pub const GAP: f32 = 2.0;
 /// Inner margin of the central panel (horizontal, vertical).
 pub const PANEL_MARGIN: (i8, i8) = (16, 12);
-/// Width kept free beside a scrolling grid for its scroll bar.
-pub const SCROLLBAR_ALLOWANCE: f32 = 12.0;
 
 /// The text style for date headers in the grids.
 pub fn section() -> TextStyle {

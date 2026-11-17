@@ -545,3 +545,35 @@ fn the_heading_at_the_top_of_the_view_stays_pinned_until_the_next_one_pushes_it_
     let flat = Layout::build(&compute_groups(&[item(1)], false), 300.0, 100.0, false);
     assert_eq!(flat.pinned_header(50.0), None);
 }
+
+#[test]
+fn the_ruler_of_a_huge_library_is_built_once_and_answers_by_binary_search() {
+    use crate::ui::ruler::{Mapping, Month, TimeScale};
+    // 200 000 photos over 20 years, newest first.
+    let newest = ts(2024, 12, 31, 12, 0, 0);
+    let items: Vec<TimelineItem> = (0..200_000_i64)
+        .map(|i| item(newest - i * (20 * 365 * 86_400) / 200_000))
+        .collect();
+    let groups = compute_groups(&items, true);
+    let layout = Layout::build(&groups, 900.0, 168.0, true);
+    let sections = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(gi, g)| Some((Month::of_day_key(g.key)?, layout.tops[layout.group_row[gi]])));
+    let scale = TimeScale::build(sections, layout.total).unwrap();
+    assert!((235..=242).contains(&scale.months()), "{}", scale.months());
+    let map = Mapping::Time(scale);
+    let max = layout.total - 700.0;
+    // Every point of the ruler maps into the scroll range, in order, and back again.
+    let mut last = 0.0;
+    for i in 0..=1000 {
+        let f = i as f32 / 1000.0;
+        let o = map.offset_at(f, max);
+        assert!((last..=max).contains(&o), "{f}: {o}");
+        last = o;
+        if i < 1000 {
+            let back = map.fraction_at(o, max);
+            assert!((back - f).abs() < 0.01, "{f} -> {o} -> {back}");
+        }
+    }
+}

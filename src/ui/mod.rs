@@ -21,6 +21,7 @@ mod photo_size;
 mod platform;
 mod preview;
 mod results;
+mod ruler;
 mod selection;
 mod selection_bar;
 mod settings;
@@ -503,6 +504,7 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(16, 0)),
             )
             .show(ui, |ui| self.top_bar(ui));
+        self.ruler_panel(ui);
         let has_folders = !self.snapshot.folders.is_empty();
         egui::CentralPanel::default()
             .frame(

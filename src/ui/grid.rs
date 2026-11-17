@@ -24,6 +24,8 @@ pub(super) struct GridState {
     pub(super) scroll_to: Option<f32>,
     /// Set when the grid was drawn; read (and cleared) at the start of the next frame.
     pub(super) shown: bool,
+    /// The timeline ruler beside the grid, which is its scroll bar.
+    pub(super) ruler: super::ruler::RulerState,
 }
 
 impl GridState {
@@ -122,8 +124,10 @@ pub(super) fn grid_scroll_area(
     id_salt: &'static str,
     scroll_to: &mut Option<f32>,
 ) -> egui::ScrollArea {
+    // The ruler beside the grid is its scroll bar.
     let mut area = egui::ScrollArea::vertical()
         .id_salt(id_salt)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .auto_shrink([false, false]);
     if let Some(y) = scroll_to.take() {
         area = area.vertical_scroll_offset(y);
@@ -325,7 +329,32 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Nav, scroll_offset_for_row, step};
+    use super::{Nav, grid_scroll_area, scroll_offset_for_row, step};
+
+    #[test]
+    fn the_grid_scroll_area_hides_its_scroll_bar() {
+        // With a solid (always visible) bar style, a visible bar would take width from the
+        // content; the ruler is the scroll bar, so the content gets all of it.
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        let mut inner_width = 0.0;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(input, |ui| {
+            let out = grid_scroll_area("t", &mut None)
+                .show(ui, |ui| ui.allocate_space(egui::vec2(10.0, 5000.0)));
+            inner_width = out.inner_rect.width();
+            assert!(out.content_size.y > out.inner_rect.height());
+            assert!((inner_width - ui.max_rect().width()).abs() < 0.5);
+        });
+        full.textures_delta.clear();
+        assert!(inner_width > 0.0);
+    }
 
     #[test]
     fn scroll_offset_keeps_rows_visible() {

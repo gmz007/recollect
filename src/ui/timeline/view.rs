@@ -6,10 +6,10 @@ use super::header::{self, DaySelection};
 use super::layout::{HEADER_H, Layout, Row, reveal};
 use super::{TimelineState, View, file_name, thumb_key};
 use crate::media::MediaKind;
-use crate::store::db::AlbumInfo;
+use crate::store::db::{AlbumInfo, TimelineItem};
 use crate::ui::grid::grid_scroll_area;
 use crate::ui::selection::{self, ClickMods};
-use crate::ui::style::{self, GAP};
+use crate::ui::style::GAP;
 use crate::ui::tiles::{self, Tile, TileEvent, TileMark};
 use crate::ui::workers::ThumbCache;
 use crate::ui::{App, ClickOutcome, FavMark, GridEvents, fmt_time, marked};
@@ -147,6 +147,27 @@ impl RowsView<'_> {
     }
 }
 
+/// Draws the "On this day" banner (if any) and the rows into the scroll area; `viewport` is
+/// the visible part of the scrolled content.
+fn scrolled_content(
+    ui: &mut egui::Ui,
+    viewport: egui::Rect,
+    rows: &RowsView<'_>,
+    banner: Option<&banner::Banner>,
+    pics: &mut banner::Pictures<'_>,
+    items: &[TimelineItem],
+) -> (GridEvents, Option<banner::BannerEvent>) {
+    ui.spacing_mut().item_spacing = Vec2::ZERO;
+    let mut banner_event = None;
+    if let Some(b) = banner {
+        banner_event = banner::show(ui, pics, items, b, rows.width);
+        ui.add_space(BANNER_GAP);
+    }
+    let lead = rows.tl.lead;
+    let events = rows.show(ui, pics.thumbs, viewport.translate(egui::vec2(0.0, -lead)));
+    (events, banner_event)
+}
+
 impl App {
     pub(in crate::ui) fn set_view(&mut self, view: View) {
         if self.tl.view != view {
@@ -198,12 +219,13 @@ impl App {
     /// The scrolling grid of items and what the user did in it.
     fn timeline_rows(&mut self, ui: &mut egui::Ui) {
         self.tl.grid.shown = true;
-        let width = ui.available_width() - style::SCROLLBAR_ALLOWANCE;
+        let width = ui.available_width();
         let banner = (self.tl.view == View::Timeline)
             .then(|| self.on_this_day_banner())
             .flatten();
         self.tl.lead = banner.as_ref().map_or(0.0, |_| BANNER_HEIGHT + BANNER_GAP);
         self.tl.ensure_layout(width);
+        self.tl.update_ruler();
         self.tl.resolve_pending();
         let area = grid_scroll_area("timeline", &mut self.tl.grid.scroll_to);
         let Some(layout) = self.tl.layout.as_ref() else {
@@ -217,23 +239,21 @@ impl App {
             width,
             today: self.today(),
         };
-        let lead = self.tl.lead;
         let items = Arc::clone(&self.tl.items);
-        let mut events = GridEvents::default();
-        let mut banner_event = None;
+        let mut pics = banner::Pictures {
+            thumbs: &mut self.thumbs,
+            previews: &mut self.previews,
+        };
+        let (mut events, mut banner_event) = (GridEvents::default(), None);
         let out = area.show_viewport(ui, |ui, viewport| {
-            ui.spacing_mut().item_spacing = Vec2::ZERO;
-            if let Some(b) = &banner {
-                banner_event = banner::show(ui, &mut self.thumbs, &items, b, width);
-                ui.add_space(BANNER_GAP);
-            }
-            events = rows.show(
-                ui,
-                &mut self.thumbs,
-                viewport.translate(egui::vec2(0.0, -lead)),
-            );
+            (events, banner_event) =
+                scrolled_content(ui, viewport, &rows, banner.as_ref(), &mut pics, &items);
         });
         self.tl.top_item = events.top_item;
+        self.tl.grid.ruler.observe(
+            out.state.clamped_offset().y,
+            out.content_size.y - out.inner_rect.height(),
+        );
         self.follow_keyboard_selection(ui, &out);
         if self.tl.pending.is_some() {
             ui.ctx().request_repaint();
