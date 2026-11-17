@@ -1,20 +1,18 @@
 # git-cliff (https://git-cliff.org) turns the Conventional Commits history into release notes.
 #
-#   git cliff --unreleased                                      # what the next release holds so far
-#   git cliff --unreleased --tag X.Y.Z --prepend CHANGELOG.md   # add the section for a new release
-#   git cliff --latest --strip header                           # notes of the newest release
+#   git cliff --unreleased                  # what the next release holds so far
+#   git cliff --tag X.Y.Z -o CHANGELOG.md   # regenerate the changelog with X.Y.Z as the newest release
+#   git cliff -o CHANGELOG.md               # regenerate it without a new release (after editing this file)
 #
-# The release workflow uses the same configuration for the notes of each GitHub release.
+# CHANGELOG.md is always the whole output and never edited by hand. The release workflow gives each
+# GitHub release the section of its version, so the changelog and the releases always say the same.
 
 [changelog]
-# Must stay identical to the top of CHANGELOG.md: `--prepend` finds it there and puts the new
-# section right below it.
 header = """
 # Changelog
 
-All notable changes to this project are documented here, newest first. Sections up to 0.6.2 were
-written by hand; later ones are generated from the commit history by
-[git-cliff](https://git-cliff.org) (see `cliff.toml`). This project adheres to
+All notable changes to this project, newest first. Generated from the commit history by
+[git-cliff](https://git-cliff.org) with the rules in `cliff.toml`; dates are UTC. Versions follow
 [Semantic Versioning](https://semver.org/).
 """
 body = """

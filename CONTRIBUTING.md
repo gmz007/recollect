@@ -57,17 +57,19 @@ knowing. `feat`, `fix`, `perf`, `refactor`, `build` and `docs` commits appear in
 
 ## Releases
 
-Versions are tagged without a prefix (`0.6.2`). [git-cliff](https://git-cliff.org) builds the
-notes from the commit history with the rules in `cliff.toml`:
+Versions are tagged without a prefix (`0.6.2`). `CHANGELOG.md` and the GitHub release notes are
+both generated from the commit history by [git-cliff](https://git-cliff.org) with the rules in
+`cliff.toml`; neither is edited by hand.
 
 ```bash
-git cliff --unreleased                                      # what the next release holds so far
-git cliff --unreleased --tag X.Y.Z --prepend CHANGELOG.md   # add its section to the changelog
+git cliff --unreleased                  # what the next release holds so far
+git cliff --tag X.Y.Z -o CHANGELOG.md   # regenerate the changelog with X.Y.Z as the newest release
 ```
 
-To release: bump the version in `Cargo.toml`, add the section to `CHANGELOG.md` with the second
-command, commit as `chore(release): X.Y.Z`, tag the commit `X.Y.Z` and push the branch and the
-tag. The Release workflow then creates the GitHub release with the same notes.
+To release: bump the version in `Cargo.toml`, regenerate `CHANGELOG.md` with the second command,
+commit as `chore(release): X.Y.Z`, tag the commit `X.Y.Z` and push the branch and the tag. The
+Release workflow then creates the GitHub release from the same notes; on every push it also
+brings the notes of earlier releases in line with `cliff.toml` if the rules changed.
 
 ## Design
 
