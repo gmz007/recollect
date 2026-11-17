@@ -1,9 +1,10 @@
 name: Release
 
 # Gives every version tag (0.6.2, no prefix) a GitHub release whose notes are generated from
-# the commit history by git-cliff (configuration: cliff.toml). It runs on pushes to main as well
-# as on tags, and only creates what is missing, so tags pushed together with main, tags pushed
-# alone and tags older than this workflow all end up with a release.
+# the commit history by git-cliff (configuration: cliff.toml), the same text as that version's
+# section of CHANGELOG.md. It runs on pushes to main as well as on tags: missing releases are
+# created, and releases whose notes no longer match (because cliff.toml changed) are updated, so
+# tags pushed together with main, tags pushed alone and older tags all end up consistent.
 on:
   push:
     branches: [main]
@@ -27,7 +28,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: git-cliff@2.14.2
-      - name: Create the missing releases
+      - name: Create or update the releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -39,14 +40,26 @@ jobs:
             awk -v head="## [$1]" \
               'index($0, "## [") == 1 { on = (index($0, head) == 1); next } on' all-notes.md
           }
+          # Leading blank lines and trailing newlines don't count as a difference.
+          trimmed() { sed -e '/./,$!d'; }
           pattern='[0-9]*.[0-9]*.[0-9]*'
           newest=$(git tag --list "$pattern" --sort=-v:refname | head -n 1)
           for tag in $(git tag --list "$pattern" --sort=v:refname); do
-            if gh release view "$tag" > /dev/null 2>&1; then continue; fi
             notes_of "$tag" > notes.md
-            latest=false
-            if [ "$tag" = "$newest" ]; then latest=true; fi
-            gh release create "$tag" --verify-tag --title "Recollect $tag" \
-              --notes-file notes.md --latest="$latest"
-            echo "created the release for $tag"
+            title="Recollect $tag"
+            if current=$(gh release view "$tag" --json name,body \
+                --jq '.name + "\n" + .body' 2> /dev/null); then
+              wanted="$title"$'\n'"$(trimmed < notes.md)"
+              current="$(head -n 1 <<< "$current")"$'\n'"$(tail -n +2 <<< "$current" | trimmed)"
+              if [ "$current" != "$wanted" ]; then
+                gh release edit "$tag" --title "$title" --notes-file notes.md
+                echo "updated the release for $tag"
+              fi
+            else
+              latest=false
+              if [ "$tag" = "$newest" ]; then latest=true; fi
+              gh release create "$tag" --verify-tag --title "$title" \
+                --notes-file notes.md --latest="$latest"
+              echo "created the release for $tag"
+            fi
           done
