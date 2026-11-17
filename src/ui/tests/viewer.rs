@@ -109,7 +109,6 @@ fn the_heart_marks_a_favorite_and_the_favorites_view_lists_it() {
         let a = app.borrow();
         a.tl.view == View::Favorites && a.tl.items.len() == 1
     });
-    h.get_by_label("1 photo");
     h.get_by_label("Item b.jpg");
     assert!(h.query_by_label("Item a.jpg").is_none());
     // The heart again removes the mark; the item leaves the view right away.

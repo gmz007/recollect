@@ -1,7 +1,6 @@
 //! Dates as the album shows them: section keys and headings,
 //! and how a capture time is written out.
 
-use super::Group;
 use crate::media::metadata::DateSource;
 use crate::store::db::TimelineItem;
 use chrono::{Datelike, NaiveDate};
@@ -13,15 +12,10 @@ pub(super) fn date_of(taken_at: i64) -> NaiveDate {
         .unwrap_or_default()
 }
 
-/// Section key of a capture time (local wall-clock seconds stored as if UTC). Keys of
+/// Section key of a capture time (local wall-clock seconds stored as if UTC): the day. Keys of
 /// neighbouring sections are not necessarily adjacent integers; they only identify a section.
-pub fn group_key(taken_at: i64, group: Group) -> i64 {
-    let d = date_of(taken_at);
-    match group {
-        Group::Day => i64::from(d.num_days_from_ce()),
-        Group::Month => i64::from(d.year()) * 12 + i64::from(d.month0()),
-        Group::Year => i64::from(d.year()),
-    }
+pub fn day_key(taken_at: i64) -> i64 {
+    i64::from(date_of(taken_at).num_days_from_ce())
 }
 
 /// `1204` becomes `1,204`.
@@ -37,25 +31,27 @@ pub fn thousands(n: usize) -> String {
     out
 }
 
-/// Section title such as "Saturday 4 July 2019 · 12", "July 2019 · 132" or "2019 · 1,204".
-pub fn header_text(group: Group, key: i64, count: usize) -> String {
-    let name = match group {
-        Group::Day => i32::try_from(key)
-            .ok()
-            .and_then(NaiveDate::from_num_days_from_ce_opt)
-            .map(|d| d.format("%A %-d %B %Y").to_string()),
-        Group::Month => i32::try_from(key.div_euclid(12))
-            .ok()
-            .zip(u32::try_from(key.rem_euclid(12) + 1).ok())
-            .and_then(|(year, month)| NaiveDate::from_ymd_opt(year, month, 1))
-            .map(|d| d.format("%B %Y").to_string()),
-        Group::Year => Some(key.to_string()),
+/// Heading of the section of the day `key` (see [`day_key`]) as seen on `today`: "Today",
+/// "Yesterday", or the weekday and date such as "Sunday 15 November", with the year added when it
+/// is not this year ("Saturday 4 July 2019").
+pub fn day_header_text(key: i64, today: NaiveDate) -> String {
+    let Some(day) = i32::try_from(key)
+        .ok()
+        .and_then(NaiveDate::from_num_days_from_ce_opt)
+    else {
+        return String::new();
+    };
+    if day == today {
+        "Today".to_string()
+    } else if today.pred_opt() == Some(day) {
+        "Yesterday".to_string()
+    } else if day.year() == today.year() {
+        day.format("%A %-d %B").to_string()
+    } else {
+        day.format("%A %-d %B %Y").to_string()
     }
-    .unwrap_or_default();
-    format!("{name} · {}", thousands(count))
 }
 
-/// Years (newest first) with their months, for the date navigator.
 pub(super) fn fmt_taken(item: &TimelineItem) -> String {
     fmt_taken_at(item.taken_at, Some(item.date_source))
 }

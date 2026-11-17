@@ -288,6 +288,15 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+click (Cmd on Mac)", "Select several photos"),
     ("Shift+click", "Select everything in between"),
     ("Ctrl+A (Cmd on Mac)", "Select everything"),
+    (
+        "Ctrl+= and Ctrl+- (Cmd on Mac)",
+        "Make photos bigger or smaller",
+    ),
+    ("Ctrl+0 (Cmd on Mac)", "Back to the usual photo size"),
+    (
+        "Pinch, or Ctrl+scroll (Cmd on Mac)",
+        "Change the photo size smoothly",
+    ),
     ("F", "Mark as favorite, or remove the mark"),
     ("Ctrl+F (Cmd on Mac)", "Go to the search box"),
     (

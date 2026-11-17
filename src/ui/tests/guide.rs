@@ -402,6 +402,22 @@ fn the_main_screens_use_no_technical_words() {
         h.run_steps(3);
         check("viewer", &h);
     }
+    // The "On this day" banner, the size chip and Settings > Appearance with the photo size.
+    {
+        let d6 = tempfile::tempdir().unwrap();
+        let app = album_app(d6.path(), true);
+        app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+        let mut h = album_harness(&app);
+        h.get_by_label("On this day");
+        check("on this day banner", &h);
+        h.key_combination_modifiers(egui::Modifiers::COMMAND, &[egui::Key::Equals]);
+        h.run_steps(3);
+        h.get_by_label("Photo size");
+        check("photo size chip", &h);
+        open_section(&mut h, "Appearance");
+        h.get_all_by_label("Photo size").next().unwrap();
+        check("settings: appearance", &h);
+    }
     // An album view.
     {
         let d4 = tempfile::tempdir().unwrap();
@@ -640,9 +656,33 @@ fn without_smart_search_the_first_tip_is_about_selecting() {
     use crate::ui::guide::Tip;
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), false);
-    let h = album_harness(&app);
+    let mut h = album_harness(&app);
+    // The offer to turn on smart search comes first; no tip stacks on it.
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
     h.get_by_label(Tip::Select.text());
     assert!(h.query_by_label(Tip::Search.text()).is_none());
+}
+
+#[test]
+fn only_one_banner_shows_above_the_grid_at_a_time() {
+    use crate::ui::guide::Tip;
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    // The smart search offer is showing: no tip next to it.
+    h.get_by_label("Turn on smart search to find photos by describing them");
+    for tip in [Tip::Select, Tip::Search, Tip::Album] {
+        assert!(h.query_by_label(tip.text()).is_none(), "{tip:?}");
+    }
+    // Once it is dealt with, the tip takes its place.
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Turn on smart search to find photos by describing them")
+            .is_none()
+    );
+    h.get_by_label(Tip::Select.text());
 }
 
 #[test]
@@ -650,6 +690,10 @@ fn the_first_album_view_explains_how_to_fill_it() {
     use crate::ui::guide::Tip;
     let d = tempfile::tempdir().unwrap();
     let (lib, _app, mut h) = album_view(d.path(), 3, album_harness);
+    // The smart search offer has been dealt with, so it does not hold the tip back.
+    lib.update_settings(|s| s.search_prompt_dismissed = true)
+        .unwrap();
+    h.run_steps(3);
     h.get_by_label(Tip::Album.text());
     assert!(
         h.query_by_label(Tip::Select.text()).is_none(),

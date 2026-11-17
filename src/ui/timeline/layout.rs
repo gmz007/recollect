@@ -1,14 +1,13 @@
 //! Sections and rows with known vertical offsets, so only what is in view is drawn and
 //! the arrow keys can follow the rows (pure functions).
 
-use super::Group;
-use super::dates::group_key;
+use super::dates::day_key;
 use crate::store::db::TimelineItem;
 use crate::ui::Nav;
 use crate::ui::style::GAP;
 use std::ops::Range;
 
-pub(super) const HEADER_H: f32 = 40.0;
+pub(super) const HEADER_H: f32 = 36.0;
 pub(super) const SECTION_GAP: f32 = 12.0;
 
 /// A run of consecutive items that share a section.
@@ -19,9 +18,9 @@ pub struct GroupSpan {
     pub end: usize,
 }
 
-/// Splits `items` (already in display order) into sections. Without headers everything is one
-/// section.
-pub fn compute_groups(items: &[TimelineItem], group: Group, headers: bool) -> Vec<GroupSpan> {
+/// Splits `items` (already in display order) into sections, one per day. Without headers
+/// everything is one section.
+pub fn compute_groups(items: &[TimelineItem], headers: bool) -> Vec<GroupSpan> {
     let mut out: Vec<GroupSpan> = Vec::new();
     if items.is_empty() {
         return out;
@@ -35,7 +34,7 @@ pub fn compute_groups(items: &[TimelineItem], group: Group, headers: bool) -> Ve
         return out;
     }
     for (i, it) in items.iter().enumerate() {
-        let key = group_key(it.taken_at, group);
+        let key = day_key(it.taken_at);
         match out.last_mut() {
             Some(g) if g.key == key => g.end = i + 1,
             _ => out.push(GroupSpan {
@@ -63,7 +62,7 @@ impl Row {
     }
 }
 
-/// Rows with vertical offsets for one width / tile size / grouping.
+/// Rows with vertical offsets for one width and tile size.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layout {
     pub rows: Vec<Row>,
@@ -125,6 +124,31 @@ impl Layout {
         let start = self.tops.partition_point(|&t| t <= y0).saturating_sub(1);
         let end = self.tops.partition_point(|&t| t < y1);
         start..end.max(start)
+    }
+
+    /// The section that row `row` belongs to (with headers).
+    pub fn group_of_row(&self, row: usize) -> usize {
+        self.group_row
+            .partition_point(|&r| r <= row)
+            .saturating_sub(1)
+    }
+
+    /// The section whose heading is pinned at the top of a view that starts `view_top` into the
+    /// rows, and where the heading sits (row coordinates): at the top of the view, pushed up by
+    /// the next section's heading as it arrives. Nothing is pinned at the very top or in a
+    /// layout without headings.
+    pub fn pinned_header(&self, view_top: f32) -> Option<(usize, f32)> {
+        if view_top <= 0.0 || !matches!(self.rows.first(), Some(Row::Header { .. })) {
+            return None;
+        }
+        let row = self.visible(view_top, view_top + 1.0).start;
+        let group = self.group_of_row(row);
+        let natural = self.tops[*self.group_row.get(group)?];
+        let mut y = view_top.max(natural);
+        if let Some(&next) = self.group_row.get(group + 1) {
+            y = y.min(self.tops[next] - HEADER_H);
+        }
+        Some((group, y))
     }
 
     /// The row that draws `item`.

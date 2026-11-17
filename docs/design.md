@@ -111,7 +111,8 @@ library folder never touches files and never deletes an album.
 
 Grids keep a **selection by file id** plus a *primary* item (by list index) that drives the
 viewer; ids that vanish in a reload are dropped. Range selection runs in
-list order from an anchor, so it follows the grouping and sort order on screen.
+list order from an anchor, so it follows the order on screen. After an action from the
+selection bar finishes (an album change, a favorite), the selection is cleared; Undo still works.
 
 ## Code layout
 
@@ -127,7 +128,7 @@ more than a few hundred lines of code.
 | `media/` | `scan`, `image`, `metadata` (capture dates), `video/` (`stream`, `convert`, `sample`, `still`) |
 | `model/` | `registry`, `download`, `embedder` |
 | `search.rs` | turning index candidates into hits |
-| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/`, `viewer/`, `settings/`, and one file per remaining screen or widget |
+| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/`, and one file per remaining screen or widget |
 | `cli.rs`, `bench.rs`, `eval.rs` | command-line entry points |
 
 Functions are kept to 50 lines of code (a clippy threshold); longer scenario tests are the
@@ -137,12 +138,20 @@ exception.
 
 `ui/style.rs` holds the palettes, fonts (Inter and Material Symbols, with egui's fonts as
 fallbacks), text styles and spacing; it is applied once per egui context and again when the theme
-or text size setting changes. `ui/tiles.rs` draws a grid tile (center-cropped thumbnail, hover
-controls, duration pill) and decides what a click means: a plain click opens the viewer unless the
+or text size setting changes. `ui/tiles.rs` draws a grid tile (center-cropped thumbnail edge to edge; the selection circle
+on hover; a selected photo shrinks onto a tinted cell; a white heart for favorites; duration pill) and decides what a click means: a plain click opens the viewer unless the
 user is already picking items, in which case it toggles; the selection circle, Ctrl/Cmd and Shift
 select. `ui/sidebar.rs` and `ui/chrome.rs` hold the sidebar, the top bar, the view headers, the
 toasts and the help window. Notices queue as before (an error outlives later plain messages) and
 are drawn as toasts rather than in a status bar.
+
+The timeline groups by capture day when the list loads (not per frame); layout finds the rows in
+view by binary search, and the heading of the section at the top of the view is drawn pinned over
+the photos, pushed up by the next one. The tile size (96 to 320 points, default 168) is one
+setting for every grid; a pinch or Ctrl/Cmd and scroll changes it smoothly and it is saved once
+it stops changing. Whether library folders can still be read is checked on a background thread
+when the folder list changes and then every 30 seconds, so a slow network drive never holds up a
+frame or the library facts the screens read.
 
 ## Incremental scanning and robustness
 

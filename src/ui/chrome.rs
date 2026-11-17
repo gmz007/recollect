@@ -2,7 +2,7 @@
 //! search" card, the help window and the toast notifications.
 
 use super::style::{self, Palette, icons};
-use super::timeline::{Group, View, thousands};
+use super::timeline::{View, thousands};
 use super::{App, NoticeAction};
 use crate::media::MediaKind;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
@@ -258,32 +258,43 @@ impl App {
         }
     }
 
-    /// Title, count and the compact controls above the grid of a timeline view.
+    /// The title of an album or folder with its count (and the album's actions); for the other
+    /// views only a problem with loading, if there is one.
     pub(super) fn view_header(&mut self, ui: &mut egui::Ui) {
-        let title = self.view_title();
-        let subtitle = count_text(self.tl.n_photos, self.tl.n_videos);
         let album = match self.tl.view {
             View::Album(id) => Some(id),
             _ => None,
         };
+        if album.is_none() && !matches!(self.tl.view, View::Folder(_)) {
+            if self.tl.error.is_some() {
+                let pal = Palette::of(ui.ctx());
+                ui.colored_label(
+                    pal.danger,
+                    "Couldn't load your photos. Please try again in a moment.",
+                );
+                ui.add_space(8.0);
+            }
+            return;
+        }
+        let title = self.view_title();
+        let subtitle = count_text(self.tl.n_photos, self.tl.n_videos);
         ui.horizontal(|ui| {
-            self.view_heading(ui, &title, &subtitle, album);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.view_controls(ui);
-            });
+            self.view_heading(ui, &title, &subtitle);
+            if let Some(id) = album {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.horizontal(|ui| self.album_actions(ui, id));
+                });
+            }
         });
         ui.add_space(8.0);
     }
 
-    /// The view's title with its actions, and under it the count (or the load error).
-    fn view_heading(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str, album: Option<i64>) {
+    /// The view's title and under it the count (or the load error).
+    fn view_heading(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str) {
         let pal = Palette::of(ui.ctx());
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
-                if let Some(id) = album {
-                    self.album_actions(ui, id);
-                }
                 if self.tl.awaiting.is_some() {
                     ui.spinner();
                 }
@@ -295,58 +306,6 @@ impl App {
                     pal.danger,
                     "Couldn't load your photos. Please try again in a moment.",
                 );
-            }
-        });
-    }
-
-    /// The thumbnail size slider and, where the view has date headers, the sort and grouping
-    /// choices (laid out right to left).
-    fn view_controls(&mut self, ui: &mut egui::Ui) {
-        let pal = Palette::of(ui.ctx());
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(style::icon_text(icons::ICON_IMAGE, 22.0).color(pal.text2));
-        style::slider_scope(ui, |ui| {
-            let r = ui
-                .add(
-                    egui::Slider::new(&mut self.tl.tile_size, 96.0..=320.0)
-                        .show_value(false)
-                        .trailing_fill(true),
-                )
-                .on_hover_text("Thumbnail size");
-            let v = f64::from(self.tl.tile_size);
-            r.widget_info(|| egui::WidgetInfo::slider(true, v, "Thumbnail size"));
-        });
-        ui.label(style::icon_text(icons::ICON_IMAGE, 14.0).color(pal.text2));
-        ui.label(RichText::new("Size").color(pal.text2));
-        ui.add_space(8.0);
-        if self.tl.headers() {
-            self.sort_and_group_choices(ui);
-        }
-    }
-
-    /// The "Sort" chip and the grouping menu of a view with date headers.
-    fn sort_and_group_choices(&mut self, ui: &mut egui::Ui) {
-        let label = if self.tl.newest_first {
-            "Newest first"
-        } else {
-            "Oldest first"
-        };
-        style::chip(ui, &format!("Sort: {label}"), label, false, |ui| {
-            ui.selectable_value(&mut self.tl.newest_first, true, "Newest first");
-            ui.selectable_value(&mut self.tl.newest_first, false, "Oldest first");
-        });
-        let current = match self.tl.group {
-            Group::Day => "Days",
-            Group::Month => "Months",
-            Group::Year => "Years",
-        };
-        style::chip(ui, current, current, false, |ui| {
-            for (g, name) in [
-                (Group::Day, "Days"),
-                (Group::Month, "Months"),
-                (Group::Year, "Years"),
-            ] {
-                ui.selectable_value(&mut self.tl.group, g, name);
             }
         });
     }
@@ -421,16 +380,21 @@ impl App {
         ui.add_space(8.0);
     }
 
-    /// One line above the grid that offers smart search until the user decides. "Not now" is
-    /// remembered; after that only the small card in the sidebar offers it.
-    pub(super) fn search_banner(&mut self, ui: &mut egui::Ui) {
-        if self.settings.search_prompt_dismissed
+    /// Whether the banner that offers smart search is to be shown. It takes the place of any tip:
+    /// only one banner is shown above the grid at a time.
+    pub(super) fn search_offer_visible(&self) -> bool {
+        !(self.settings.search_prompt_dismissed
             || self.snapshot.model_installed
             || matches!(
                 self.status.activity,
                 crate::library::Activity::Downloading { .. }
-            )
-        {
+            ))
+    }
+
+    /// One line above the grid that offers smart search until the user decides. "Not now" is
+    /// remembered; after that only the small card in the sidebar offers it.
+    pub(super) fn search_banner(&mut self, ui: &mut egui::Ui) {
+        if !self.search_offer_visible() {
             return;
         }
         let pal = Palette::of(ui.ctx());
@@ -446,18 +410,22 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(style::icon_text(icons::ICON_AUTO_AWESOME, 20.0).color(pal.accent));
                     ui.label(SEARCH_OFF_HINT);
-                    let on = egui::Button::new(RichText::new("Turn on").color(pal.onaccent))
-                        .fill(pal.accent);
-                    turn_on = ui
-                        .add(on)
-                        .on_hover_text(format!(
-                            "A one-time download of {} MB. Search then works offline, and \
-                             your photos never leave this computer.",
-                            spec.size_mb()
-                        ))
-                        .clicked();
-                    not_now = ui.button("Not now").clicked();
-                    learn_more = ui.link("Learn more").clicked();
+                    // The buttons and the link wrap together, so a large text size never
+                    // splits them across lines one by one.
+                    ui.horizontal(|ui| {
+                        let on = egui::Button::new(RichText::new("Turn on").color(pal.onaccent))
+                            .fill(pal.accent);
+                        turn_on = ui
+                            .add(on)
+                            .on_hover_text(format!(
+                                "A one-time download of {} MB. Search then works offline, \
+                                 and your photos never leave this computer.",
+                                spec.size_mb()
+                            ))
+                            .clicked();
+                        not_now = ui.button("Not now").clicked();
+                        learn_more = ui.link("Learn more").clicked();
+                    });
                 });
             });
         if turn_on {

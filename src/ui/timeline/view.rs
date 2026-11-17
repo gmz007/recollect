@@ -1,6 +1,8 @@
 //! Drawing the grid of the current view and handling clicks and keys in it.
 
-use super::dates::{fmt_taken, header_text, until_next_midnight};
+use super::banner::{self, BANNER_GAP, BANNER_HEIGHT};
+use super::dates::{day_header_text, fmt_taken, until_next_midnight};
+use super::header::{self, DaySelection};
 use super::layout::{HEADER_H, Layout, Row, reveal};
 use super::{TimelineState, View, file_name, thumb_key};
 use crate::media::MediaKind;
@@ -11,7 +13,8 @@ use crate::ui::style::{self, GAP};
 use crate::ui::tiles::{self, Tile, TileEvent, TileMark};
 use crate::ui::workers::ThumbCache;
 use crate::ui::{App, ClickOutcome, FavMark, GridEvents, fmt_time, marked};
-use egui::{RichText, Sense, Vec2};
+use chrono::NaiveDate;
+use egui::{Sense, Vec2};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,50 +26,92 @@ struct RowsView<'a> {
     pub(super) marks: &'a HashMap<i64, FavMark>,
     pub(super) albums: &'a [AlbumInfo],
     pub(super) width: f32,
+    pub(super) today: NaiveDate,
 }
 
 impl RowsView<'_> {
-    /// Draws the rows that intersect `viewport` and reports what the user did to them.
+    /// Draws the rows that intersect `viewport` (in the rows' own coordinates, which start at
+    /// the first row) and reports what the user did to them. The heading of the section at the
+    /// top of the view stays pinned there.
     pub(super) fn show(
         &self,
         ui: &mut egui::Ui,
         thumbs: &mut ThumbCache,
         viewport: egui::Rect,
     ) -> GridEvents {
-        let (tl, layout) = (self.tl, self.layout);
+        let layout = self.layout;
         let mut events = GridEvents::default();
         let (origin, _) =
             ui.allocate_exact_size(Vec2::new(self.width, layout.total), Sense::hover());
         let range = layout.visible(viewport.min.y, viewport.max.y);
-        if let Some(&row) = layout.rows.get(range.start) {
+        // Above the first row (the banner is in view) there is no photo to keep in place.
+        if viewport.min.y > 0.0
+            && let Some(&row) = layout.rows.get(range.start)
+        {
             events.top_item = Some(row.first_item());
+        }
+        let pin = layout.pinned_header(viewport.min.y);
+        let full_clip = ui.clip_rect();
+        // Photos under the pinned heading take neither hover nor clicks.
+        let mut tile_clip = full_clip;
+        if let Some((_, y)) = pin {
+            tile_clip.min.y = tile_clip.min.y.max(origin.min.y + y + HEADER_H);
         }
         for r in range {
             let top = origin.min.y + layout.tops[r];
             match layout.rows[r] {
-                Row::Header { group, .. } => {
-                    let g = tl.groups[group];
-                    let text = header_text(tl.group, g.key, g.end - g.start);
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(origin.min.x, top),
-                        Vec2::new(self.width, HEADER_H),
-                    );
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(text).text_style(style::section()));
-                    });
+                Row::Header { group, .. } if pin.map(|p| p.0) != Some(group) => {
+                    self.header(ui, origin, group, top, false, &mut events);
                 }
+                Row::Header { .. } => {}
                 Row::Tiles { start, end } => {
+                    ui.set_clip_rect(tile_clip);
                     for i in start..end {
                         let x = origin.min.x + (i - start) as f32 * (layout.tile + GAP);
                         let rect =
                             egui::Rect::from_min_size(egui::pos2(x, top), Vec2::splat(layout.tile));
                         self.tile(ui, thumbs, i, rect, &mut events);
                     }
+                    ui.set_clip_rect(full_clip);
                 }
             }
         }
+        if let Some((group, y)) = pin {
+            self.header(ui, origin, group, origin.min.y + y, true, &mut events);
+        }
         events
+    }
+
+    /// Draws the heading of section `group` with its top at `top`.
+    fn header(
+        &self,
+        ui: &mut egui::Ui,
+        origin: egui::Rect,
+        group: usize,
+        top: f32,
+        pinned: bool,
+        events: &mut GridEvents,
+    ) {
+        let tl = self.tl;
+        let g = tl.groups[group];
+        let text = day_header_text(g.key, self.today);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(origin.min.x, top),
+            Vec2::new(self.width, HEADER_H),
+        );
+        let selected = &tl.grid.sel;
+        let all = !selected.is_empty()
+            && selected.len() >= g.end - g.start
+            && (g.start..g.end).all(|i| selected.contains(tl.items[i].file_id));
+        let state = if all {
+            DaySelection::All
+        } else {
+            DaySelection::NotAll
+        };
+        let id = ui.make_persistent_id(("day", group));
+        if header::show(ui, id, rect, &text, state, pinned) {
+            events.day_toggled = Some(group);
+        }
     }
 
     pub(super) fn tile(
@@ -92,7 +137,7 @@ impl RowsView<'_> {
             .tip(&tip)
             .badge((item.kind == MediaKind::Video).then(|| fmt_time(item.duration.unwrap_or(0.0))))
             .favorite(marked(self.marks, item.file_id, item.favorite))
-            .selectable(mark, picking);
+            .selectable(mark);
         let id = ui.make_persistent_id(("tile", i));
         let out = tiles::show(ui, thumbs, id, rect, &tile);
         let in_album = matches!(tl.view, View::Album(_));
@@ -137,7 +182,7 @@ impl App {
         self.timeline_rows(ui);
     }
 
-    /// The selection bar or view header, the tip and the "On this day" strip.
+    /// The selection bar, the title of an album or folder, a load problem and the tip.
     fn timeline_header(&mut self, ui: &mut egui::Ui) {
         self.selection_bar_ui(ui);
         self.view_header(ui);
@@ -147,7 +192,6 @@ impl App {
             let now = chrono::Local::now().naive_local();
             ui.ctx()
                 .request_repaint_after(until_next_midnight(now) + Duration::from_secs(1));
-            self.on_this_day_strip(ui);
         }
     }
 
@@ -155,6 +199,10 @@ impl App {
     fn timeline_rows(&mut self, ui: &mut egui::Ui) {
         self.tl.grid.shown = true;
         let width = ui.available_width() - style::SCROLLBAR_ALLOWANCE;
+        let banner = (self.tl.view == View::Timeline)
+            .then(|| self.on_this_day_banner())
+            .flatten();
+        self.tl.lead = banner.as_ref().map_or(0.0, |_| BANNER_HEIGHT + BANNER_GAP);
         self.tl.ensure_layout(width);
         self.tl.resolve_pending();
         let area = grid_scroll_area("timeline", &mut self.tl.grid.scroll_to);
@@ -167,24 +215,59 @@ impl App {
             marks: &self.fav_marks,
             albums: &self.albums,
             width,
+            today: self.today(),
         };
+        let lead = self.tl.lead;
+        let items = Arc::clone(&self.tl.items);
         let mut events = GridEvents::default();
+        let mut banner_event = None;
         let out = area.show_viewport(ui, |ui, viewport| {
-            events = rows.show(ui, &mut self.thumbs, viewport);
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            if let Some(b) = &banner {
+                banner_event = banner::show(ui, &mut self.thumbs, &items, b, width);
+                ui.add_space(BANNER_GAP);
+            }
+            events = rows.show(
+                ui,
+                &mut self.thumbs,
+                viewport.translate(egui::vec2(0.0, -lead)),
+            );
         });
         self.tl.top_item = events.top_item;
         self.follow_keyboard_selection(ui, &out);
         if self.tl.pending.is_some() {
             ui.ctx().request_repaint();
         }
-        if let Some((i, ev, mods)) = events.clicked {
-            self.click_timeline_item(i, ev, mods);
+        if let Some((b, e)) = banner.as_ref().zip(banner_event) {
+            self.banner_event(b, e);
         }
-        self.apply_menu_events(&mut events);
+        self.apply_timeline_events(events);
         // Applying a scroll offset needs one more frame to take effect.
         if self.tl.grid.scroll_to.is_some() {
             ui.ctx().request_repaint();
         }
+    }
+
+    /// Acts on what the user did to the heading circles and the tiles.
+    fn apply_timeline_events(&mut self, mut events: GridEvents) {
+        if let Some(group) = events.day_toggled.take() {
+            self.toggle_day(group);
+        }
+        if let Some((i, ev, mods)) = events.clicked {
+            self.click_timeline_item(i, ev, mods);
+        }
+        self.apply_menu_events(&mut events);
+    }
+
+    /// Selects every photo of day `group`, or deselects them if all are selected.
+    fn toggle_day(&mut self, group: usize) {
+        let Some(g) = self.tl.groups.get(group).copied() else {
+            return;
+        };
+        let items = Arc::clone(&self.tl.items);
+        self.tl
+            .grid
+            .toggle_range(g.start..g.end, items.len(), &|k| items[k].file_id);
     }
 
     /// Scrolls so that an item the keyboard moved to is in view.
@@ -203,13 +286,16 @@ impl App {
         };
         self.tl.grid.keyboard_moved = false;
         if let Some(layout) = &self.tl.layout {
-            let (top, h) = layout.reveal_span(i);
-            self.tl.grid.scroll_to = reveal(
-                top,
-                h,
-                out.inner_rect.height(),
-                out.state.clamped_offset().y,
-            );
+            let (mut top, mut h) = layout.reveal_span(i);
+            if self.tl.headers() && top >= layout.tops[layout.row_of_item(i)] {
+                // The pinned heading covers the top of the view: keep the row below it.
+                let pad = HEADER_H.min(top);
+                top -= pad;
+                h += pad;
+            }
+            let offset = out.state.clamped_offset().y - self.tl.lead;
+            self.tl.grid.scroll_to =
+                reveal(top, h, out.inner_rect.height(), offset).map(|y| y + self.tl.lead);
             if self.tl.grid.scroll_to.is_some() {
                 ui.ctx().request_repaint();
             }

@@ -13,13 +13,16 @@ computer.
 
 ## Features
 
-- **A calm, modern look:** square thumbnails with small gaps, large date headings, light and dark
+- **A calm, modern look:** square thumbnails edge to edge with small gaps, date headings, light and dark
   colors that follow your system (or pick one in **Settings**), a **Large** text size option, and
   plain wording throughout. Notices appear as small toasts at the bottom instead of a status bar.
-- **Photos** (the timeline): all your photos and videos grouped by day, month or year (the
-  **Months** menu above the grid), from the capture date in the file (falling back to the file
-  date), newest or oldest first (the **Newest first** menu), with a thumbnail size slider. Browsing works
-  before smart search is turned on.
+- **Photos** (the timeline): all your photos and videos grouped by day ("Today", "Yesterday",
+  "Sunday 15 November"; the heading of the day at the top stays in view while you scroll), from the
+  capture date in the file (falling back to the file date), newest first. Hover a photo and click
+  the circle in its corner to select it; hover a day's heading to select the whole day. Pinch, or
+  hold Ctrl/Cmd and scroll, or press Ctrl/Cmd with `=`, `-` and `0`, to change the photo size
+  (also in **Settings** as Small, Medium or Large). Browsing works before smart search is turned
+  on.
 - **Jump to date** in the sidebar: jump to any year or month.
 - **Folders** (click one in the sidebar; **+** opens *Add a folder* with your Pictures, Videos,
   Desktop and Downloads folders as suggestions; hover a folder and click **×** to stop showing
@@ -66,7 +69,7 @@ computer.
   new photos…", "Reading photo dates… 1,234 of 5,000", "Getting your photos ready for search…
   45 %", "Downloading smart search… 120 of 485 MB"), with pause and cancel.
 - **Help** (the **?** button): how search works and the keyboard shortcuts.
-- **On this day:** photos taken on today's date in earlier years, in a strip above the timeline
+- **On this day:** photos taken on today's date in earlier years, in a banner at the top of Photos (the ✕ hides it until tomorrow)
   (photos dated only by their file time are left out; 29 February shows on 28 February in years
   without one).
 - Text search over images and video moments ("a dog in the snow").

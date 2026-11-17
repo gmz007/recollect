@@ -1,6 +1,6 @@
 #![expect(clippy::too_many_lines, reason = "a scenario test reads top to bottom")]
 #![expect(clippy::cast_possible_wrap, reason = "small test fixture indices")]
-use super::dates::{group_key, header_text, until_next_midnight};
+use super::dates::{day_header_text, day_key, until_next_midnight};
 use super::layout::{HEADER_H, SECTION_GAP, reveal};
 use super::memories::{ON_THIS_DAY_MAX, years_ago_text};
 use super::*;
@@ -59,51 +59,32 @@ fn item(taken_at: i64) -> TimelineItem {
 fn keys_split_at_midnight_and_year_end() {
     let last = ts(2019, 12, 31, 23, 59, 59);
     let first = ts(2020, 1, 1, 0, 0, 0);
-    for g in [Group::Day, Group::Month, Group::Year] {
-        assert_ne!(group_key(last, g), group_key(first, g), "{g:?}");
-    }
+    assert_ne!(day_key(last), day_key(first));
     assert_eq!(
-        group_key(ts(2019, 7, 4, 0, 0, 0), Group::Day),
-        group_key(ts(2019, 7, 4, 23, 59, 59), Group::Day)
+        day_key(ts(2019, 7, 4, 0, 0, 0)),
+        day_key(ts(2019, 7, 4, 23, 59, 59))
     );
-    assert_eq!(
-        group_key(ts(2019, 7, 1, 0, 0, 0), Group::Month),
-        group_key(ts(2019, 7, 31, 23, 59, 59), Group::Month)
-    );
-    assert_ne!(
-        group_key(ts(2019, 7, 31, 23, 59, 59), Group::Month),
-        group_key(ts(2019, 8, 1, 0, 0, 0), Group::Month)
-    );
-    // Leap day is its own day and belongs to February.
+    // Leap day is its own day.
     let leap = ts(2020, 2, 29, 12, 0, 0);
-    assert_ne!(
-        group_key(leap, Group::Day),
-        group_key(ts(2020, 3, 1, 0, 0, 0), Group::Day)
-    );
-    assert_eq!(
-        group_key(leap, Group::Month),
-        group_key(ts(2020, 2, 1, 0, 0, 0), Group::Month)
-    );
-    assert_eq!(
-        group_key(ts(2020, 3, 1, 0, 0, 0), Group::Day) - group_key(leap, Group::Day),
-        1
-    );
+    assert_ne!(day_key(leap), day_key(ts(2020, 3, 1, 0, 0, 0)));
+    assert_eq!(day_key(ts(2020, 3, 1, 0, 0, 0)) - day_key(leap), 1);
 }
 
 #[test]
 fn headers_read_naturally() {
-    let t = ts(2019, 7, 6, 10, 0, 0);
+    let today = NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+    let head = |y, m, d| day_header_text(day_key(ts(y, m, d, 10, 0, 0)), today);
+    assert_eq!(head(2026, 11, 17), "Today");
+    assert_eq!(head(2026, 11, 16), "Yesterday");
+    // This year: no year.
+    assert_eq!(head(2026, 11, 15), "Sunday 15 November");
+    // Another year: with the year.
+    assert_eq!(head(2019, 7, 6), "Saturday 6 July 2019");
+    // Yesterday across a year boundary.
+    let new_year = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
     assert_eq!(
-        header_text(Group::Day, group_key(t, Group::Day), 12),
-        "Saturday 6 July 2019 · 12"
-    );
-    assert_eq!(
-        header_text(Group::Month, group_key(t, Group::Month), 132),
-        "July 2019 · 132"
-    );
-    assert_eq!(
-        header_text(Group::Year, group_key(t, Group::Year), 1204),
-        "2019 · 1,204"
+        day_header_text(day_key(ts(2026, 12, 31, 9, 0, 0)), new_year),
+        "Yesterday"
     );
     assert_eq!(thousands(0), "0");
     assert_eq!(thousands(999), "999");
@@ -113,19 +94,18 @@ fn headers_read_naturally() {
 #[test]
 fn groups_follow_display_order() {
     let items = vec![
-        item(ts(2020, 1, 1, 0, 0, 0)),
+        item(ts(2020, 1, 1, 9, 0, 0)),
+        item(ts(2020, 1, 1, 8, 0, 0)),
         item(ts(2019, 12, 31, 23, 59, 59)),
         item(ts(2019, 12, 1, 8, 0, 0)),
-        item(ts(2019, 11, 30, 8, 0, 0)),
     ];
-    let g = compute_groups(&items, Group::Month, true);
+    let g = compute_groups(&items, true);
     let spans: Vec<_> = g.iter().map(|g| (g.start, g.end)).collect();
-    assert_eq!(spans, [(0, 1), (1, 3), (3, 4)]);
-    assert_eq!(compute_groups(&items, Group::Year, true).len(), 2);
-    let flat = compute_groups(&items, Group::Day, false);
+    assert_eq!(spans, [(0, 2), (2, 3), (3, 4)]);
+    let flat = compute_groups(&items, false);
     assert_eq!(flat.len(), 1);
     assert_eq!((flat[0].start, flat[0].end), (0, 4));
-    assert!(compute_groups(&[], Group::Day, true).is_empty());
+    assert!(compute_groups(&[], true).is_empty());
 }
 
 #[test]
@@ -200,7 +180,7 @@ fn visible_rows_stay_cheap_for_huge_libraries() {
     let items: Vec<_> = (0..n)
         .map(|i| item(1_500_000_000 - i as i64 * 3000))
         .collect();
-    let groups = compute_groups(&items, Group::Month, true);
+    let groups = compute_groups(&items, true);
     let l = Layout::build(&groups, 1000.0, 180.0, true);
     let y = l.total * 0.5;
     let r = l.visible(y, y + 800.0);
@@ -528,4 +508,40 @@ fn state_for_test() -> TimelineState {
     )
     .unwrap();
     TimelineState::new(lib, &egui::Context::default())
+}
+
+#[test]
+fn the_heading_at_the_top_of_the_view_stays_pinned_until_the_next_one_pushes_it_up() {
+    // Two days of 5 and 2 photos in rows of 3 (tiles of 100).
+    let groups = [
+        GroupSpan {
+            key: 1,
+            start: 0,
+            end: 5,
+        },
+        GroupSpan {
+            key: 2,
+            start: 5,
+            end: 7,
+        },
+    ];
+    let l = Layout::build(&groups, 300.0 + 2.0 * GAP, 100.0, true);
+    let second = l.tops[l.group_row[1]];
+    // Nothing is pinned at the very top.
+    assert_eq!(l.pinned_header(0.0), None);
+    assert_eq!(l.pinned_header(-20.0), None);
+    // Inside the first section: its heading sits at the top of the view.
+    assert_eq!(l.pinned_header(HEADER_H + 30.0), Some((0, HEADER_H + 30.0)));
+    // Just before the next heading arrives: still at the top.
+    let before = second - HEADER_H - 1.0;
+    assert_eq!(l.pinned_header(before), Some((0, before)));
+    // As the next heading arrives, it pushes the pinned one up.
+    let pushing = second - 10.0;
+    assert_eq!(l.pinned_header(pushing), Some((0, second - HEADER_H)));
+    // At the next heading, that section is pinned.
+    assert_eq!(l.pinned_header(second), Some((1, second)));
+    assert_eq!(l.pinned_header(second + 20.0), Some((1, second + 20.0)));
+    // No headings, nothing pinned.
+    let flat = Layout::build(&compute_groups(&[item(1)], false), 300.0, 100.0, false);
+    assert_eq!(flat.pinned_header(50.0), None);
 }

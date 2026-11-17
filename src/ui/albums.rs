@@ -296,6 +296,9 @@ impl App {
             self.dialogs.new_album = Some(na);
             return;
         }
+        if !na.add.is_empty() {
+            self.clear_selection();
+        }
         self.lib.queue_album(AlbumOp::Create { name, add: na.add });
     }
 

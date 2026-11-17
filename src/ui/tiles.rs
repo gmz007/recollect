@@ -1,6 +1,7 @@
-//! Photo and video tiles for the grids: a square centre-cropped thumbnail with a selection
-//! circle (top left) and a favorite heart (bottom left) that appear on hover, and a duration pill
-//! on videos.
+//! Photo and video tiles for the grids: a square centre-cropped thumbnail, edge to edge. A
+//! selection circle (top left) appears on hover; a selected tile shrinks onto a tinted cell. A
+//! favorite shows a small white heart (bottom left), and hovering any other tile offers an
+//! outlined one. Videos carry a duration pill.
 
 use super::selection::ClickMods;
 use super::style::{self, Palette, icons};
@@ -10,18 +11,26 @@ use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 
 /// Size of the clickable areas of the circle and the heart.
 const ZONE: f32 = 34.0;
-/// Radius of the selection circle and of the dark disc behind the heart.
-const CIRCLE_RADIUS: f32 = 11.0;
-const HEART_DISC_RADIUS: f32 = 12.0;
+/// Diameter of the selection circle.
+const CIRCLE_DIAMETER: f32 = 20.0;
+/// Distance of the circle from the tile's corner, unselected and selected (the selected circle
+/// sits on the cell, outside the shrunken photo).
+const CIRCLE_INSET: f32 = 7.0;
+const CIRCLE_INSET_SELECTED: f32 = 4.0;
 /// Size of the check mark and of the heart.
-const CHECK_SIZE: f32 = 16.0;
-const HEART_SIZE: f32 = 18.0;
-/// Opacity (0-255) of the dark discs behind the circle and the heart.
-const CIRCLE_DISC_ALPHA: u8 = 70;
-const HEART_DISC_ALPHA: u8 = 90;
-/// The shades at the top and bottom edge while hovered: height and opacity at the edge.
-const SHADE_HEIGHT: f32 = 64.0;
-const SHADE_ALPHA: u8 = 105;
+const CHECK_SIZE: f32 = 14.0;
+const HEART_SIZE: f32 = 16.0;
+/// Distance of the heart's centre from the bottom left corner.
+const HEART_INSET: f32 = 15.0;
+/// Opacity (0-255) of the soft shadow behind the heart.
+const HEART_SHADOW_ALPHA: u8 = 95;
+/// The shade at the top edge while hovered: height and opacity at the edge.
+const SHADE_HEIGHT: f32 = 44.0;
+const SHADE_ALPHA: u8 = 82;
+/// A selected photo is drawn at this share of the tile, centred on the tinted cell.
+const SELECTED_SCALE: f32 = 0.86;
+/// Corner radius of a selected (shrunken) photo.
+const SELECTED_RADIUS: u8 = 3;
 
 /// How a tile takes part in the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,8 +56,6 @@ pub(super) struct Tile<'a> {
     badge: Option<String>,
     favorite: bool,
     mark: TileMark,
-    /// Selection mode: circles stay visible on every tile.
-    picking: bool,
     /// Whether the tile has a selection circle (a tile that only opens has none).
     selectable: bool,
 }
@@ -64,7 +71,6 @@ impl<'a> Tile<'a> {
             badge: None,
             favorite: false,
             mark: TileMark::None,
-            picking: false,
             selectable: false,
         }
     }
@@ -84,11 +90,10 @@ impl<'a> Tile<'a> {
         self
     }
 
-    /// Gives the tile a selection circle, in the given selection state.
-    pub(super) fn selectable(mut self, mark: TileMark, picking: bool) -> Self {
+    /// Gives the tile a selection circle (shown on hover), in the given selection state.
+    pub(super) fn selectable(mut self, mark: TileMark) -> Self {
         self.selectable = true;
         self.mark = mark;
-        self.picking = picking;
         self
     }
 
@@ -317,8 +322,7 @@ fn paint_placeholder(
     failed: bool,
     pal: &Palette,
 ) {
-    let radius = CornerRadius::same(style::TILE_RADIUS);
-    painter.rect_filled(rect, radius, pal.side);
+    painter.rect_filled(rect, CornerRadius::ZERO, pal.side);
     if failed {
         // A picture that is not there: the icon alone on small tiles, with a line of
         // text on larger ones.
@@ -352,23 +356,47 @@ fn paint(
     pal: &Palette,
 ) {
     let painter = ui.painter_at(rect);
+    let checked = tile.checked();
+    if checked {
+        painter.rect_filled(rect, CornerRadius::ZERO, pal.tint);
+    }
     paint_picture(ui, &painter, thumbs, rect, tile, pal);
-    if hovered {
-        paint_shades(&painter, rect);
+    if hovered && !checked {
+        painter.add(fade(rect, true, SHADE_HEIGHT, SHADE_ALPHA));
     }
-    if tile.selectable && (hovered || tile.picking || tile.checked()) && !small {
-        paint_select_circle(&painter, rect, tile.checked(), pal);
+    if tile.selectable && (hovered || checked) && !small {
+        paint_select_circle(&painter, rect, checked, pal);
     }
+    // The heart and the time sit on the photo, which is smaller than the tile when selected.
+    let photo = picture_area(rect, checked);
     if !small && (tile.favorite || hovered) {
-        paint_heart(&painter, rect, tile.favorite);
+        paint_heart(&painter, photo, tile.favorite);
     }
     if let Some(text) = &tile.badge {
-        paint_pill(&painter, rect, text);
+        paint_pill(&painter, photo, text);
     }
-    paint_mark_ring(&painter, rect, tile.mark, pal);
+    if tile.mark == TileMark::Focused {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            CornerRadius::ZERO,
+            Stroke::new(2.0, pal.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
 }
 
-/// The thumbnail, or the placeholder while there is none.
+/// Where the photo is drawn within the tile: all of it, or smaller on the tinted cell while
+/// selected.
+fn picture_area(rect: Rect, checked: bool) -> Rect {
+    if checked {
+        rect.shrink(rect.width() * (1.0 - SELECTED_SCALE) / 2.0)
+    } else {
+        rect
+    }
+}
+
+/// The thumbnail (shrunken onto the tinted cell when checked), or the placeholder while there
+/// is none.
 fn paint_picture(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -377,105 +405,70 @@ fn paint_picture(
     tile: &Tile<'_>,
     pal: &Palette,
 ) {
+    let area = picture_area(rect, tile.checked());
+    let radius = if tile.checked() {
+        CornerRadius::same(SELECTED_RADIUS)
+    } else {
+        CornerRadius::ZERO
+    };
     let failed = thumbs.failed(tile.key);
     if let Some(tex) = thumbs.get(tile.key) {
-        let radius = CornerRadius::same(style::TILE_RADIUS);
-        let shape = egui::epaint::RectShape::filled(rect, radius, Color32::WHITE)
+        let shape = egui::epaint::RectShape::filled(area, radius, Color32::WHITE)
             .with_texture(tex.id(), square_uv(tex.size_vec2()));
         painter.add(shape);
     } else {
-        paint_placeholder(ui, painter, rect, failed, pal);
+        paint_placeholder(ui, painter, area, failed, pal);
     }
 }
 
-/// Soft shades at the top and bottom keep the circle, the heart and the time readable on
-/// bright photos, without a visible edge.
-fn paint_shades(painter: &egui::Painter, rect: Rect) {
-    for top in [true, false] {
-        painter.add(fade(
-            rect,
-            top,
-            SHADE_HEIGHT,
-            SHADE_ALPHA,
-            f32::from(style::TILE_RADIUS),
-        ));
-    }
-}
-
-/// The selection circle at the top left: empty, or filled with a check mark.
+/// The selection circle at the top left: an outline, or filled with a check mark.
 fn paint_select_circle(painter: &egui::Painter, rect: Rect, checked: bool, pal: &Palette) {
-    let c = circle_center(rect);
+    let c = circle_center(rect, checked);
+    let r = CIRCLE_DIAMETER / 2.0;
     if checked {
-        painter.circle_filled(c, CIRCLE_RADIUS, pal.accent);
+        painter.circle_filled(c, r, pal.accent);
         paint_icon(painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.onaccent);
     } else {
-        painter.circle_filled(
-            c,
-            CIRCLE_RADIUS,
-            Color32::from_black_alpha(CIRCLE_DISC_ALPHA),
-        );
-        painter.circle_stroke(c, CIRCLE_RADIUS - 1.0, Stroke::new(2.0, Color32::WHITE));
+        painter.circle_stroke(c, r - 0.75, Stroke::new(1.5, style::OVERLAY_WHITE));
     }
 }
 
-/// The heart at the bottom left: filled for a favorite, an outline while hovered otherwise.
+/// The heart at the bottom left: a white heart for a favorite, an outline while hovered
+/// otherwise. A soft shadow keeps it visible on bright photos.
 fn paint_heart(painter: &egui::Painter, rect: Rect, favorite: bool) {
     let c = heart_center(rect);
-    painter.circle_filled(
-        c,
-        HEART_DISC_RADIUS,
-        Color32::from_black_alpha(HEART_DISC_ALPHA),
-    );
     let icon = if favorite {
         icons::ICON_FAVORITE
     } else {
         icons::ICON_FAVORITE.outlined()
     };
+    let shadow = Color32::from_black_alpha(HEART_SHADOW_ALPHA);
+    for offset in [(0.0, 1.5), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0)] {
+        paint_icon(
+            painter,
+            c + Vec2::new(offset.0, offset.1),
+            icon,
+            HEART_SIZE,
+            shadow,
+        );
+    }
     paint_icon(painter, c, icon, HEART_SIZE, style::OVERLAY_WHITE);
 }
 
-/// The ring around a checked tile (thick) or the tile the keyboard is on (thin).
-fn paint_mark_ring(painter: &egui::Painter, rect: Rect, mark: TileMark, pal: &Palette) {
-    let radius = CornerRadius::same(style::TILE_RADIUS);
-    if mark == TileMark::Checked {
-        painter.rect_stroke(
-            rect.shrink(1.5),
-            radius,
-            Stroke::new(3.0, pal.accent),
-            egui::StrokeKind::Inside,
-        );
-    } else if mark == TileMark::Focused {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            radius,
-            Stroke::new(2.0, pal.accent),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
-
 /// A black fade over the top or bottom edge of `rect`: `alpha` at the edge, falling smoothly to
-/// nothing `height` points inside. The outer corners follow the tile's rounded corners.
-fn fade(rect: Rect, top: bool, height: f32, alpha: u8, radius: f32) -> egui::Shape {
+/// nothing `height` points inside.
+fn fade(rect: Rect, top: bool, height: f32, alpha: u8) -> egui::Shape {
     let height = height.min(rect.height());
     let mut mesh = egui::Mesh::default();
-    // Rows from the edge inwards: a few close together where the corner curves, then the rest.
+    // Rows from the edge inwards, closer together near the edge where the fade is strongest.
     let steps = [0.0, 0.1, 0.25, 0.45, 0.7, 1.0];
-    let mut rows: Vec<f32> = (0..=4).map(|i| radius * i as f32 / 4.0).collect();
-    rows.extend(steps.iter().map(|t| t * height).filter(|&y| y > radius));
-    rows.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-    for (i, &d) in rows.iter().enumerate() {
-        let inset = if d < radius {
-            radius - (radius * radius - (radius - d) * (radius - d)).sqrt()
-        } else {
-            0.0
-        };
-        let t = (d / height).clamp(0.0, 1.0);
+    for (i, t) in steps.iter().enumerate() {
+        let d = t * height;
         let a = (f32::from(alpha) * (1.0 - t) * (1.0 - t)).round() as u8;
         let color = Color32::from_black_alpha(a);
         let y = if top { rect.min.y + d } else { rect.max.y - d };
-        mesh.colored_vertex(Pos2::new(rect.min.x + inset, y), color);
-        mesh.colored_vertex(Pos2::new(rect.max.x - inset, y), color);
+        mesh.colored_vertex(Pos2::new(rect.min.x, y), color);
+        mesh.colored_vertex(Pos2::new(rect.max.x, y), color);
         if i > 0 {
             let k = u32::try_from(i * 2).unwrap_or(u32::MAX);
             mesh.add_triangle(k - 2, k - 1, k);
@@ -485,12 +478,17 @@ fn fade(rect: Rect, top: bool, height: f32, alpha: u8, radius: f32) -> egui::Sha
     egui::Shape::mesh(mesh)
 }
 
-fn circle_center(rect: Rect) -> Pos2 {
-    rect.min + Vec2::splat(ZONE / 2.0)
+fn circle_center(rect: Rect, checked: bool) -> Pos2 {
+    let inset = if checked {
+        CIRCLE_INSET_SELECTED
+    } else {
+        CIRCLE_INSET
+    };
+    rect.min + Vec2::splat(inset + CIRCLE_DIAMETER / 2.0)
 }
 
 fn heart_center(rect: Rect) -> Pos2 {
-    Pos2::new(rect.min.x + ZONE / 2.0, rect.max.y - ZONE / 2.0)
+    Pos2::new(rect.min.x + HEART_INSET, rect.max.y - HEART_INSET)
 }
 
 /// A dark pill with a play icon and `text` in the bottom right corner.
@@ -611,7 +609,7 @@ mod tests {
             .with_size(Vec2::new(300.0, 300.0))
             .build_ui(move |ui| {
                 let name = || "a.jpg".to_string();
-                let tile = Tile::new(&key, "Item", &name).selectable(TileMark::None, false);
+                let tile = Tile::new(&key, "Item", &name).selectable(TileMark::None);
                 let out = show(ui, &mut thumbs, ui.scope_id().with("tile"), rect, &tile);
                 if let Some((event, _)) = out.event {
                     *sink.borrow_mut() = Some(event);

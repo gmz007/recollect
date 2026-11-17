@@ -3,39 +3,16 @@
 use super::*;
 
 #[test]
-fn timeline_shows_month_headers_and_regroups() {
+fn the_timeline_has_day_headers_and_no_view_header() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
-    let mut h = album_harness(&app);
-    h.get_by_label("December 2019 · 1");
-    h.get_by_label("240 photos");
-    h.get_by_label("Thumbnail size");
-    h.get_by_label("Sort: Newest first");
-    // The "Months" menu regroups the timeline.
-    h.get_by_label("Months").click();
-    h.run();
-    h.get_by_label("Years").click();
-    h.run();
-    h.get_by_label("2019 · 12");
-    assert!(h.query_by_label("December 2019 · 1").is_none());
-    h.get_by_label("Years").click();
-    h.run();
-    h.get_by_label("Days").click();
-    h.run();
-    h.get_by_label("Sunday 15 December 2019 · 1");
-    // The sort menu says what it is set to and flips the order.
-    h.get_by_label("Sort: Newest first").click();
-    h.run_steps(8);
-    h.get_by_label("Oldest first").click();
-    // The list is read again in the new order (a spinner shows meanwhile).
-    h.run_steps(2);
-    settle(&mut h, || {
-        let a = app.borrow();
-        !a.tl.newest_first && a.tl.awaiting.is_none() && a.tl.loaded
-    });
-    h.run_steps(2);
-    h.get_by_label("Sort: Oldest first");
-    assert!(!app.borrow().tl.newest_first);
+    let h = album_harness(&app);
+    h.get_by_label("Sunday 15 December 2019");
+    // The title row with its count and the size, sort and grouping controls are gone.
+    assert!(h.query_by_label("240 photos").is_none());
+    assert!(h.query_by_label("Thumbnail size").is_none());
+    assert!(h.query_by_label("Sort: Newest first").is_none());
+    assert!(h.query_by_label("Months").is_none());
 }
 
 #[test]
@@ -86,8 +63,7 @@ fn banner_shows_while_the_timeline_stays_visible() {
     h.get_by_label("Turn on smart search to find photos by describing them");
     h.get_by_label("Turn on");
     h.get_by_label("Not now");
-    h.get_by_label("December 2019 · 1");
-    assert_eq!(app.borrow().tl.group, Group::Month);
+    h.get_by_label("Sunday 15 December 2019");
 }
 
 #[test]
@@ -135,18 +111,18 @@ fn only_the_circle_and_modifier_keys_select_instead_of_opening() {
 }
 
 #[test]
-fn on_this_day_strip_opens_the_viewer_on_its_own_list() {
+fn the_on_this_day_banner_opens_the_viewer_on_its_own_list() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     // 15 March: one photo per year from 2000 to 2019 was taken on that day.
     app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
     let mut h = album_harness(&app);
     h.get_by_label("On this day");
-    h.get_by_label("7 years ago");
-    h.get_by_label("26 years ago");
-    // Newest first: 2019 comes first. March 2019 is img10 in `spread_items` (Dec = 1).
-    h.get_by_label("On this day img10.jpg").click();
+    // The newest of them is from 2019.
+    h.get_by_label("15 March, 7 years ago");
+    h.get_by_label("See 20 photos").click();
     h.run_steps(3);
+    // March 2019 is img10 in `spread_items` (Dec = 1).
     h.get_by_label("img10.jpg");
     h.get_by_label("1 of 20");
     h.key_press(egui::Key::ArrowRight);
@@ -162,13 +138,33 @@ fn on_this_day_strip_opens_the_viewer_on_its_own_list() {
 }
 
 #[test]
-fn on_this_day_tiles_open_and_have_no_selection_circle() {
+fn the_on_this_day_banner_can_be_hidden_until_tomorrow() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("On this day");
+    h.get_by_label("Hide On this day").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("On this day").is_none());
+    let lib = Arc::clone(&app.borrow().lib);
+    assert_eq!(
+        lib.settings().on_this_day_hidden_on.as_deref(),
+        Some("2026-03-15")
+    );
+    // The next day, it is back (there are photos from the 16th too: none, so pick another day).
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 4, 15);
+    h.run_steps(3);
+    h.get_by_label("On this day");
+}
+
+#[test]
+fn there_is_no_on_this_day_banner_without_photos_from_that_day() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    // Photos were taken on the 15th of each month only.
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 16);
     let h = album_harness(&app);
-    h.get_by_label("On this day img10.jpg");
-    // img10 is only on screen in the strip (the grid starts at the newest photos).
-    assert!(h.query_by_label("Select img10.jpg").is_none());
-    assert!(h.query_by_label("Select On this day img10.jpg").is_none());
+    assert!(h.query_by_label("On this day").is_none());
+    assert!(h.query_by_label_contains("See ").is_none());
 }

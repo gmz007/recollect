@@ -17,6 +17,7 @@ mod grid;
 mod guide;
 mod help;
 mod notices;
+mod photo_size;
 mod platform;
 mod preview;
 mod results;
@@ -160,6 +161,14 @@ pub struct App {
     bar_anchor: Option<egui::Pos2>,
     snapshot: Snapshot,
     snapshot_read: BgRead<Snapshot>,
+    /// Folders that cannot be read now (an unplugged drive), found by a background check that
+    /// runs when the folders change and then every half minute.
+    missing_folders: Vec<i64>,
+    folder_check: BgRead<Vec<i64>>,
+    /// The folders the last check was started for, and when.
+    folders_checked: Option<(Vec<i64>, Instant)>,
+    /// When the photo size last changed and whether it is saved.
+    size_change: photo_size::SizeChange,
     ctx: egui::Context,
     status: Status,
     was_busy: bool,
@@ -192,6 +201,7 @@ struct Workers {
     years_read: BgRead<Vec<i32>>,
     albums_read: BgRead<anyhow::Result<Vec<AlbumInfo>>>,
     snapshot_read: BgRead<Snapshot>,
+    folder_check: BgRead<Vec<i64>>,
 }
 
 impl Workers {
@@ -216,6 +226,10 @@ impl Workers {
             let lib = Arc::clone(lib);
             move || Some(Snapshot::fetch(&lib))
         });
+        let folder_check = BgRead::new(ctx, "folder-check", {
+            let lib = Arc::clone(lib);
+            move || snapshot::missing_folders(&lib)
+        });
         Self {
             search,
             thumbs,
@@ -224,6 +238,7 @@ impl Workers {
             years_read,
             albums_read,
             snapshot_read,
+            folder_check,
         }
     }
 }
@@ -272,6 +287,10 @@ impl App {
             bar_anchor: None,
             snapshot: Snapshot::default(),
             snapshot_read: w.snapshot_read,
+            missing_folders: Vec::new(),
+            folder_check: w.folder_check,
+            folders_checked: None,
+            size_change: photo_size::SizeChange::default(),
             ctx: ctx.clone(),
             status: Status::default(),
             was_busy: false,
@@ -290,6 +309,7 @@ impl App {
     fn load_initial_state(&mut self, ctx: &egui::Context) {
         self.settings = self.lib.settings();
         self.settings_seen = self.lib.settings_version();
+        self.tl.tile_size = crate::config::clamp_photo_size(self.settings.photo_size);
         style::apply(ctx, self.settings.theme, self.settings.text_size);
         self.snapshot = Snapshot::fetch(&self.lib);
         if !self.settings.welcome_done {
@@ -334,6 +354,7 @@ impl App {
         self.thumbs.begin_frame(ctx);
         self.previews.begin_frame(ctx);
         self.poll_snapshot();
+        self.poll_folder_check(ctx);
         self.status = self.lib.status();
         self.poll_search();
         self.poll_debounce(ctx);
@@ -435,6 +456,7 @@ impl App {
         let timeline_was_shown = std::mem::take(&mut self.tl.grid.shown);
         self.handle_navigation_keys(&ctx, grid_was_shown);
         self.handle_timeline_keys(&ctx, timeline_was_shown);
+        self.handle_photo_size(&ctx, grid_was_shown || timeline_was_shown);
         self.show_panels(ui, &ctx);
         self.show_overlays(&ctx);
         if !self.keys_blocked(&ctx) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -514,6 +536,7 @@ impl App {
         self.search_help_dropdown(ctx);
         self.album_dialogs(ctx);
         self.folder_dialogs(ctx);
+        self.photo_size_chip(ctx);
         self.toasts(ctx);
     }
 }
@@ -576,6 +599,11 @@ impl eframe::App for App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // A photo size changed a moment ago is kept.
+        if self.size_change.is_unsaved() {
+            let size = self.tl.tile_size;
+            let _ = self.lib.update_settings(|s| s.photo_size = size);
+        }
         // Closing the window stops background work cleanly (the database stays consistent
         // either way, but this avoids killing a write mid-transaction).
         // Writes still queued (favorites, album changes) would be lost with the library, so

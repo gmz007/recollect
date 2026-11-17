@@ -128,11 +128,12 @@ fn appearance_changes_apply_at_once() {
     h.get_by_label("Light").click();
     h.run();
     assert_eq!(lib.settings().theme, Theme::Light);
-    h.get_by_label("Large").click();
+    // Photo size has Small, Medium and Large too; the text size row comes first.
+    h.get_all_by_label("Large").next().unwrap().click();
     h.run();
     assert_eq!(lib.settings().text_size, TextSize::Large);
     assert!((h.ctx.zoom_factor() - 15.0 / 13.0).abs() < 1e-6);
-    h.get_by_label("Medium").click();
+    h.get_all_by_label("Medium").next().unwrap().click();
     h.run();
     assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
     // The choices are saved to disk, not only kept in memory.

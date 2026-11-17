@@ -5,6 +5,7 @@
 mod albums;
 mod favorites;
 mod guide;
+mod photo_grid;
 mod pill;
 mod search;
 mod settings;
@@ -13,7 +14,7 @@ mod viewer;
 mod welcome;
 
 use super::App;
-use super::timeline::{Group, View};
+use super::timeline::View;
 use crate::Library;
 use crate::config::Paths;
 use crate::media::MediaKind;
@@ -338,7 +339,7 @@ fn files_app(d: &std::path::Path, n: usize) -> (Arc<Library>, Rc<RefCell<App>>) 
                 (
                     r.id,
                     Capture {
-                        taken_at: 1_500_000_000 + i * 86_400,
+                        taken_at: 1_500_000_000 + i / 40 * 86_400 + i * 60,
                         source: DateSource::Exif,
                         camera: None,
                         duration: None,
@@ -364,11 +365,16 @@ fn type_name(h: &mut Harness<'_>, name: &str) {
     h.run_steps(2);
 }
 
-/// The album grouped by year with small tiles, so the first twelve photos are all on screen.
+/// `spread_items` with the first 24 photos taken on one day (under one heading) and small
+/// tiles, so the first twelve photos are all on screen.
 fn small_tiles_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
     {
         let mut a = app.borrow_mut();
-        a.tl.group = super::timeline::Group::Year;
+        let mut items = spread_items();
+        for it in items.iter_mut().take(24) {
+            it.taken_at = titem(0, 2019, 12, 15).taken_at;
+        }
+        a.inject_timeline(items);
         a.tl.tile_size = 96.0;
     }
     album_harness(app)

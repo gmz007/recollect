@@ -93,8 +93,12 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     });
     h.get_by_label_contains("Added 3 to Trip");
     // Adding them again changes nothing. (The confirmation took the bar's place.)
+    // The selection was cleared once they were added: pick them again.
+    assert!(tl_selection(&app).is_empty());
     app.borrow_mut().notices.items.clear();
-    h.run_steps(2);
+    click_with(&mut h, "Item p4.jpg", ctrl);
+    click_with(&mut h, "Item p2.jpg", ctrl);
+    click_with(&mut h, "Item p0.jpg", ctrl);
     h.get_by_label("Add to album…").click();
     h.run_steps(3);
     h.get_by_label("Trip").click();
@@ -238,7 +242,10 @@ fn a_new_album_from_the_add_menu_gets_the_selection_and_names_must_be_unique() {
         .find(|a| a.name == "EXISTING2")
         .unwrap();
     assert_eq!(created.count, 1);
-    // Escape closes a dialog without touching the selection.
+    // The selection was cleared once the album was created. Escape closes a dialog without
+    // touching a selection.
+    assert!(tl_selection(&app).is_empty());
+    click_with(&mut h, "Item p3.jpg", egui::Modifiers::COMMAND);
     h.get_by_label("Add to album…").click();
     h.run_steps(3);
     h.get_all_by_label("New album…").last().unwrap().click();
@@ -368,8 +375,6 @@ fn a_failing_remove_or_delete_changes_nothing_and_shows_an_error() {
     h.get_by_label("Item p1.jpg");
     assert_eq!(lib.albums().unwrap()[0].count, 3);
     // Deleting: the dialog stays, the view stays.
-    h.get_by_label("Cancel").click();
-    h.run_steps(3);
     h.get_by_label("Delete album…").click();
     h.run_steps(3);
     h.get_by_label("Delete").click();

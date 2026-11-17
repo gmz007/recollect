@@ -135,6 +135,20 @@ impl TextSize {
     }
 }
 
+/// Smallest, default and largest side of a photo tile in the grids, in points.
+pub const PHOTO_SIZE_MIN: f32 = 96.0;
+pub const PHOTO_SIZE_DEFAULT: f32 = 168.0;
+pub const PHOTO_SIZE_MAX: f32 = 320.0;
+
+/// A tile side within the allowed range; anything that is not a number gives the default.
+pub fn clamp_photo_size(size: f32) -> f32 {
+    if size.is_finite() {
+        size.clamp(PHOTO_SIZE_MIN, PHOTO_SIZE_MAX)
+    } else {
+        PHOTO_SIZE_DEFAULT
+    }
+}
+
 /// User-adjustable settings, stored as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -151,6 +165,11 @@ pub struct Settings {
     pub theme: Theme,
     /// Normal or large text.
     pub text_size: TextSize,
+    /// Side of a photo tile in the grids, in points (96 to 320).
+    pub photo_size: f32,
+    /// The day (`YYYY-MM-DD`) on which the user hid the "On this day" banner; it stays hidden
+    /// until the next day.
+    pub on_this_day_hidden_on: Option<String>,
     /// The user chose "Not now" on the invitation to turn on smart search.
     pub search_prompt_dismissed: bool,
     /// The first-run welcome flow was completed or skipped.
@@ -170,6 +189,8 @@ impl Default for Settings {
             thumb_cache_mb: 1024,
             theme: Theme::System,
             text_size: TextSize::Medium,
+            photo_size: PHOTO_SIZE_DEFAULT,
+            on_this_day_hidden_on: None,
             search_prompt_dismissed: false,
             welcome_done: false,
             recent_searches: Vec::new(),
@@ -182,7 +203,12 @@ impl Settings {
     /// Loads settings; a missing file gives defaults, a corrupt file is reported.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str(&s).with_context(|| format!("parsing {}", path.display())),
+            Ok(s) => toml::from_str::<Self>(&s)
+                .map(|mut settings| {
+                    settings.photo_size = clamp_photo_size(settings.photo_size);
+                    settings
+                })
+                .with_context(|| format!("parsing {}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -232,6 +258,8 @@ mod tests {
             thumb_cache_mb: 10,
             theme: Theme::Dark,
             text_size: TextSize::Large,
+            photo_size: 240.0,
+            on_this_day_hidden_on: Some("2026-11-17".into()),
             search_prompt_dismissed: true,
             welcome_done: true,
             recent_searches: vec!["snow".into(), "dog".into()],
@@ -253,6 +281,17 @@ mod tests {
         // The old name of the default size still loads.
         std::fs::write(&p, "text_size = \"Normal\"\n").unwrap();
         assert_eq!(Settings::load(&p).unwrap().text_size, TextSize::Medium);
+        // Files from before the photo size setting load with the default size.
+        assert!((l.photo_size - PHOTO_SIZE_DEFAULT).abs() < f32::EPSILON);
+        assert_eq!(l.on_this_day_hidden_on, None);
+        // A size outside the range is brought back into it.
+        std::fs::write(&p, "photo_size = 1000.0\n").unwrap();
+        assert!((Settings::load(&p).unwrap().photo_size - PHOTO_SIZE_MAX).abs() < f32::EPSILON);
+        std::fs::write(&p, "photo_size = 5.0\n").unwrap();
+        assert!((Settings::load(&p).unwrap().photo_size - PHOTO_SIZE_MIN).abs() < f32::EPSILON);
+        // Settings of the older versions that grouped and ordered the timeline still load.
+        std::fs::write(&p, "group = \"Day\"\nnewest_first = false\n").unwrap();
+        assert_eq!(Settings::load(&p).unwrap(), Settings::default());
         assert!((TextSize::Small.zoom() - 12.0 / 13.0).abs() < 1e-6);
         assert!((TextSize::Large.zoom() - 15.0 / 13.0).abs() < 1e-6);
     }

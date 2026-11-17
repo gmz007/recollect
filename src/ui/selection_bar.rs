@@ -121,7 +121,12 @@ impl App {
                     self.lib.queue_album(AlbumOp::Remove { album, files });
                 }
             }
-            BulkAction::Clear => self.clear_selection(),
+            BulkAction::Clear => {}
+        }
+        // The action is done (Undo still brings it back): the selection has served its purpose.
+        // A new album still to be named keeps the selection until it is created.
+        if !matches!(action, BulkAction::AddToAlbum(AlbumChoice::New)) {
+            self.clear_selection();
         }
     }
 }

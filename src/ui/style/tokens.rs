@@ -47,13 +47,6 @@ pub struct Palette {
     /// Loading placeholder tiles.
     pub skel: Color32,
     /// Selected-photo cell and tip banner.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by the grid and tip banner as they adopt the new look"
-        )
-    )]
     pub tint: Color32,
 }
 

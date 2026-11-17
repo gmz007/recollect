@@ -52,6 +52,8 @@ pub(super) struct GridEvents {
     pub(super) clicked: Option<(usize, tiles::TileEvent, ClickMods)>,
     pub(super) right_clicked: Option<usize>,
     pub(super) menu: Option<(usize, TileMenu)>,
+    /// The circle of a day heading was clicked: the index of the day.
+    pub(super) day_toggled: Option<usize>,
     /// The first item of the first visible row.
     pub(super) top_item: Option<usize>,
 }
@@ -88,6 +90,29 @@ impl App {
         if let Some((i, m)) = events.menu.take() {
             self.apply_tile_menu(i, m);
         }
+    }
+}
+
+impl GridState {
+    /// Selects the items `range` of a list of `len` items (a day), or deselects them if they
+    /// are all selected already.
+    pub(super) fn toggle_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        len: usize,
+        id_at: &dyn Fn(usize) -> i64,
+    ) {
+        let ids: Vec<i64> = range.clone().filter(|&k| k < len).map(id_at).collect();
+        if self.sel.toggle_all(&ids) {
+            self.selected = Some(range.start);
+        } else if !self
+            .selected
+            .is_some_and(|p| p < len && self.sel.contains(id_at(p)))
+        {
+            // The primary item was in the day: another selected item takes over.
+            self.selected = (0..len).find(|&k| self.sel.contains(id_at(k)));
+        }
+        self.picking = !self.sel.is_empty();
     }
 }
 

@@ -33,12 +33,8 @@ pub const ICON_BUTTON: f32 = 32.0;
 pub const CHIP_HEIGHT: f32 = 28.0;
 /// Corner radius of the search field and other text fields.
 pub const FIELD_RADIUS: u8 = 8;
-/// Corner radius of photo tiles.
-pub const TILE_RADIUS: u8 = 6;
-/// Default side of a grid tile, in points.
-pub const TILE: f32 = 180.0;
 /// Space between grid tiles.
-pub const GAP: f32 = 4.0;
+pub const GAP: f32 = 2.0;
 /// Inner margin of the central panel (horizontal, vertical).
 pub const PANEL_MARGIN: (i8, i8) = (16, 12);
 /// Width kept free beside a scrolling grid for its scroll bar.
@@ -350,25 +346,6 @@ pub fn toolbar_button(
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// Runs `add_contents` with colours that make a slider's rail and handle easy to see on both
-/// themes (the default rail is the same shade as the surface behind it).
-pub fn slider_scope<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let pal = Palette::of(ui.ctx());
-    ui.scope(|ui| {
-        let rail = pal.text2.gamma_multiply(0.55);
-        let visuals = ui.visuals_mut();
-        visuals.widgets.inactive.bg_fill = rail;
-        visuals.widgets.hovered.bg_fill = rail;
-        visuals.widgets.active.bg_fill = rail;
-        visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, pal.text);
-        visuals.widgets.hovered.fg_stroke = Stroke::new(2.5, pal.accent);
-        visuals.widgets.active.fg_stroke = Stroke::new(2.5, pal.accent);
-        visuals.selection.bg_fill = pal.accent;
-        add_contents(ui)
-    })
-    .inner
 }
 
 /// A rounded card frame on the surface colour.

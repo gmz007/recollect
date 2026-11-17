@@ -448,7 +448,7 @@ impl App {
         let mut open = None;
         let mut stop = None;
         for (f, name) in self.snapshot.folders.iter().zip(labels) {
-            let connected = !self.snapshot.missing_folders.contains(&f.id);
+            let connected = !self.missing_folders.contains(&f.id);
             let (resp, stop_clicked) = folder_row(
                 ui,
                 &mut self.thumbs,

@@ -1,12 +1,14 @@
 //! Browsing: the timeline, recently added, favorites, per-folder and per-album views.
 //!
-//! Files are loaded in the background (`load`), grouped by capture day, month or year in
+//! Files are loaded in the background (`load`), grouped by capture day in
 //! memory and laid out as rows (section headers and rows of tiles) with known
 //! vertical offsets (`layout`). Only the rows inside the scroll viewport are drawn (`view`),
 //! found by binary search, so very large libraries stay smooth. `memories` is the "On this
-//! day" strip.
+//! day" banner.
 
+mod banner;
 mod dates;
+mod header;
 mod layout;
 mod load;
 mod memories;
@@ -18,8 +20,8 @@ pub use memories::{OnThisDay, on_this_day};
 
 use super::GridState;
 use super::bg::LatestWorker;
-use super::style::TILE;
 use crate::Library;
+use crate::config::PHOTO_SIZE_DEFAULT;
 use crate::media::MediaKind;
 use crate::store::db::{TimelineFilter, TimelineItem, TimelineOrder};
 use crate::thumbs::ThumbKey;
@@ -36,14 +38,6 @@ pub enum View {
     Favorites,
     Folder(i64),
     Album(i64),
-}
-
-/// How the timeline is split into sections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Group {
-    Day,
-    Month,
-    Year,
 }
 
 pub fn thumb_key(item: &TimelineItem) -> ThumbKey {
@@ -99,21 +93,22 @@ impl TimelineWorker {
 pub(super) struct TimelineState {
     pub(super) worker: TimelineWorker,
     pub(super) view: View,
-    pub(super) group: Group,
-    pub(super) newest_first: bool,
+    /// Side of a tile in points (the photo size setting, or a size being tried with a gesture).
     pub(super) tile_size: f32,
     /// Shared with the viewer, which keeps its own snapshot of the list while it is open.
     pub(super) items: Arc<Vec<TimelineItem>>,
     pub(super) generation: u64,
     groups: Vec<GroupSpan>,
-    groups_key: Option<(u64, Group, bool)>,
+    groups_key: Option<(u64, bool)>,
     /// How many of the loaded items are photos and how many are videos.
     pub(super) n_photos: usize,
     pub(super) n_videos: usize,
     layout: Option<Layout>,
     /// "On this day" entries for the loaded items and the date they were computed for.
     otd: Option<(u64, NaiveDate, Vec<OnThisDay>)>,
-    layout_key: Option<(u64, Group, bool, i32, u32)>,
+    /// Height of what the scroll area holds above the first row (the "On this day" banner).
+    pub(super) lead: f32,
+    layout_key: Option<(u64, bool, i32, u32)>,
     pub(super) loaded: bool,
     pub(super) awaiting: Option<(u64, TimelineFilter)>,
     loaded_filter: Option<TimelineFilter>,
@@ -134,9 +129,7 @@ impl TimelineState {
         Self {
             worker: TimelineWorker::new(lib, move || c.request_repaint()),
             view: View::Timeline,
-            group: Group::Month,
-            newest_first: true,
-            tile_size: TILE,
+            tile_size: PHOTO_SIZE_DEFAULT,
             items: Arc::new(Vec::new()),
             generation: 0,
             groups: Vec::new(),
@@ -145,6 +138,7 @@ impl TimelineState {
             n_videos: 0,
             layout: None,
             otd: None,
+            lead: 0.0,
             layout_key: None,
             loaded: false,
             awaiting: None,
@@ -173,7 +167,7 @@ impl TimelineState {
         self.view != View::RecentlyAdded
     }
 
-    /// Entries of the "On this day" strip, recomputed only when the items or the date change.
+    /// Entries of the "On this day" banner, recomputed only when the items or the date change.
     fn on_this_day(&mut self, today: NaiveDate) -> &[OnThisDay] {
         if self
             .otd
@@ -199,10 +193,9 @@ impl TimelineState {
                 View::Album(id) => Some(id),
                 _ => None,
             },
-            order: match (self.view, self.newest_first) {
-                (View::RecentlyAdded, _) => TimelineOrder::AddedDesc,
-                (_, true) => TimelineOrder::TakenDesc,
-                (_, false) => TimelineOrder::TakenAsc,
+            order: match self.view {
+                View::RecentlyAdded => TimelineOrder::AddedDesc,
+                _ => TimelineOrder::TakenDesc,
             },
         }
     }
@@ -318,22 +311,16 @@ impl TimelineState {
     fn ensure_layout(&mut self, width: f32) {
         let headers = self.headers();
         let w = width.floor().max(1.0) as i32;
-        let key = (
-            self.generation,
-            self.group,
-            headers,
-            w,
-            self.tile_size.to_bits(),
-        );
+        let key = (self.generation, headers, w, self.tile_size.to_bits());
         if self.layout_key == Some(key) {
             return;
         }
-        let gkey = (self.generation, self.group, headers);
+        let gkey = (self.generation, headers);
         if self.groups_key != Some(gkey) {
-            self.groups = compute_groups(&self.items, self.group, headers);
+            self.groups = compute_groups(&self.items, headers);
             self.groups_key = Some(gkey);
         }
-        // Resizing or regrouping keeps what is at the top of the view in place.
+        // Resizing keeps what is at the top of the view in place.
         let same_items = self.layout_key.is_some_and(|k| k.0 == self.generation);
         if same_items
             && self.pending.is_none()
@@ -365,7 +352,7 @@ impl TimelineState {
         } else {
             layout.reveal_span(item).0
         };
-        self.grid.scroll_to = Some(top);
+        self.grid.scroll_to = Some(top + self.lead);
     }
 }
 

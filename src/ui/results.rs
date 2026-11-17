@@ -1,7 +1,7 @@
 //! Search: starting one when typing pauses, taking in the answer, and the results grid.
 
 use super::selection::ClickMods;
-use super::style::{GAP, TILE};
+use super::style::GAP;
 use super::tiles::{Tile, TileMark};
 use super::workers::Query;
 use super::{
@@ -33,11 +33,11 @@ struct ResultsMetrics {
 }
 
 impl ResultsMetrics {
-    /// For `width` points of space and `len` results.
-    fn new(width: f32, len: usize) -> Self {
+    /// For `width` points of space, `len` results and tiles of about `tile_size` points.
+    fn new(width: f32, len: usize, tile_size: f32) -> Self {
         let avail = width - style::SCROLLBAR_ALLOWANCE;
-        let cols = (((avail + GAP) / (TILE + GAP)).floor() as usize).max(1);
-        let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(TILE * 0.6);
+        let cols = (((avail + GAP) / (tile_size + GAP)).floor() as usize).max(1);
+        let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(tile_size * 0.6);
         Self {
             avail,
             cols,
@@ -194,7 +194,7 @@ impl App {
             self.results_empty_state(ui);
             return;
         }
-        let m = ResultsMetrics::new(ui.available_width(), self.res.hits.len());
+        let m = ResultsMetrics::new(ui.available_width(), self.res.hits.len(), self.tl.tile_size);
         self.res.cols = m.cols;
         self.res.grid.shown = true;
         let area = grid_scroll_area("results", &mut self.res.grid.scroll_to);
@@ -292,7 +292,7 @@ impl App {
                     .then(|| format!("at {}", fmt_time(hit.t_start.unwrap_or(0.0)))),
             )
             .favorite(marked(&self.fav_marks, hit.file_id, hit.favorite))
-            .selectable(mark, grid.picking);
+            .selectable(mark);
         let id = ui.make_persistent_id(("result", i));
         let out = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
         events.record(i, &out, |ui| {

@@ -581,7 +581,10 @@ impl Tip {
     pub(super) fn text(self) -> &'static str {
         match self {
             Tip::Search => "Try searching for something you remember, like “sunset at the beach”.",
-            Tip::Select => "Hover a photo and click the circle to select several.",
+            Tip::Select => {
+                "Hover a photo and click the circle in its corner to select it. Then click more \
+                 photos, or Shift-click to select everything in between."
+            }
             Tip::Album => {
                 "Add photos to this album from Photos: select them and choose Add to album."
             }
@@ -592,7 +595,11 @@ impl Tip {
 impl App {
     /// The tip to show now, if any. Only one at a time, and only on a grid with photos in it.
     fn pending_tip(&self) -> Option<Tip> {
-        if self.tl.grid.picking || !self.tl.loaded || self.tl.items.is_empty() {
+        if self.tl.grid.picking
+            || !self.tl.loaded
+            || self.tl.items.is_empty()
+            || self.search_offer_visible()
+        {
             return None;
         }
         let todo = |t: Tip| !self.settings.tips_dismissed.iter().any(|d| d == t.id());

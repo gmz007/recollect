@@ -14,6 +14,7 @@ pub(super) use smart_search::{quality_blurb, quality_name};
 pub(super) use widgets::choice_card;
 
 use super::App;
+use super::photo_size::PhotoSizeLevel;
 use super::sidebar::plain_row;
 use super::style::{self, Palette, icons};
 use crate::config::{Settings, TextSize, Theme};
@@ -252,12 +253,29 @@ impl App {
         }
         hint(ui, "Everything scales with the text size.");
         ui.add_space(14.0);
+        self.settings_photo_size(ui);
+        ui.add_space(14.0);
         heading(ui, "Tips");
         ui.label("Short hints appear now and then to show you what Recollect can do.");
         ui.add_space(4.0);
         if ui.button("Show tips again").clicked() {
             self.change_settings(|s| s.tips_dismissed.clear());
         }
+    }
+
+    /// The size of the photos in the grids: Small, Medium or Large (none is marked while the
+    /// size was set to something in between by pinching or scrolling).
+    fn settings_photo_size(&mut self, ui: &mut egui::Ui) {
+        heading(ui, "Photo size");
+        let items = PhotoSizeLevel::ALL.map(|l| (Some(l), l.label()));
+        if let Some(Some(level)) = segmented(ui, &items, PhotoSizeLevel::of(self.tl.tile_size)) {
+            self.choose_photo_size(level);
+        }
+        hint(
+            ui,
+            "You can also pinch, or hold Ctrl (Cmd on a Mac) and scroll, to make photos bigger \
+             or smaller.",
+        );
     }
 
     fn settings_about(ui: &mut egui::Ui) {
