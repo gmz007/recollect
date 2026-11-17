@@ -6,6 +6,28 @@ use anyhow::anyhow;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// The encoder for test clips: H.264 (`libx264`) where this `FFmpeg` has it, as most real videos
+/// are; otherwise `FFmpeg`'s own MPEG-4 encoder, which every build includes (LGPL builds, such as
+/// the usual Windows ones, leave x264 out). `RECOLLECT_TEST_ENCODER=mpeg4` forces the fallback.
+fn test_encoder() -> &'static str {
+    static ENCODER: OnceLock<&'static str> = OnceLock::new();
+    ENCODER.get_or_init(|| {
+        if std::env::var("RECOLLECT_TEST_ENCODER").as_deref() == Ok("mpeg4") {
+            return "mpeg4";
+        }
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-encoders"])
+            .output()
+            .expect("ffmpeg must be installed to run video tests");
+        if String::from_utf8_lossy(&out.stdout).contains(" libx264 ") {
+            "libx264"
+        } else {
+            "mpeg4"
+        }
+    })
+}
 
 #[test]
 fn square_pixels_scale_the_shorter_side_down_to_the_limit() {
@@ -57,7 +79,7 @@ pub fn make_clip(dir: &Path, name: &str, secs: u32, gop: u32, extra: &[&str]) ->
         .args(["-loglevel", "error", "-y", "-filter_complex", &src])
         .args([
             "-c:v",
-            "libx264",
+            test_encoder(),
             "-pix_fmt",
             "yuv420p",
             "-g",
