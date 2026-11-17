@@ -27,7 +27,13 @@ fn timeline_shows_month_headers_and_regroups() {
     h.get_by_label("Sort: Newest first").click();
     h.run_steps(8);
     h.get_by_label("Oldest first").click();
-    h.run_steps(8);
+    // The list is read again in the new order (a spinner shows meanwhile).
+    h.run_steps(2);
+    settle(&mut h, || {
+        let a = app.borrow();
+        !a.tl.newest_first && a.tl.awaiting.is_none() && a.tl.loaded
+    });
+    h.run_steps(2);
     h.get_by_label("Sort: Oldest first");
     assert!(!app.borrow().tl.newest_first);
 }

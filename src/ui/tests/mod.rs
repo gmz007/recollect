@@ -194,10 +194,16 @@ fn album_app(d: &std::path::Path, installed: bool) -> Rc<RefCell<App>> {
     Rc::new(RefCell::new(app))
 }
 
+/// How many frames `Harness::run` may take to settle. The default (4) is too tight when a
+/// background result lands while it runs (slow or busy machines); a screen that never stops
+/// repainting still fails.
+const MAX_STEPS: u64 = 16;
+
 fn album_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
     let app = Rc::clone(app);
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
+        .with_max_steps(MAX_STEPS)
         .build_ui(move |ui| app.borrow_mut().show(ui));
     h.run();
     h
@@ -221,6 +227,7 @@ fn quick_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
         .with_step_dt(0.05)
+        .with_max_steps(MAX_STEPS)
         .build_ui(move |ui| app.borrow_mut().show(ui));
     h.run();
     h

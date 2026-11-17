@@ -174,10 +174,15 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("Delete album…").click();
     h.run_steps(3);
     h.get_by_label("Delete").click();
+    // The sidebar's album list is read again in the background; wait for it as well.
     settle(&mut h, || {
         let a = app.borrow();
-        lib.albums().unwrap().is_empty() && a.tl.view == View::Timeline && a.tl.items.len() == 5
+        lib.albums().unwrap().is_empty()
+            && a.albums.is_empty()
+            && a.tl.view == View::Timeline
+            && a.tl.items.len() == 5
     });
+    h.run_steps(2);
     h.get_by_label("No albums yet.");
     h.get_by_label("Item p4.jpg");
 }
@@ -211,7 +216,18 @@ fn a_new_album_from_the_add_menu_gets_the_selection_and_names_must_be_unique() {
     h.get_by_label("Album name").type_text("2");
     h.run_steps(2);
     h.key_press(egui::Key::Enter);
-    settle(&mut h, || lib.albums().unwrap().len() == 2);
+    // Wait until the app has taken in the result too (its notice and the album list), so
+    // nothing arriving later changes the screen under the next clicks.
+    settle(&mut h, || {
+        let a = app.borrow();
+        lib.albums().unwrap().len() == 2
+            && a.albums.len() == 2
+            && a.notices
+                .items
+                .iter()
+                .any(|n| n.text.starts_with("Created"))
+    });
+    h.run_steps(2);
     let created = lib
         .albums()
         .unwrap()
@@ -354,6 +370,8 @@ fn a_failing_remove_or_delete_changes_nothing_and_shows_an_error() {
     h.get_by_label("Delete album…").click();
     h.run_steps(3);
     h.get_by_label("Delete").click();
+    // A click counts in the next frame: only then is the deletion queued for the writer.
+    h.run_steps(1);
     // The writer has answered; the next frames show the error and re-enable the buttons.
     lib.wait_writes();
     h.run_steps(3);

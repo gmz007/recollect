@@ -97,7 +97,7 @@ fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
     h.get_by_label("Remove b.jpg from favorites");
-    assert!(app.borrow().tl.items.iter().any(|it| it.favorite));
+    assert_eq!(shown_favorites(&app), 1);
     // ...and the mark is stored.
     let fav = crate::store::db::TimelineFilter {
         favorites_only: true,
@@ -127,28 +127,41 @@ fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
     assert!(app.borrow().tl.items.is_empty());
 }
 
+/// How many items the grid shows as favorites: a mark not yet saved wins over the flag of the
+/// loaded list, as on screen. (A list loaded while a write is on its way still has the old flag
+/// until the write is confirmed.)
+fn shown_favorites(app: &Rc<RefCell<App>>) -> usize {
+    let a = app.borrow();
+    a.tl.items
+        .iter()
+        .filter(|it| crate::ui::marked(&a.fav_marks, it.file_id, it.favorite))
+        .count()
+}
+
 #[test]
 fn f_marks_the_keyboard_selection_as_a_favorite() {
     let d = tempfile::tempdir().unwrap();
-    let (_lib, app) = favorites_app(d.path());
+    let (lib, app) = favorites_app(d.path());
     let mut h = album_harness(&app);
     settle(&mut h, || app.borrow().tl.items.len() == 3);
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
     h.key_press(egui::Key::F);
     h.run_steps(3);
-    assert_eq!(
-        app.borrow()
-            .tl
-            .items
-            .iter()
-            .filter(|it| it.favorite)
-            .count(),
-        1
-    );
+    assert_eq!(shown_favorites(&app), 1);
     h.key_press(egui::Key::F);
     h.run_steps(3);
-    assert!(app.borrow().tl.items.iter().all(|it| !it.favorite));
+    assert_eq!(shown_favorites(&app), 0);
+    // Once both writes are in, the library and the list itself agree.
+    let favorites = crate::store::db::TimelineFilter {
+        favorites_only: true,
+        ..Default::default()
+    };
+    settle(&mut h, || {
+        lib.timeline(&favorites).unwrap().is_empty()
+            && app.borrow().fav_marks.is_empty()
+            && app.borrow().tl.items.iter().all(|it| !it.favorite)
+    });
 }
 
 #[test]

@@ -24,6 +24,7 @@ fn results_show_a_plain_header_and_square_tiles() {
     app.res.label = "a dragon".into();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
+        .with_max_steps(super::MAX_STEPS)
         .build_ui(move |ui| app.show(ui));
     h.run();
     h.get_by_label("Results for “a dragon”");
