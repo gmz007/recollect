@@ -259,7 +259,8 @@ impl App {
             thumbs: w.thumbs,
             tl: w.tl,
             viewer: None,
-            viewer_info: true,
+            // The photo opens edge to edge; Info shows the details beside it.
+            viewer_info: false,
             previews: w.previews,
             query: String::new(),
             query_changed_at: None,

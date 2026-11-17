@@ -409,7 +409,7 @@ fn the_main_screens_use_no_technical_words() {
         h.get_by_label("Clear filters");
         check("no results with a filter", &h);
     }
-    // The viewer, with its labelled toolbar and the details panel.
+    // The viewer, with its bar and the details panel, then its "More" menu.
     {
         let d5 = tempfile::tempdir().unwrap();
         let app = album_app(d5.path(), true);
@@ -417,6 +417,10 @@ fn the_main_screens_use_no_technical_words() {
         open_tile(&mut h, "Item img1.jpg");
         h.run_steps(3);
         check("viewer", &h);
+        h.get_by_label("More").click();
+        h.run_steps(3);
+        h.get_by_label("Open with default app");
+        check("viewer menu", &h);
     }
     // The "On this day" banner, the size chip and Settings > Appearance with the photo size.
     {

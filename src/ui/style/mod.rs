@@ -231,7 +231,7 @@ pub fn icon_label_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> 
 }
 
 /// `color` moved `amount` (0 to 1) of the way toward black, still opaque when it was.
-fn darken(color: Color32, amount: f32) -> Color32 {
+pub fn darken(color: Color32, amount: f32) -> Color32 {
     let keep = 1.0 - amount;
     let dim = |c: u8| (f32::from(c) * keep).round() as u8;
     Color32::from_rgba_unmultiplied(dim(color.r()), dim(color.g()), dim(color.b()), color.a())
@@ -317,37 +317,6 @@ pub fn dropdown_job(ui: &egui::Ui, label: &str) -> egui::text::LayoutJob {
     job
 }
 
-/// A frameless icon button for toolbars: tooltip `tooltip`, named `label` for assistive
-/// technology, drawn in `color` (default: the normal text colour) and highlighted when
-/// `selected`. With `text` the short word is shown next to the icon.
-pub fn toolbar_button(
-    ui: &mut egui::Ui,
-    icon: MaterialIcon,
-    text: Option<&str>,
-    label: &str,
-    tooltip: &str,
-    color: Option<Color32>,
-    selected: bool,
-) -> Response {
-    let color = color.unwrap_or(ui.visuals().widgets.inactive.fg_stroke.color);
-    let b = match text {
-        None => egui::Button::new(icon_text(icon, 22.0).color(color)),
-        Some(text) => {
-            let label_color = ui.visuals().widgets.inactive.fg_stroke.color;
-            let job = icon_label_job(ui, icon, 22.0, color, Some((text, label_color)), 6.0);
-            egui::Button::new(job)
-        }
-    }
-    .frame(selected)
-    .selected(selected)
-    .min_size(Vec2::new(34.0, 34.0));
-    let r = ui.add(b).on_hover_text(tooltip);
-    r.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
-    });
-    r.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 /// A rounded card frame on the surface colour.
 pub fn card(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new()
@@ -374,12 +343,69 @@ pub fn top_bar_button(
     label: &str,
     tooltip: &str,
 ) -> Response {
-    square_icon_button(ui, icon, label, tooltip, ICON_BUTTON, 17.0)
+    square_icon_button(ui, icon, label, tooltip, IconLook::bar())
+}
+
+/// How a top bar toggle looks when it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToggleLook {
+    /// The icon alone changes (a filled heart): drawn in the text colour.
+    Strong,
+    /// The button stays pressed (a panel is open): text colour on a filled square.
+    Pressed,
+}
+
+/// A top bar icon button that can be on: a heart that is filled, a panel that is open. Named
+/// `label`; assistive technology also hears whether it is `on`.
+pub fn top_bar_toggle(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    label: &str,
+    tooltip: &str,
+    on: Option<ToggleLook>,
+) -> Response {
+    let look = IconLook {
+        strong: on.is_some(),
+        pressed: on == Some(ToggleLook::Pressed),
+        ..IconLook::bar()
+    };
+    let r = square_icon_button(ui, icon, label, tooltip, look);
+    r.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on.is_some(), label)
+    });
+    r
 }
 
 /// A smaller icon button (24 points) for section headers; the tooltip is the label.
 pub fn small_icon_button(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) -> Response {
-    square_icon_button(ui, icon, label, label, 24.0, 16.0)
+    let look = IconLook {
+        side: 24.0,
+        icon_size: 16.0,
+        ..IconLook::bar()
+    };
+    square_icon_button(ui, icon, label, label, look)
+}
+
+/// Size and state of a square icon button.
+#[derive(Clone, Copy)]
+struct IconLook {
+    side: f32,
+    icon_size: f32,
+    /// Drawn in the text colour instead of the quieter one.
+    strong: bool,
+    /// Filled even without the pointer.
+    pressed: bool,
+}
+
+impl IconLook {
+    const fn bar() -> Self {
+        Self {
+            side: ICON_BUTTON,
+            icon_size: 17.0,
+            strong: false,
+            pressed: false,
+        }
+    }
 }
 
 fn square_icon_button(
@@ -387,27 +413,35 @@ fn square_icon_button(
     icon: MaterialIcon,
     label: &str,
     tooltip: &str,
-    side: f32,
-    icon_size: f32,
+    look: IconLook,
 ) -> Response {
     let pal = Palette::of(ui.ctx());
-    let (rect, r) = ui.allocate_exact_size(Vec2::splat(side), egui::Sense::click());
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(look.side), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let fill = if r.is_pointer_button_down_on() {
             pal.sel
         } else if r.hovered() || r.has_focus() {
             pal.hover
+        } else if look.pressed {
+            pal.sel
         } else {
             Color32::TRANSPARENT
         };
         ui.painter()
             .rect_filled(rect, CornerRadius::same(CONTROL_RADIUS), fill);
+        let color = if !ui.is_enabled() {
+            pal.ring
+        } else if look.strong {
+            pal.text
+        } else {
+            pal.text2
+        };
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             icon.codepoint,
-            icon_font_id(icon, icon_size),
-            if ui.is_enabled() { pal.text2 } else { pal.ring },
+            icon_font_id(icon, look.icon_size),
+            color,
         );
     }
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));

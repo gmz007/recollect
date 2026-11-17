@@ -242,7 +242,7 @@ impl App {
     }
 
     /// Title of the view the timeline area shows.
-    fn view_title(&self) -> String {
+    pub(super) fn view_title(&self) -> String {
         match self.tl.view {
             View::Timeline => "Photos".to_string(),
             View::RecentlyAdded => "Recently added".to_string(),

@@ -15,7 +15,7 @@ mod memories;
 mod ruler;
 mod view;
 
-pub use dates::{DATE_FROM_FILE, fmt_date, thousands};
+pub use dates::{DATE_FROM_FILE, fmt_clock, fmt_date, fmt_day, thousands};
 pub use layout::{GroupSpan, Layout, compute_groups};
 pub use memories::{OnThisDay, on_this_day};
 

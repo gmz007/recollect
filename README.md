@@ -33,13 +33,16 @@ computer.
 - **Folders** (click one in the sidebar; **+** opens *Add a folder* with your Pictures, Videos,
   Desktop and Downloads folders as suggestions; hover a folder and click **×** to stop showing
   it, your files are never touched) and **Recently added**.
-- **Viewer:** click any photo or video (or press `Enter` on the one you are on) to see it as large
-  as the window allows, with an info panel (`I`: date, camera, size, folder), `←`/`→` to step through the
-  list you came from, `Home`/`End`, `Z` or a double-click for 100 % zoom (drag to pan; up to 4096 px
-  per side, so very large photos are scaled down to that) and `Esc` to go back to the grid. The
-  top bar has icon buttons (each with a tooltip) for **Back**, **Favorite**, **Add to album…**,
-  **Info**, **Open with default app**, **Show in folder** and **Zoom**, the position ("7 of 689")
-  in the middle, and, on a video, a **Play at 1:23** button.
+- **Viewer:** click any photo or video (or press `Enter` on the one you are on) to see it filling
+  the window below a bar, with `←`/`→` (or the round buttons at the edges) to step through the
+  list you came from, `Home`/`End`, `Z`, a double-click or a pinch for 100 % zoom (drag to pan; up to
+  4096 px per side, so very large photos are scaled down to that) and `Esc` to go back. The bar
+  says where you came from (Photos, an album, Results, …) next to the back arrow, shows the date,
+  time and position ("7 of 689") in the middle, and has four icon buttons (each with a tooltip):
+  **Favorite** (`F`), **Add to album…**, **Info** (`I`, a panel with date, camera, size, folder,
+  albums and Find similar) and **⋯** (Open with default app, Show in folder, Zoom, Find similar).
+  A filmstrip of the neighbouring items floats at the bottom and fades when the pointer rests;
+  on a video it shows the matching moments as chips and a **Play at 1:23** button instead.
 - **Search results** say "Results for “beach”" (or "Photos similar to …") with the number of
   photos and videos found, and three menus on the right: **When**, **Type** (Everything, Photos or
   Videos, the same choice as the filter in the top bar) and **Sort** (Best match, Newest, Oldest);

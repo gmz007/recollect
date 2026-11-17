@@ -1,11 +1,16 @@
 //! The picture itself: choosing the sharpest image that is ready, zoom and pan, and the
 //! previous / next buttons.
 
-use super::Viewer;
+use super::{Action, Viewer};
 use crate::media::MediaKind;
 use crate::ui::preview::{self, Preview, Previews};
+use crate::ui::style::{Palette, ViewerColors};
 use crate::ui::workers::ThumbCache;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
+
+/// Size of the previous / next buttons and their distance from the picture area's edge.
+const NAV_SIZE: f32 = 40.0;
+const NAV_INSET: f32 = 16.0;
 
 /// What the canvas draws for the current item.
 pub(super) struct Shown {
@@ -78,6 +83,7 @@ impl Viewer {
         ui: &mut egui::Ui,
         previews: &mut Previews,
         thumbs: &mut ThumbCache,
+        actions: &mut Vec<Action>,
     ) {
         let ctx = ui.ctx().clone();
         let area = ui.available_rect_before_wrap();
@@ -86,6 +92,7 @@ impl Viewer {
         if resp.double_clicked() {
             self.toggle_zoom();
         }
+        self.follow_pinch(&ctx, &resp);
         let ppp = ctx.pixels_per_point();
         let fit = preview::fit_side(ctx.content_rect().size(), ppp);
         let Shown {
@@ -98,6 +105,18 @@ impl Viewer {
         }
         paint_status(ui, area, loading, failed);
         self.nav_buttons(ui, area);
+        self.filmstrip(ui, area, thumbs, actions);
+    }
+
+    /// A pinch (or Ctrl+scroll) over the picture zooms in to 100 %, and back out to fit.
+    fn follow_pinch(&mut self, ctx: &egui::Context, resp: &egui::Response) {
+        let pinch = ctx.input(egui::InputState::zoom_delta);
+        if !resp.hovered() || (pinch - 1.0).abs() < 0.01 {
+            return;
+        }
+        if (pinch > 1.0) != self.zoom {
+            self.toggle_zoom();
+        }
     }
 
     /// Draws `tex` fitted to `area`, or at full size and draggable when zoomed in. `loading` is
@@ -140,15 +159,27 @@ impl Viewer {
         }
     }
 
-    /// Previous / next, drawn over the media.
+    /// Previous / next at the edges; they are drawn while the pointer is over the picture.
     fn nav_buttons(&mut self, ui: &mut egui::Ui, area: Rect) {
+        let colors = Palette::of(ui.ctx()).viewer();
+        let shown = ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|p| area.contains(p));
         let mid = area.center().y;
-        let prev = Rect::from_center_size(Pos2::new(area.left() + 34.0, mid), Vec2::splat(44.0));
-        let next = Rect::from_center_size(Pos2::new(area.right() - 34.0, mid), Vec2::splat(44.0));
-        if self.index > 0 && nav_button(ui, prev, "Previous", -1.0) {
+        let half = NAV_SIZE / 2.0;
+        let prev = Rect::from_center_size(
+            Pos2::new(area.left() + NAV_INSET + half, mid),
+            Vec2::splat(NAV_SIZE),
+        );
+        let next = Rect::from_center_size(
+            Pos2::new(area.right() - NAV_INSET - half, mid),
+            Vec2::splat(NAV_SIZE),
+        );
+        if self.index > 0 && nav_button(ui, prev, "Previous", -1.0, shown, colors) {
             self.go(self.index - 1);
         }
-        if self.index + 1 < self.len() && nav_button(ui, next, "Next", 1.0) {
+        if self.index + 1 < self.len() && nav_button(ui, next, "Next", 1.0, shown, colors) {
             self.go(self.index + 1);
         }
     }
@@ -187,6 +218,7 @@ fn picture_rect(
 
 /// The spinner while a preview is on its way, or a note when it cannot be made.
 fn paint_status(ui: &mut egui::Ui, area: Rect, loading: bool, failed: bool) {
+    let muted = Palette::of(ui.ctx()).muted;
     if loading {
         ui.put(
             Rect::from_center_size(area.center(), Vec2::splat(28.0)),
@@ -198,35 +230,52 @@ fn paint_status(ui: &mut egui::Ui, area: Rect, loading: bool, failed: bool) {
             egui::Align2::CENTER_CENTER,
             "Preview unavailable",
             egui::FontId::proportional(15.0),
-            Color32::from_gray(180),
+            muted,
         );
     }
 }
 
-/// A round button with a chevron; `dir` is -1 for "previous" and 1 for "next".
-fn nav_button(ui: &mut egui::Ui, rect: Rect, label: &str, dir: f32) -> bool {
+/// A round button with a chevron; `dir` is -1 for "previous" and 1 for "next". It is always
+/// there for the keyboard and assistive technology, but only drawn when `shown`.
+fn nav_button(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    label: &str,
+    dir: f32,
+    shown: bool,
+    colors: ViewerColors,
+) -> bool {
     let resp = ui.interact(
         rect,
         ui.make_persistent_id(("viewer-nav", label)),
         Sense::click(),
     );
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-    let alpha = if resp.hovered() { 200 } else { 110 };
-    let p = ui.painter();
-    p.circle_filled(
-        rect.center(),
-        rect.width() / 2.0,
-        Color32::from_black_alpha(alpha),
-    );
-    let c = rect.center();
-    let stroke = egui::Stroke::new(3.0, Color32::WHITE);
-    let (tip, tail) = (
-        c + Vec2::new(5.0 * dir, 0.0),
-        c + Vec2::new(-4.0 * dir, 0.0),
-    );
-    p.line_segment([tip, tail + Vec2::new(0.0, -11.0)], stroke);
-    p.line_segment([tip, tail + Vec2::new(0.0, 11.0)], stroke);
-    resp.on_hover_text(label).clicked()
+    if shown {
+        let fill = if resp.hovered() {
+            colors.controls
+        } else {
+            colors.controls.gamma_multiply(0.8)
+        };
+        let p = ui.painter();
+        p.circle_filled(rect.center(), rect.width() / 2.0, fill);
+        let c = rect.center();
+        let stroke = egui::Stroke::new(2.0, colors.controls_text);
+        let (tip, tail) = (
+            c + Vec2::new(4.0 * dir, 0.0),
+            c + Vec2::new(-3.0 * dir, 0.0),
+        );
+        p.line_segment([tip, tail + Vec2::new(0.0, -8.0)], stroke);
+        p.line_segment([tip, tail + Vec2::new(0.0, 8.0)], stroke);
+    }
+    let tip = if dir < 0.0 {
+        "Previous (←)"
+    } else {
+        "Next (→)"
+    };
+    resp.on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 #[cfg(test)]

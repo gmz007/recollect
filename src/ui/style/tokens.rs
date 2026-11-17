@@ -82,18 +82,18 @@ pub const SETTINGS_BACKDROP_DARK: Color32 = rgb(0x0C0C0C);
 
 /// Surfaces and text of the photo viewer in one theme.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "defined with the other theme values; used as screens adopt them"
-    )
-)]
 pub struct ViewerColors {
     pub stage: Color32,
     pub controls: Color32,
     pub controls_text: Color32,
     pub bar: Color32,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the popovers take their fill from the theme's popup colour"
+        )
+    )]
     pub menu: Color32,
 }
 
@@ -156,13 +156,6 @@ impl Palette {
     }
 
     /// The viewer's surfaces for this theme.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "defined with the other theme values; used as screens adopt them"
-        )
-    )]
     pub const fn viewer(&self) -> ViewerColors {
         if self.dark {
             ViewerColors {

@@ -1,7 +1,5 @@
 use super::entry::MomentChip;
 use super::info::fmt_size;
-use super::toolbar::position_slot;
-use super::toolbar::toolbar_shows_text;
 use super::*;
 use crate::media::metadata::DateSource;
 use crate::store::db::TimelineItem;
@@ -138,23 +136,20 @@ fn favorite_marks_and_picked_moments_follow_the_viewer_across_entries() {
 }
 
 #[test]
-fn the_position_is_centred_beside_the_buttons_or_left_out() {
-    // Plenty of room: in the middle.
-    assert_eq!(position_slot(500.0, 100.0, 900.0, 60.0), Some(470.0));
-    // The right-hand buttons reach past the middle: it moves next to them.
-    assert_eq!(position_slot(500.0, 100.0, 520.0, 60.0), Some(448.0));
-    // No gap wide enough: hidden rather than overlapping a button.
-    assert_eq!(position_slot(500.0, 100.0, 150.0, 60.0), None);
-    // Whatever the answer, it never touches either side.
-    for right in (100..1000).step_by(7) {
-        if let Some(x) = position_slot(500.0, 100.0, right as f32, 60.0) {
-            assert!(x >= 112.0 && x + 60.0 <= right as f32 - 12.0);
-        }
-    }
+fn the_back_button_says_where_the_viewer_came_from() {
+    let v = Viewer::new(Source::Entries(vec![entry(MediaKind::Image)]), 0, true);
+    assert_eq!(v.origin, "Photos");
+    let v = v.with_origin("Holiday");
+    assert_eq!(v.origin, "Holiday");
 }
 
 #[test]
-fn words_next_to_the_icons_need_a_wide_window() {
-    assert!(!toolbar_shows_text(999.0));
-    assert!(toolbar_shows_text(1000.0));
+fn picking_a_moment_is_remembered_for_the_item() {
+    let mut v = Viewer::new(Source::Entries(vec![entry(MediaKind::Video); 2]), 0, true);
+    v.pick_moment(12.0);
+    assert_eq!(v.current().t, Some(12.0));
+    v.go(1);
+    assert_eq!(v.current().t, None);
+    v.go(0);
+    assert_eq!(v.current().t, Some(12.0));
 }

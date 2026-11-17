@@ -1,9 +1,10 @@
-//! The viewer (lightbox): one photo or video frame as large as fits the window, with an info
-//! panel, keyboard navigation through the list it was opened from, and zoom.
+//! The viewer (lightbox): one photo or video frame filling the window below a top bar, with a
+//! details panel, a filmstrip, keyboard navigation through the list it was opened from, and
+//! zoom.
 //!
 //! [`Viewer`] holds only view state and returns [`Action`]s for everything that touches the rest
 //! of the app; the `impl App` block at the bottom connects it to the grids. Its parts are drawn
-//! by `toolbar`, `canvas` and `info`; `entry` describes the item on screen.
+//! by `toolbar`, `canvas`, `filmstrip` and `info`; `entry` describes the item on screen.
 //!
 //! The list being viewed is shared with the grid it was opened from (an `Arc`), never copied:
 //! entries are built one at a time, for the item on screen and its neighbours. The viewer keeps
@@ -12,6 +13,7 @@
 
 mod canvas;
 mod entry;
+mod filmstrip;
 mod info;
 mod toolbar;
 
@@ -19,14 +21,18 @@ pub(super) use entry::{Source, ViewerEntry};
 
 use super::albums::AlbumChoice;
 use super::preview::Previews;
+use super::style;
 use super::workers::ThumbCache;
 use super::{App, Query, consume_plain_key, platform};
 use crate::media::MediaKind;
 use crate::store::db::AlbumInfo;
-use egui::{Color32, Vec2};
+use egui::Vec2;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Width of the details panel.
+const INFO_WIDTH: f32 = 300.0;
 
 /// What the viewer asks the app to do.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +52,12 @@ pub(super) struct Viewer {
     /// The entry at `index`.
     current: ViewerEntry,
     pub info: bool,
+    /// Where the viewer was opened from ("Photos", an album's name, "Results", ...): what the
+    /// back button says.
+    origin: String,
+    /// When the pointer last moved (egui time), for fading the filmstrip; `None` right after
+    /// something that should bring it back.
+    last_motion: Option<f64>,
     /// Showing the image at 100 % (one image pixel per screen pixel) instead of fitted.
     zoom: bool,
     /// Offset of the image centre from the centre of the view while zoomed.
@@ -74,6 +86,8 @@ impl Viewer {
             index,
             current,
             info,
+            origin: "Photos".to_string(),
+            last_motion: None,
             zoom: false,
             pan: Vec2::ZERO,
             marks: HashMap::new(),
@@ -85,6 +99,12 @@ impl Viewer {
     pub fn with_marks(mut self, marks: HashMap<i64, bool>) -> Self {
         self.marks = marks;
         self.current = self.entry_at(self.index);
+        self
+    }
+
+    /// Names where the viewer was opened from, for the back button.
+    pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
+        self.origin = origin.into();
         self
     }
 
@@ -130,7 +150,14 @@ impl Viewer {
             self.current = self.entry_at(to);
             self.zoom = false;
             self.pan = Vec2::ZERO;
+            self.last_motion = None;
         }
+    }
+
+    /// Chooses the video moment that is shown and played from.
+    fn pick_moment(&mut self, t: f64) {
+        self.moments.insert(self.index, t);
+        self.current.t = Some(t);
     }
 
     fn toggle_zoom(&mut self) {
@@ -155,7 +182,10 @@ impl Viewer {
                 consume_plain_key(i, Key::F),
             )
         });
-        if esc > 0 {
+        // Esc closes the topmost thing: the details panel first, then the viewer.
+        if esc > 0 && self.info {
+            self.info = false;
+        } else if esc > 0 {
             actions.push(Action::Close);
         }
         let last = n.saturating_sub(1);
@@ -205,25 +235,39 @@ impl Viewer {
         if keys {
             self.handle_keys(&ctx, &mut actions);
         }
-        egui::Panel::top("viewer_top").show(ui, |ui| {
-            ui.add_space(6.0);
-            self.top_bar(ui, albums, &mut actions);
-            ui.add_space(6.0);
-        });
+        let pal = style::Palette::of(&ctx);
+        let colors = pal.viewer();
+        let bar = egui::Panel::top("viewer_top")
+            .exact_size(super::TOP_BAR_HEIGHT)
+            .frame(
+                egui::Frame::new()
+                    .fill(colors.bar)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
+            .show(ui, |ui| self.top_bar(ui, previews, env, &mut actions));
+        let line = egui::Stroke::new(1.0, pal.line);
+        let r = bar.response.rect;
+        ui.painter().hline(r.x_range(), r.bottom() - 0.5, line);
         if self.info {
-            egui::Panel::right("viewer_info")
-                .resizable(true)
-                .default_size(300.0)
-                .min_size(240.0)
+            let panel = egui::Panel::right("viewer_info")
+                .exact_size(INFO_WIDTH)
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(colors.bar)
+                        .inner_margin(egui::Margin::symmetric(20, 18)),
+                )
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.info_panel(ui, previews, can_find_similar, &mut actions);
+                        self.info_panel(ui, previews, albums, can_find_similar, &mut actions);
                     });
                 });
+            let r = panel.response.rect;
+            ui.painter().vline(r.left() + 0.5, r.y_range(), line);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_gray(16)))
-            .show(ui, |ui| self.canvas(ui, previews, thumbs));
+            .frame(egui::Frame::NONE.fill(colors.stage))
+            .show(ui, |ui| self.canvas(ui, previews, thumbs, &mut actions));
         actions
     }
 }
@@ -234,7 +278,7 @@ impl App {
     }
 
     /// Opens a viewer on `source` at `index`, at video position `moment` if given.
-    fn start_viewer(&mut self, source: Source, index: usize, moment: Option<f64>) {
+    fn start_viewer(&mut self, source: Source, index: usize, origin: String, moment: Option<f64>) {
         if source.len() == 0 {
             return;
         }
@@ -243,7 +287,9 @@ impl App {
             .iter()
             .map(|(id, m)| (*id, m.value))
             .collect();
-        let mut v = Viewer::new(source, index, self.viewer_info).with_marks(marks);
+        let mut v = Viewer::new(source, index, self.viewer_info)
+            .with_origin(origin)
+            .with_marks(marks);
         if let Some(t) = moment {
             v = v.with_moment(index, t);
         }
@@ -253,7 +299,13 @@ impl App {
     /// Opens the viewer on the whole album list at `i`. The list is shared, not copied.
     pub(super) fn open_viewer_timeline(&mut self, i: usize) {
         self.tl.grid.selected = Some(i);
-        self.start_viewer(Source::Timeline(Arc::clone(&self.tl.items)), i, None);
+        let origin = self.view_title();
+        self.start_viewer(
+            Source::Timeline(Arc::clone(&self.tl.items)),
+            i,
+            origin,
+            None,
+        );
     }
 
     /// Opens the viewer on the search results at `i`. The list is shared, not copied.
@@ -269,7 +321,8 @@ impl App {
                     .is_some_and(|h| h.kind == MediaKind::Video)
             });
         self.res.grid.selected = Some(i);
-        self.start_viewer(Source::Results(Arc::clone(&self.res.hits)), i, moment);
+        let hits = Arc::clone(&self.res.hits);
+        self.start_viewer(Source::Results(hits), i, "Results".to_string(), moment);
     }
 
     /// Opens the viewer on a subset of the album (e.g. the "On this day" strip).
@@ -279,7 +332,12 @@ impl App {
             .filter_map(|&i| self.tl.items.get(i))
             .map(ViewerEntry::from_timeline)
             .collect();
-        self.start_viewer(Source::Entries(entries), pos, None);
+        self.start_viewer(
+            Source::Entries(entries),
+            pos,
+            "On this day".to_string(),
+            None,
+        );
     }
 
     /// Draws the viewer instead of the album and applies what it asks for.
@@ -289,8 +347,11 @@ impl App {
         };
         let can_similar = self.snapshot.model_installed;
         // Details (file size, camera) are re-read once the library has changed under them.
-        self.previews
-            .sync_details((self.tl.generation, self.lib.jobs_finished()));
+        self.previews.sync_details((
+            self.tl.generation,
+            self.lib.jobs_finished(),
+            self.lib.albums_version(),
+        ));
         let keys = !self.keys_blocked(ui.ctx());
         let actions = viewer.show(
             ui,

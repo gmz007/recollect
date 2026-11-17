@@ -126,10 +126,14 @@ fn viewer_from_a_search_hit_offers_the_moments_of_a_video() {
     let mut h = album_harness(&app);
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
-    h.get_by_label("clip.mp4");
     h.get_by_label("Play at 0:42");
+    h.get_by_label("Info").click();
+    h.run_steps(3);
+    h.get_by_label("clip.mp4");
     h.get_by_label("Matching moments");
     h.get_by_label("0:42 – 0:44");
+    // The filmstrip's place holds the same moments as chips.
+    h.get_by_label("0:42–0:44");
     h.get_by_label("1:40 – 1:44").click();
     h.run_steps(3);
     h.get_by_label("Play at 1:40");
@@ -138,6 +142,9 @@ fn viewer_from_a_search_hit_offers_the_moments_of_a_video() {
     h.run_steps(3);
     h.get_by_label("b.jpg");
     assert!(h.query_by_label("Matching moments").is_none());
+    // The first Esc closes the open details, the second the viewer.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert_eq!(app.borrow().res.grid.selected, Some(1));
@@ -601,7 +608,11 @@ fn clicking_a_tile_and_pressing_enter_opens_it() {
     h.run_steps(2);
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
-    h.get_by_label("Back");
+    h.get_by_label("Back to Results");
+    // The photo opens edge to edge; Info shows its name in the details.
+    assert!(h.query_by_label("b.jpg").is_none());
+    h.get_by_label("Info").click();
+    h.run_steps(3);
     h.get_by_label("b.jpg");
 }
 
@@ -617,7 +628,7 @@ fn enter_activates_a_focused_button_instead_of_opening_the_viewer() {
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
     assert!(
-        h.query_by_label("Back").is_none(),
+        h.query_by_label("Back to Results").is_none(),
         "the viewer stayed closed"
     );
     assert!(!app.borrow().searching(), "the search was cleared");

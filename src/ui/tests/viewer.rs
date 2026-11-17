@@ -13,11 +13,14 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
     // The viewer replaces the album: no grid, no sidebar.
-    h.get_by_label("img1.jpg");
-    h.get_by_label("1 of 240");
-    h.get_by_label("Back");
+    h.get_by_label_contains("1 of 240");
+    h.get_by_label("Back to Photos");
     h.get_by_label("Next");
     h.get_by_label("Info");
+    assert!(
+        h.query_by_label("Details").is_none(),
+        "the panel starts closed"
+    );
     assert!(
         h.query_by_label("Previous").is_none(),
         "nothing before the first item"
@@ -26,20 +29,30 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
     assert!(h.query_by_label("Recently added").is_none());
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
-    h.get_by_label("img2.jpg");
+    h.get_by_label_contains("2 of 240");
     h.get_by_label("Previous");
-    assert!(h.query_by_label("img1.jpg").is_none());
+    h.key_press(egui::Key::ArrowLeft);
+    h.run_steps(3);
+    h.get_by_label_contains("1 of 240");
     h.key_press(egui::Key::End);
     h.run_steps(3);
-    h.get_by_label("240 of 240");
+    h.get_by_label_contains("240 of 240");
     assert!(h.query_by_label("Next").is_none());
     h.key_press(egui::Key::Home);
     h.run_steps(3);
-    h.get_by_label("1 of 240");
+    h.get_by_label_contains("1 of 240");
     h.get_by_label("Next").click();
     h.run_steps(3);
-    h.get_by_label("img2.jpg");
-    // Esc returns to the grid with the item selected.
+    h.get_by_label_contains("2 of 240");
+    // With the panel open, the first Esc closes only the panel.
+    h.get_by_label("Info").click();
+    h.run_steps(3);
+    h.get_by_label("Details");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_some(), "the viewer stayed open");
+    assert!(h.query_by_label("Details").is_none(), "the panel closed");
+    // The next Esc returns to the grid with the item selected.
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
@@ -55,33 +68,36 @@ fn clicking_opens_the_viewer_and_the_info_panel_toggles() {
     let mut h = album_harness(&app);
     open_tile(&mut h, "Item img1.jpg");
     h.run_steps(3);
+    // The photo opens edge to edge; Info shows the details.
+    assert!(h.query_by_label("Details").is_none());
+    assert!(h.query_by_label("Find similar photos").is_none());
+    h.get_by_label("Info").click();
+    h.run_steps(3);
+    h.get_by_label("Details");
     h.get_by_label("img1.jpg");
-    h.get_by_label_contains("Sunday 15 December 2019");
+    assert_eq!(
+        h.get_all_by_label_contains("Sunday 15 December 2019")
+            .count(),
+        2
+    );
     h.get_by_label("Test Camera");
-    h.get_by_label("4000×3000");
-    h.get_by_label("Open with default app");
+    h.get_by_label_contains("4000×3000");
     h.get_by_label("Show in folder");
     h.get_by_label("Find similar photos");
-    h.get_by_label("Favorite");
-    // `I` hides the panel (the name moves to the top bar) and shows it again; the buttons stay.
+    h.get_by_label("Not in any album");
+    // The bar shows the day, then the time and the position.
+    h.get_by_label("Sunday 15 December 2019");
+    h.get_by_label_contains("1 of 240");
+    // `I` and the Info button hide and show the panel.
     h.key_press(egui::Key::I);
     h.run_steps(3);
-    h.get_by_label("img1.jpg");
     assert!(h.query_by_label("Find similar photos").is_none());
-    h.get_by_label("Open with default app");
-    h.get_by_label("Favorite");
-    h.key_press(egui::Key::I);
+    assert!(h.query_by_label("Details").is_none());
+    h.get_by_label("Info").click();
     h.run_steps(3);
     h.get_by_label("Find similar photos");
-    // Zoom toggles with Z and with the button.
-    h.get_by_label("Zoom to 100%");
-    h.key_press(egui::Key::Z);
-    h.run_steps(3);
-    h.get_by_label("Fit to window").click();
-    h.run_steps(3);
-    h.get_by_label("Zoom to 100%");
     // Back button.
-    h.get_by_label("Back").click();
+    h.get_by_label("Back to Photos").click();
     h.run_steps(3);
     assert_eq!(app.borrow().tl.grid.selected, Some(0));
 }
@@ -234,6 +250,8 @@ fn find_similar_from_the_viewer_closes_it_like_any_other_close() {
     open_tile(&mut h, "Item img1.jpg");
     h.run_steps(5);
     assert!(app.borrow().previews.cached() > 0);
+    h.get_by_label("Info").click();
+    h.run_steps(3);
     h.get_by_label("Find similar photos").click();
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
@@ -242,126 +260,123 @@ fn find_similar_from_the_viewer_closes_it_like_any_other_close() {
 }
 
 #[test]
-fn the_viewer_toolbar_has_labelled_icon_buttons() {
+fn the_viewer_bar_has_back_and_exactly_four_icon_buttons() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = quick_harness(&app);
     open_tile(&mut h, "Item img1.jpg");
     h.run_steps(3);
-    for label in [
-        "Back",
-        "Favorite",
-        "Add to album…",
-        "Info",
-        "Open with default app",
-        "Show in folder",
-        "Zoom to 100%",
-        "1 of 240",
-    ] {
-        h.get_by_label(label);
+    let mut names: Vec<String> = h
+        .get_all_by_role(egui::accesskit::Role::Button)
+        .filter(|n| n.rect().max.y <= 53.0)
+        .filter_map(|n| n.accesskit_node().label())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Add to album…",
+            "Back to Photos",
+            "Favorite",
+            "Info",
+            "More"
+        ]
+    );
+    // The old labelled buttons are gone from the bar.
+    for gone in ["Open with default app", "Zoom to 100%", "Play at 0:00"] {
+        assert!(h.query_by_label(gone).is_none(), "{gone}");
     }
-    // Info shows and hides the details panel.
-    h.get_by_label("Find similar photos");
-    h.get_by_label("Info").click();
-    h.run_steps(3);
-    assert!(h.query_by_label("Find similar photos").is_none());
-    assert!(!app.borrow().viewer.as_ref().unwrap().info);
-    h.get_by_label("Info").click();
-    h.run_steps(3);
-    h.get_by_label("Find similar photos");
     // Favorite is filled once marked, and the button says what it would undo.
     h.get_by_label("Favorite").click();
     h.run_steps(3);
     h.get_by_label("Unfavorite");
+    // F toggles it too.
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    h.get_by_label("Favorite");
     // Back closes the viewer and returns to the grid.
-    h.get_by_label("Back").click();
+    h.get_by_label("Back to Photos").click();
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
     h.get_by_label("Item img1.jpg");
 }
 
 #[test]
-fn the_viewer_position_is_plain_text_beside_labelled_buttons_in_a_wide_window() {
-    let d = tempfile::tempdir().unwrap();
-    let app = album_app(d.path(), true);
-    let mut h = quick_harness_wide(&app, 1200.0);
-    open_tile(&mut h, "Item img1.jpg");
-    h.run_steps(3);
-    let pos = h.get_by_label("1 of 240");
-    assert_eq!(pos.accesskit_node().role(), egui::accesskit::Role::Label);
-    let pos_rect = pos.rect();
-    let buttons = [
-        "Back",
-        "Favorite",
-        "Add to album…",
-        "Info",
-        "Open with default app",
-        "Show in folder",
-        "Zoom to 100%",
-    ];
-    for label in buttons {
-        let r = h.get_by_label(label).rect();
-        assert!(
-            !r.intersects(pos_rect),
-            "{label} {r:?} overlaps the position {pos_rect:?}"
-        );
-    }
-    // Wide window: icon and word ("Info" is wider than a bare icon button).
-    assert!(h.get_by_label("Info").rect().width() > 70.0);
-    assert!(h.get_by_label("Show in folder").rect().width() > 100.0);
-    // Clicking where the position is does nothing.
-    let info_before = app.borrow().viewer.as_ref().unwrap().info;
-    h.event(egui::Event::PointerMoved(pos_rect.center()));
-    h.event(egui::Event::PointerButton {
-        pos: pos_rect.center(),
-        button: egui::PointerButton::Primary,
-        pressed: true,
-        modifiers: egui::Modifiers::default(),
-    });
-    h.event(egui::Event::PointerButton {
-        pos: pos_rect.center(),
-        button: egui::PointerButton::Primary,
-        pressed: false,
-        modifiers: egui::Modifiers::default(),
-    });
-    h.run_steps(3);
-    let a = app.borrow();
-    let v = a.viewer.as_ref().expect("still open");
-    assert_eq!(v.info, info_before);
-}
-
-#[test]
-fn the_viewer_toolbar_shows_only_icons_in_a_narrow_window() {
-    let d = tempfile::tempdir().unwrap();
-    let app = album_app(d.path(), true);
-    let mut h = quick_harness_wide(&app, 800.0);
-    open_tile(&mut h, "Item img1.jpg");
-    h.run_steps(3);
-    for label in [
-        "Info",
-        "Open with default app",
-        "Show in folder",
-        "Favorite",
-    ] {
-        assert!(
-            h.get_by_label(label).rect().width() < 55.0,
-            "{label} is an icon only"
-        );
-    }
-    let pos = h.get_by_label("1 of 240").rect();
-    assert!(!pos.intersects(h.get_by_label("Info").rect()));
-}
-
-#[test]
-fn the_info_panel_names_the_folder_and_the_date_source() {
+fn the_more_menu_opens_files_and_toggles_the_zoom() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = quick_harness(&app);
     open_tile(&mut h, "Item img1.jpg");
     h.run_steps(3);
+    h.get_by_label("More").click();
+    h.run_steps(3);
+    h.get_by_label("Open with default app");
+    h.get_all_by_label("Show in folder").last().unwrap();
+    h.get_by_label_contains("Zoom to 100%").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Open with default app").is_none(),
+        "closed"
+    );
+    h.get_by_label("More").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Fit to window").click();
+    h.run_steps(3);
+    h.get_by_label("More").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Zoom to 100%");
+    // Z does the same without the menu.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.key_press(egui::Key::Z);
+    h.run_steps(3);
+    h.get_by_label("More").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Fit to window");
+}
+
+#[test]
+fn clicking_a_filmstrip_thumbnail_goes_to_that_photo() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    h.get_by_label_contains("1 of 240");
+    h.get_by_label("Go to img3.jpg").click();
+    h.run_steps(3);
+    h.get_by_label_contains("3 of 240");
+}
+
+#[test]
+fn the_filmstrip_fades_when_the_pointer_rests_and_returns_on_movement() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    h.get_by_label("Go to img2.jpg");
+    // 2 s and a little more (frames are 50 ms) without the pointer moving.
+    h.run_steps(60);
+    assert!(h.query_by_label("Go to img2.jpg").is_none(), "faded away");
+    h.event(egui::Event::PointerMoved(egui::pos2(300.0, 300.0)));
+    h.run_steps(2);
+    h.get_by_label("Go to img2.jpg");
+}
+
+#[test]
+fn the_info_panel_names_the_folder_and_offers_to_show_it() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    h.get_by_label("Info").click();
+    h.run_steps(3);
     // The folder's name, not its whole path.
     h.get_by_label("nowhere");
     assert!(h.query_by_label("/nowhere").is_none());
+    h.get_by_label("Show in folder");
     h.get_by_label("Find similar photos");
 }
 
@@ -377,12 +392,63 @@ fn escape_closes_an_open_viewer_menu_but_not_the_viewer() {
     h.get_by_label("New album…");
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(2);
-    h.get_by_label("1 of 240");
+    h.get_by_label_contains("1 of 240");
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(app.borrow().viewer.is_some(), "the viewer stayed open");
     assert!(h.query_by_label("New album…").is_none(), "the menu closed");
     // With the menu gone, Escape leaves the viewer as before.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+}
+
+#[test]
+fn a_narrow_window_keeps_the_four_buttons_clear_of_the_date() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness_wide(&app, 640.0);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    let day = h.get_by_label("Sunday 15 December 2019").rect();
+    for label in ["Favorite", "Add to album…", "Info", "More"] {
+        let r = h.get_by_label(label).rect();
+        assert!(
+            !r.intersects(day),
+            "{label} {r:?} overlaps the date {day:?}"
+        );
+    }
+    h.get_by_label("Back to Photos");
+}
+
+#[test]
+fn the_details_panel_stays_as_it_was_left_when_the_viewer_opens_again() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    assert!(h.query_by_label("Details").is_none(), "closed at first");
+    h.get_by_label("Info").click();
+    h.run_steps(3);
+    h.get_by_label("Details");
+    h.get_by_label("Back to Photos").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    // Opened again, the panel is still open.
+    open_tile(&mut h, "Item img2.jpg");
+    h.run_steps(3);
+    h.get_by_label("Details");
+}
+
+#[test]
+fn escape_closes_the_viewer_at_once_when_the_details_are_closed() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    assert!(h.query_by_label("Details").is_none());
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());

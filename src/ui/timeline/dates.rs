@@ -63,6 +63,20 @@ pub fn fmt_date(taken_at: i64) -> String {
         .unwrap_or_default()
 }
 
+/// "Saturday 4 July 2019": the day alone.
+pub fn fmt_day(taken_at: i64) -> String {
+    chrono::DateTime::from_timestamp(taken_at, 0)
+        .map(|d| d.naive_utc().format("%A %-d %B %Y").to_string())
+        .unwrap_or_default()
+}
+
+/// "12:30": the time of day alone, as [`fmt_date`] shows it.
+pub fn fmt_clock(taken_at: i64) -> String {
+    chrono::DateTime::from_timestamp(taken_at, 0)
+        .map(|d| d.naive_utc().format("%-H:%M").to_string())
+        .unwrap_or_default()
+}
+
 /// What to call a date that is only the file's own time rather than when the photo was taken.
 pub const DATE_FROM_FILE: &str = "Date from the file";
 

@@ -104,7 +104,11 @@ fn items_text(n: usize) -> String {
 }
 
 /// The entries of the "Add to album…" menus: the albums, then "New album…".
-fn album_menu_items(ui: &mut egui::Ui, albums: &[AlbumInfo], choice: &mut Option<AlbumChoice>) {
+pub(super) fn album_menu_items(
+    ui: &mut egui::Ui,
+    albums: &[AlbumInfo],
+    choice: &mut Option<AlbumChoice>,
+) {
     style::menu_body(ui);
     egui::ScrollArea::vertical()
         .max_height(280.0)
@@ -132,37 +136,6 @@ pub(super) fn album_menu(ui: &mut egui::Ui, albums: &[AlbumInfo]) -> Option<Albu
     style::icon_menu_button(ui, icons::ICON_PLAYLIST_ADD, "Add to album…", |ui| {
         album_menu_items(ui, albums, &mut choice);
     });
-    choice
-}
-
-/// The same menu behind a toolbar button: an icon, with `text` next to it when there is room.
-pub(super) fn album_menu_icon(
-    ui: &mut egui::Ui,
-    albums: &[AlbumInfo],
-    text: Option<&str>,
-) -> Option<AlbumChoice> {
-    let mut choice = None;
-    let r = ui.scope(|ui| {
-        // Like the other toolbar icons: no box until hovered.
-        let w = &mut ui.visuals_mut().widgets.inactive;
-        w.weak_bg_fill = egui::Color32::TRANSPARENT;
-        w.bg_stroke = egui::Stroke::NONE;
-        let color = ui.visuals().widgets.inactive.fg_stroke.color;
-        let job = style::icon_label_job(
-            ui,
-            icons::ICON_PLAYLIST_ADD,
-            22.0,
-            color,
-            text.map(|t| (t, color)),
-            6.0,
-        );
-        ui.menu_button(job, |ui| {
-            album_menu_items(ui, albums, &mut choice);
-        })
-    });
-    let r = r.inner.response;
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Add to album…"));
-    r.on_hover_text("Add to album…");
     choice
 }
 

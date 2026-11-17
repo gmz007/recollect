@@ -74,12 +74,19 @@ fn clicking_a_tile_opens_the_viewer_with_the_details() {
     h.get_by_label("Item img1.jpg").click();
     h.run_steps(3);
     assert!(app.borrow().viewer.is_some());
+    assert!(h.query_by_label("Details").is_none(), "closed at first");
+    h.get_by_label("Info").click();
+    h.run_steps(3);
     h.get_by_label("img1.jpg");
-    h.get_by_label_contains("Sunday 15 December 2019");
+    assert_eq!(
+        h.get_all_by_label_contains("Sunday 15 December 2019")
+            .count(),
+        2
+    );
     h.get_by_label("Test Camera");
-    h.get_by_label("4000×3000");
+    h.get_by_label_contains("4000×3000");
     h.get_by_label("Find similar photos");
-    h.get_by_label("Open with default app");
+    h.get_by_label("More");
 }
 
 #[test]
@@ -123,13 +130,17 @@ fn the_on_this_day_banner_opens_the_viewer_on_its_own_list() {
     h.get_by_label("See 20 photos").click();
     h.run_steps(3);
     // March 2019 is img10 in `spread_items` (Dec = 1).
+    h.get_by_label_contains("1 of 20");
+    h.get_by_label("Info").click();
+    h.run_steps(3);
     h.get_by_label("img10.jpg");
-    h.get_by_label("1 of 20");
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
-    h.get_by_label("2 of 20");
+    h.get_by_label_contains("2 of 20");
     h.get_by_label("img22.jpg"); // March 2018
-    // Not in the other views.
+    // Not in the other views. The first Esc closes the details, the second the viewer.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     h.get_by_label("Recently added").click();
@@ -186,7 +197,7 @@ fn the_on_this_day_banner_names_one_year_when_all_photos_are_from_it() {
     h.get_by_label("15 March, 7 years ago");
     h.get_by_label("See 1 photo").click();
     h.run_steps(3);
-    h.get_by_label("1 of 1");
+    h.get_by_label_contains("1 of 1");
 }
 
 #[test]
@@ -207,7 +218,7 @@ fn the_on_this_day_count_is_what_the_viewer_opens() {
     h.get_by_label("15 March, 7 years ago");
     h.get_by_label("See 45 photos").click();
     h.run_steps(3);
-    h.get_by_label("1 of 45");
+    h.get_by_label_contains("1 of 45");
 }
 
 #[test]

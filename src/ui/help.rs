@@ -304,6 +304,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Previous and next photo while viewing",
     ),
     ("I", "Show or hide photo details while viewing"),
-    ("Z", "Zoom in and out while viewing"),
+    ("Z, or double-click", "Zoom in and out while viewing"),
+    ("Pinch", "Zoom in and out while viewing"),
     ("Home and End", "First and last photo while viewing"),
 ];

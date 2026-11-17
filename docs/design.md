@@ -89,6 +89,13 @@ keeps about eight textures in memory and prefetches the neighbouring items. Noth
 disk; the thumbnail is shown scaled up until the preview is ready. Videos show a frame at the
 matching moment (or at 10 % of the length, at most 5 s).
 
+**Viewer layout.** A 52 point bar (back with the name of where the viewer was opened from, the day and
+time with the position, four icon buttons), the picture filling the rest on the stage colour, an
+optional 300 point details panel docked on the right, previous/next buttons at the edges while the
+pointer is over the picture, and a filmstrip (`viewer/filmstrip.rs`) at the bottom that fades two
+seconds after the pointer last moved. The panel's albums come with the file details, which are
+read again when albums change.
+
 **Index cache.** Decoding every vector from SQLite at startup takes seconds at a million
 vectors, so the i8 index is also written to `data/index-<model>.bin`. Each change to stored items
 increments an epoch in the database; the cache carries that epoch, the model id and a random
