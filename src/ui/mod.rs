@@ -367,6 +367,7 @@ impl App {
         self.poll_years(jobs);
         self.settle_favorites();
         self.sync_selection();
+        self.end_adding_when_left();
     }
 
     /// Follows what the library is doing: live refreshes while it works, and a full reload
@@ -461,7 +462,11 @@ impl App {
         self.show_panels(ui, &ctx);
         self.show_overlays(&ctx);
         if !self.keys_blocked(&ctx) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.clear_selection();
+            if self.adding_to().is_some() {
+                self.stop_adding();
+            } else {
+                self.clear_selection();
+            }
         }
     }
 

@@ -137,6 +137,7 @@ impl App {
             // Starting a search leaves the timeline's selection behind.
             self.tl.grid.sel.clear();
             self.tl.grid.selected = None;
+            self.tl.grid.choosing_for = None;
             self.tl.grid.picking = false;
         }
         self.res.awaiting = Some(self.search.submit(q.clone(), opts));

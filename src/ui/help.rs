@@ -7,6 +7,9 @@ use super::style::{self, Palette, icons};
 use egui::{CornerRadius, Margin, RichText, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
 
+/// Corner radius of the sheet.
+const SHEET_RADIUS: u8 = 12;
+
 /// The topics of the sheet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum HelpTopic {
@@ -73,10 +76,10 @@ fn step(ui: &mut egui::Ui, n: usize, title: &str, text: &str) {
 /// The topic list on the left of the sheet.
 fn help_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut HelpTopic, nav_w: f32, h: f32) {
     egui::Frame::new()
-        .fill(pal.field)
+        .fill(pal.side)
         .corner_radius(CornerRadius {
-            nw: 16,
-            sw: 16,
+            nw: SHEET_RADIUS,
+            sw: SHEET_RADIUS,
             ne: 0,
             se: 0,
         })
@@ -155,9 +158,9 @@ impl App {
         let h = (screen.y - 48.0).clamp(320.0, 580.0);
         let nav_w = if w < 520.0 { 170.0 } else { 224.0 };
         let frame = egui::Frame::new()
-            .fill(pal.side)
+            .fill(pal.pop)
             .stroke(Stroke::new(1.0, pal.line))
-            .corner_radius(CornerRadius::same(16))
+            .corner_radius(CornerRadius::same(SHEET_RADIUS))
             .shadow(ctx.global_style().visuals.popup_shadow)
             .inner_margin(Margin::ZERO);
         let mut close = false;
@@ -236,8 +239,9 @@ fn organizing(ui: &mut egui::Ui) {
     point(
         ui,
         "Albums",
-        "Click the + next to Albums to make a new album. Then select photos and choose Add \
-         to album. Photos stay in their folders; an album only collects them.",
+        "Click the + next to Albums to make a new album. Then open it and click Add photos, \
+         or select photos anywhere and choose Add to album. Photos stay in their folders; \
+         an album only collects them.",
     );
     point(
         ui,
@@ -248,14 +252,23 @@ fn organizing(ui: &mut egui::Ui) {
 }
 
 fn shortcuts(ui: &mut egui::Ui) {
+    // One grid for all sections, so the columns line up.
     egui::Grid::new("shortcuts")
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            for (keys, what) in SHORTCUTS {
-                ui.label(style::semibold(*keys));
-                ui.label(*what);
+            for (n, (section, keys)) in SHORTCUTS.iter().enumerate() {
+                if n > 0 {
+                    ui.label("");
+                    ui.end_row();
+                }
+                ui.label(style::semibold(*section).size(15.0));
                 ui.end_row();
+                for (key, what) in *keys {
+                    ui.label(style::semibold(*key));
+                    ui.label(*what);
+                    ui.end_row();
+                }
             }
         });
 }
@@ -280,31 +293,52 @@ fn privacy(ui: &mut egui::Ui) {
     );
 }
 
-/// Keys and what they do, for the help sheet.
-const SHORTCUTS: &[(&str, &str)] = &[
-    ("Arrow keys", "Move between photos"),
-    ("Enter", "Open the photo you are on"),
-    ("Esc", "Go back, or clear the selection"),
-    ("Ctrl+click (Cmd on Mac)", "Select several photos"),
-    ("Shift+click", "Select everything in between"),
-    ("Ctrl+A (Cmd on Mac)", "Select everything"),
+/// Keys and what they do, in sections, for the help sheet.
+const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     (
-        "Ctrl+= and Ctrl+- (Cmd on Mac)",
-        "Make photos bigger or smaller",
+        "Browsing",
+        &[
+            ("Arrow keys", "Move between photos"),
+            ("Enter", "Open the photo you are on"),
+            ("Esc", "Go back, or clear the selection"),
+            ("Tab, then Enter", "Jump along the dates beside the photos"),
+            ("Ctrl+F (Cmd on Mac)", "Go to the search box"),
+            ("F1", "Show this help"),
+            ("Ctrl+, (Cmd on Mac)", "Open Settings"),
+        ],
     ),
-    ("Ctrl+0 (Cmd on Mac)", "Back to the usual photo size"),
     (
-        "Pinch, or Ctrl+scroll (Cmd on Mac)",
-        "Change the photo size smoothly",
+        "Photo size",
+        &[
+            (
+                "Ctrl+= and Ctrl+- (Cmd on Mac)",
+                "Make photos bigger or smaller",
+            ),
+            ("Ctrl+0 (Cmd on Mac)", "Back to the usual photo size"),
+            (
+                "Pinch, or Ctrl+scroll (Cmd on Mac)",
+                "Change the photo size smoothly",
+            ),
+        ],
     ),
-    ("F", "Mark as favorite, or remove the mark"),
-    ("Ctrl+F (Cmd on Mac)", "Go to the search box"),
     (
-        "Left and right arrows",
-        "Previous and next photo while viewing",
+        "Selecting",
+        &[
+            ("Ctrl+click (Cmd on Mac)", "Select several photos"),
+            ("Shift+click", "Select everything in between"),
+            ("Ctrl+A (Cmd on Mac)", "Select everything"),
+            ("F", "Mark as favorite, or remove the mark"),
+        ],
     ),
-    ("I", "Show or hide photo details while viewing"),
-    ("Z, or double-click", "Zoom in and out while viewing"),
-    ("Pinch", "Zoom in and out while viewing"),
-    ("Home and End", "First and last photo while viewing"),
+    (
+        "Viewing a photo",
+        &[
+            ("Left and right arrows", "Previous and next photo"),
+            ("Home and End", "First and last photo"),
+            ("I", "Show or hide photo details"),
+            ("Z, or double-click", "Zoom in and out"),
+            ("Pinch", "Zoom in and out"),
+            ("Esc", "Back to the photos"),
+        ],
+    ),
 ];

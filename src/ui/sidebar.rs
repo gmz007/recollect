@@ -173,7 +173,17 @@ fn paint_leading(
             let cover = Rect::from_center_size(centre, Vec2::splat(COVER));
             let radius = CornerRadius::same(4);
             let texture = key.and_then(|k| thumbs?.get(k));
-            if let Some(tex) = texture {
+            if key.is_none() {
+                // No cover: a neutral square with a small photo-library icon.
+                ui.painter().rect_filled(cover, radius, pal.field);
+                ui.painter().text(
+                    cover.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icons::ICON_PHOTO_LIBRARY.codepoint,
+                    style::icon_font_id(icons::ICON_PHOTO_LIBRARY, 12.0),
+                    pal.muted,
+                );
+            } else if let Some(tex) = texture {
                 let shape = egui::epaint::RectShape::filled(cover, radius, Color32::WHITE)
                     .with_texture(tex.id(), super::tiles::square_uv(tex.size_vec2()));
                 ui.painter().add(shape);

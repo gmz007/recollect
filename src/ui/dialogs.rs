@@ -72,6 +72,14 @@ pub(super) enum Confirmation {
     Cancelled,
 }
 
+/// How the confirming button of a [`confirm_dialog`] looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tone {
+    Normal,
+    /// The action cannot be undone: the button is in the warning colour.
+    Danger,
+}
+
 /// A [`modal_window`] with a body and two buttons, `confirm` then `cancel`, which are disabled
 /// unless `enabled`. Returns what was clicked, if anything.
 pub(super) fn confirm_dialog(
@@ -82,14 +90,38 @@ pub(super) fn confirm_dialog(
     enabled: bool,
     add_body: impl FnOnce(&mut egui::Ui),
 ) -> Option<Confirmation> {
+    confirm_dialog_tone(
+        ctx,
+        title,
+        (confirm, Tone::Normal),
+        cancel,
+        enabled,
+        add_body,
+    )
+}
+
+/// Like [`confirm_dialog`], with the look of the confirming button chosen.
+pub(super) fn confirm_dialog_tone(
+    ctx: &egui::Context,
+    title: &str,
+    (confirm, tone): (&str, Tone),
+    cancel: &str,
+    enabled: bool,
+    add_body: impl FnOnce(&mut egui::Ui),
+) -> Option<Confirmation> {
     let (mut confirmed, mut cancelled) = (false, false);
     modal_window(ctx, title, |ui| {
+        ui.set_max_width(DIALOG_WIDTH);
         add_body(ui);
-        ui.horizontal(|ui| {
-            confirmed = ui
-                .add_enabled(enabled, egui::Button::new(confirm))
+        dialog_buttons(ui, |ui| {
+            ui.add_enabled_ui(enabled, |ui| {
+                confirmed = match tone {
+                    Tone::Normal => style::primary_button(ui, confirm),
+                    Tone::Danger => style::danger_button(ui, confirm),
+                }
                 .clicked();
-            cancelled = ui.add_enabled(enabled, egui::Button::new(cancel)).clicked();
+                cancelled = secondary_button(ui, cancel).clicked();
+            });
         });
     });
     if confirmed {
@@ -101,15 +133,46 @@ pub(super) fn confirm_dialog(
     }
 }
 
+/// A button on the field colour, 32 points high.
+pub(super) fn secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let r = ui.add(egui::Button::new(style::medium(label)).min_size(egui::Vec2::new(0.0, 32.0)));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+    r
+}
+
+/// The row of buttons at the bottom of a dialog, at the right. Add the main button first, then
+/// the one that backs out (the row runs right to left).
+pub(super) fn dialog_buttons(ui: &mut egui::Ui, add_buttons: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(12.0);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        add_buttons(ui);
+    });
+}
+
+/// Corner radius of dialogs.
+const DIALOG_RADIUS: u8 = 12;
+/// Width of the text of a dialog.
+const DIALOG_WIDTH: f32 = 340.0;
+
 /// A centred dialog over a dimmed backdrop, used by the album and folder dialogs.
 pub(super) fn modal_window(
     ctx: &egui::Context,
     title: &str,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::Modal::new(egui::Id::unique(("dialog", title))).show(ctx, |ui| {
-        ui.label(style::semibold(title).size(17.0));
-        ui.add_space(8.0);
-        add_contents(ui);
-    });
+    let pal = style::Palette::of(ctx);
+    let frame = egui::Frame::new()
+        .fill(pal.pop)
+        .stroke(egui::Stroke::new(1.0, pal.line))
+        .corner_radius(egui::CornerRadius::same(DIALOG_RADIUS))
+        .inner_margin(egui::Margin::same(20))
+        .shadow(ctx.global_style().visuals.popup_shadow);
+    egui::Modal::new(egui::Id::unique(("dialog", title)))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.label(style::semibold(title).size(17.0));
+            ui.add_space(8.0);
+            add_contents(ui);
+        });
 }

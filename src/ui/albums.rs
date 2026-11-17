@@ -7,7 +7,9 @@
 //! album version moves or a job finishes.
 
 use super::App;
-use super::dialogs::{Confirmation, confirm_dialog, modal_window};
+use super::dialogs::{
+    Confirmation, Tone, confirm_dialog_tone, dialog_buttons, modal_window, secondary_button,
+};
 use super::notices::Undo;
 use super::sidebar::{Leading, Row};
 use super::style::{self, icons};
@@ -313,9 +315,9 @@ impl App {
         modal_window(ctx, "New album", |ui| {
             ui.label(format!("{} will be added to it.", items_text(na.add.len())));
             create |= name_field(ui, &mut na.name, &mut na.focused, 240.0);
-            ui.horizontal(|ui| {
-                create |= ui.button("Create").clicked();
-                cancel |= ui.button("Cancel").clicked();
+            dialog_buttons(ui, |ui| {
+                create |= style::primary_button(ui, "Create").clicked();
+                cancel |= secondary_button(ui, "Cancel").clicked();
             });
         });
         self.dialogs.new_album = (!cancel).then_some(na);
@@ -331,9 +333,9 @@ impl App {
         let (mut apply, mut cancel) = (false, false);
         modal_window(ctx, "Rename album", |ui| {
             apply |= name_field(ui, &mut r.name, &mut r.focused, 240.0);
-            ui.horizontal(|ui| {
-                apply |= ui.button("Rename").clicked();
-                cancel |= ui.button("Cancel").clicked();
+            dialog_buttons(ui, |ui| {
+                apply |= style::primary_button(ui, "Rename").clicked();
+                cancel |= secondary_button(ui, "Cancel").clicked();
             });
         });
         if apply {
@@ -360,11 +362,19 @@ impl App {
         };
         let (id, pending) = (d.id, d.pending);
         let name = short_name(self.album_name(id).unwrap_or("this album"), 60);
-        let choice = confirm_dialog(ctx, "Delete album", "Delete", "Cancel", !pending, |ui| {
-            ui.label(format!("Delete the album “{name}”?"));
-            ui.label(RichText::new("The photos and videos in it are not deleted.").weak());
-            ui.add_space(6.0);
-        });
+        let choice = confirm_dialog_tone(
+            ctx,
+            "Delete album",
+            ("Delete", Tone::Danger),
+            "Cancel",
+            !pending,
+            |ui| {
+                ui.label(format!(
+                    "Delete the album “{name}”? The photos stay in your library — only the \
+                     album is removed."
+                ));
+            },
+        );
         match choice {
             Some(Confirmation::Confirmed) => {
                 // The view changes once the library has deleted it.
@@ -378,18 +388,78 @@ impl App {
         }
     }
 
-    /// Next to an album's title: renaming and deleting it.
+    /// Right of an album's title: "Add photos" and the "⋯" menu with renaming and deleting. The
+    /// row runs right to left, so the menu is added first.
     pub(super) fn album_actions(&mut self, ui: &mut egui::Ui, id: i64) {
+        let pal = style::Palette::of(ui.ctx());
         let name = self.album_name(id).unwrap_or("Album").to_string();
-        if style::icon_label_button(ui, icons::ICON_EDIT, "Rename…").clicked() {
+        let (mut rename, mut delete) = (false, false);
+        style::icon_only_menu(ui, icons::ICON_MORE_HORIZ, "More actions", |ui| {
+            rename = ui.button("Rename…").clicked();
+            ui.separator();
+            delete = ui
+                .button(RichText::new("Delete album…").color(pal.danger))
+                .clicked();
+            if rename || delete {
+                ui.close();
+            }
+        });
+        if style::icon_label_button(ui, icons::ICON_ADD, "Add photos").clicked() {
+            self.start_adding(id);
+        }
+        if rename {
             self.dialogs.rename_album = Some(RenameAlbum {
                 id,
                 name,
                 focused: false,
             });
         }
-        if style::icon_label_button(ui, icons::ICON_DELETE, "Delete album…").clicked() {
+        if delete {
             self.dialogs.delete_album = Some(DeleteAlbum::new(id));
+        }
+    }
+
+    /// "Add photos": shows Photos in selection mode, to choose photos for album `id`.
+    pub(super) fn start_adding(&mut self, id: i64) {
+        self.clear_selection();
+        self.set_view(View::Timeline);
+        self.tl.grid.choosing_for = Some(id);
+        self.tl.grid.picking = true;
+    }
+
+    /// Ends "Add photos" without adding anything and goes back to the album.
+    pub(super) fn stop_adding(&mut self) {
+        if let Some(id) = self.tl.grid.choosing_for.take() {
+            self.clear_selection();
+            self.set_view(View::Album(id));
+        }
+    }
+
+    /// Adds the chosen photos to the album, then goes back to it. The confirmation (with Undo)
+    /// comes when the library has written the change.
+    pub(super) fn finish_adding(&mut self) {
+        let Some(album) = self.tl.grid.choosing_for else {
+            return;
+        };
+        let files = self.selected_file_ids();
+        if !files.is_empty() {
+            self.lib.queue_album(AlbumOp::Add { album, files });
+        }
+        self.stop_adding();
+    }
+
+    /// The album whose photos are being chosen, while that is going on.
+    pub(super) fn adding_to(&self) -> Option<i64> {
+        self.tl.grid.choosing_for
+    }
+
+    /// Per frame: choosing photos ends when the user leaves Photos for another view or a search.
+    pub(super) fn end_adding_when_left(&mut self) {
+        if self.tl.grid.choosing_for.is_some()
+            && (self.tl.view != View::Timeline || self.searching())
+        {
+            self.tl.grid.choosing_for = None;
+            self.tl.grid.picking = !self.tl.grid.sel.is_empty();
         }
     }
 

@@ -18,6 +18,20 @@ pub fn day_key(taken_at: i64) -> i64 {
     i64::from(date_of(taken_at).num_days_from_ce())
 }
 
+/// The first and last year in which the items were taken. Items dated only by their file's own
+/// time are left out (that is when the file was saved, not when it was taken); `None` when no
+/// item has a known date.
+pub fn year_range(items: &[TimelineItem]) -> Option<(i32, i32)> {
+    items
+        .iter()
+        .filter(|it| it.date_source != DateSource::File)
+        .map(|it| date_of(it.taken_at).year())
+        .fold(None, |range, y| match range {
+            None => Some((y, y)),
+            Some((lo, hi)) => Some((lo.min(y), hi.max(y))),
+        })
+}
+
 /// `1204` becomes `1,204`.
 pub fn thousands(n: usize) -> String {
     let digits = n.to_string();

@@ -104,6 +104,8 @@ pub(super) struct TimelineState {
     /// How many of the loaded items are photos and how many are videos.
     pub(super) n_photos: usize,
     pub(super) n_videos: usize,
+    /// First and last year the loaded items were taken, when known.
+    pub(super) years: Option<(i32, i32)>,
     layout: Option<Layout>,
     /// "On this day" entries for the loaded items and the date they were computed for.
     otd: Option<(u64, NaiveDate, Vec<OnThisDay>)>,
@@ -137,6 +139,7 @@ impl TimelineState {
             groups_key: None,
             n_photos: 0,
             n_videos: 0,
+            years: None,
             layout: None,
             otd: None,
             lead: 0.0,
@@ -162,6 +165,7 @@ impl TimelineState {
             .filter(|it| it.kind == MediaKind::Video)
             .count();
         self.n_photos = self.items.len() - self.n_videos;
+        self.years = dates::year_range(&self.items);
     }
 
     /// Whether photos are grouped under day headings: not in Recently added (ordered by when

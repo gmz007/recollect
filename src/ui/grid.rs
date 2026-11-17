@@ -18,6 +18,9 @@ pub(super) struct GridState {
     /// Selection mode: the user picked items with a circle or a modifier key, so plain clicks
     /// toggle items instead of opening them and the selection bar is shown.
     pub(super) picking: bool,
+    /// The album the user is choosing photos for ("Add photos"): selection mode stays on, even
+    /// with nothing selected yet.
+    pub(super) choosing_for: Option<i64>,
     /// Whether the keyboard moved the selection since the last frame.
     pub(super) keyboard_moved: bool,
     /// Scroll offset to apply on the next frame so the keyboard selection stays visible.
@@ -36,13 +39,20 @@ impl GridState {
         if self.sel.is_multi() {
             self.picking = true;
         } else if self.sel.is_empty() {
-            self.picking = false;
+            self.picking = self.choosing_for.is_some();
         }
     }
 
-    /// Drops the selection and leaves selection mode.
+    /// Whether selection mode applies with the current selection: something is selected, or
+    /// photos are being chosen for an album.
+    fn picking_now(&self) -> bool {
+        !self.sel.is_empty() || self.choosing_for.is_some()
+    }
+
+    /// Drops the selection and leaves selection mode (unless photos are being chosen for an
+    /// album, which stays in selection mode).
     pub(super) fn clear(&mut self) {
-        self.picking = false;
+        self.picking = self.choosing_for.is_some();
         self.selected = None;
         self.sel.clear();
     }
@@ -119,7 +129,7 @@ impl GridState {
             // The primary item was in the day: another selected item takes over.
             self.selected = (0..len).find(|&k| self.sel.contains(id_at(k)));
         }
-        self.picking = !self.sel.is_empty();
+        self.picking = self.picking_now();
     }
 }
 
@@ -166,7 +176,7 @@ impl GridState {
                     self.selected = None;
                 }
                 self.selected = self.sel.click(self.selected, len, id_at, i, mods);
-                self.picking = !self.sel.is_empty();
+                self.picking = self.picking_now();
                 ClickOutcome::Selected
             }
             tiles::ClickPlan::Open => {

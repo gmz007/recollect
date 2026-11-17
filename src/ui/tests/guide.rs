@@ -409,6 +409,33 @@ fn the_main_screens_use_no_technical_words() {
         h.get_by_label("Clear filters");
         check("no results with a filter", &h);
     }
+    // An album: its header, the "⋯" menu, both dialogs and the Add photos bar.
+    {
+        let d4 = tempfile::tempdir().unwrap();
+        let (_lib, app, mut h) = album_view(d4.path(), 3, album_harness);
+        check("album", &h);
+        h.get_by_label("More actions").click();
+        h.run_steps(3);
+        check("album menu", &h);
+        h.get_by_label("Rename…").click();
+        h.run_steps(3);
+        check("rename dialog", &h);
+        h.get_by_label("Cancel").click();
+        h.run_steps(3);
+        h.get_by_label("More actions").click();
+        h.run_steps(3);
+        h.get_by_label("Delete album…").click();
+        h.run_steps(3);
+        check("delete dialog", &h);
+        h.get_by_label("Cancel").click();
+        h.run_steps(3);
+        app.borrow_mut().start_adding(1);
+        h.run_steps(3);
+        check("add photos bar", &h);
+        h.get_by_label("Help").click();
+        h.run_steps(3);
+        check("help sheet", &h);
+    }
     // The viewer, with its bar and the details panel, then its "More" menu.
     {
         let d5 = tempfile::tempdir().unwrap();
@@ -568,11 +595,7 @@ fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
             "There are no photos or videos in this folder.",
             "Check for new photos",
         ),
-        (
-            EmptyView::Album,
-            "This album is empty. Select photos and choose Add to album.",
-            "Go to Photos",
-        ),
+        (EmptyView::Album, "This album is empty", "Add photos"),
         (
             EmptyView::NoResults,
             "No photos match “snow”. Try describing the moment in other words.",

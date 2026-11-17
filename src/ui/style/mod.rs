@@ -241,17 +241,53 @@ pub fn darken(color: Color32, amount: f32) -> Color32 {
 /// Named `label` for assistive technology.
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> Response {
     let pal = Palette::of(ui.ctx());
+    filled_button(ui, label, pal.accent, pal.onaccent)
+}
+
+/// Like [`primary_button`] but in the warning colour, for the button that confirms something
+/// that cannot be undone.
+pub fn danger_button(ui: &mut egui::Ui, label: &str) -> Response {
+    let pal = Palette::of(ui.ctx());
+    filled_button(ui, label, pal.danger, pal.onaccent)
+}
+
+/// A 32 point button filled with `fill`, a little darker on hover, named `label`.
+fn filled_button(ui: &mut egui::Ui, label: &str, fill: Color32, text: Color32) -> Response {
     let r = ui
         .scope(|ui| {
             let w = &mut ui.visuals_mut().widgets;
-            w.inactive.weak_bg_fill = pal.accent;
-            w.hovered.weak_bg_fill = darken(pal.accent, 0.12);
-            w.active.weak_bg_fill = darken(pal.accent, 0.22);
-            let b =
-                egui::Button::new(medium(label).color(pal.onaccent)).min_size(Vec2::new(0.0, 32.0));
+            w.inactive.weak_bg_fill = fill;
+            w.hovered.weak_bg_fill = darken(fill, 0.12);
+            w.active.weak_bg_fill = darken(fill, 0.22);
+            let b = egui::Button::new(medium(label).color(text)).min_size(Vec2::new(0.0, 32.0));
             ui.add(b)
         })
         .inner
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+    r
+}
+
+/// An icon-only button (32 points) that opens a menu, named `label` for assistive technology.
+pub fn icon_only_menu<R>(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    label: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Response {
+    let r = ui
+        .scope(|ui| {
+            let spacing = ui.spacing_mut();
+            spacing.interact_size = Vec2::splat(ICON_BUTTON);
+            spacing.button_padding = Vec2::ZERO;
+            ui.menu_button(icon_text(icon, 20.0), |ui| {
+                controls::menu_body(ui);
+                add_contents(ui)
+            })
+            .response
+        })
+        .inner
+        .on_hover_text(label)
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     r

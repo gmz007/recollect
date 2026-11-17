@@ -49,6 +49,31 @@ fn count_text(photos: usize, videos: usize) -> String {
     }
 }
 
+/// Under an album's name: "214 photos, 3 videos · 2019 – 2026". The years are left out when
+/// they are not known, and a single year stands alone.
+fn album_subtitle(photos: usize, videos: usize, years: Option<(i32, i32)>) -> String {
+    let n = |n: usize, one: &str, many: &str| {
+        format!("{} {}", thousands(n), if n == 1 { one } else { many })
+    };
+    let mut parts = Vec::new();
+    if photos > 0 {
+        parts.push(n(photos, "photo", "photos"));
+    }
+    if videos > 0 {
+        parts.push(n(videos, "video", "videos"));
+    }
+    let text = if parts.is_empty() {
+        "No photos yet".to_string()
+    } else {
+        parts.join(", ")
+    };
+    match years {
+        Some((from, to)) if from == to => format!("{text} · {from}"),
+        Some((from, to)) => format!("{text} · {from} – {to}"),
+        None => text,
+    }
+}
+
 /// What happened in the search field's text box this frame.
 #[derive(Default)]
 struct SearchEdit {
@@ -282,12 +307,17 @@ impl App {
             return;
         }
         let title = self.view_title();
-        let subtitle = count_text(self.tl.n_photos, self.tl.n_videos);
+        let subtitle = if album.is_some() {
+            album_subtitle(self.tl.n_photos, self.tl.n_videos, self.tl.years)
+        } else {
+            count_text(self.tl.n_photos, self.tl.n_videos)
+        };
         ui.horizontal(|ui| {
             self.view_heading(ui, &title, &subtitle);
             if let Some(id) = album {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.horizontal(|ui| self.album_actions(ui, id));
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    self.album_actions(ui, id);
                 });
             }
         });
@@ -490,7 +520,18 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::count_text;
+    use super::{album_subtitle, count_text};
+
+    #[test]
+    fn an_albums_subtitle_counts_and_gives_the_years() {
+        assert_eq!(
+            album_subtitle(214, 3, Some((2019, 2026))),
+            "214 photos, 3 videos · 2019 – 2026"
+        );
+        assert_eq!(album_subtitle(1, 0, Some((2021, 2021))), "1 photo · 2021");
+        assert_eq!(album_subtitle(0, 12, None), "12 videos");
+        assert_eq!(album_subtitle(0, 0, None), "No photos yet");
+    }
 
     #[test]
     fn counts_read_naturally() {

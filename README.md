@@ -69,8 +69,12 @@ computer.
 - **Favorites:** click the star that appears in the corner of a tile when you point at it (or
   press `F` on the item you are on) to mark it; the **Favorites** view in the sidebar lists them.
 - **Albums:** make your own albums (**New album…** in the sidebar, or from any **Add to album…**
-  menu). An album opens like the timeline, grouped and sorted the same way; it has **Rename…** and
-  **Delete album…** (deleting an album never deletes photos or videos). Albums only hold references:
+  menu). An album opens as a plain grid; its heading says how many photos and videos it holds and
+  the years they span, with **Add photos** (Photos in selection mode, a bar above the grid says
+  "Choose photos to add to …"; **Add to …** adds them with Undo, **Cancel** or Esc goes back
+  unchanged) and a **⋯** menu with **Rename…** and **Delete album…** (asks first; deleting an album
+  never deletes photos or videos). An empty album says so and offers **Add photos**; in the sidebar
+  it shows a neutral cover. Albums only hold references:
   files stay where they are, and an album forgets files that leave the library.
 - **Multi-select** in every grid (timeline views, albums and search results): click the circle in
   a tile's corner, or `Ctrl+click` (`Cmd+click` on macOS) to toggle an item, `Shift+click` to
@@ -81,7 +85,8 @@ computer.
 - **Activity card** at the bottom of the sidebar, only while something is happening ("Looking for
   new photos…", "Reading photo dates… 1,234 of 5,000", "Getting your photos ready for search…
   45 %", "Downloading smart search… 120 of 485 MB"), with pause and cancel.
-- **Help** (the **?** button): how search works and the keyboard shortcuts.
+- **Help** (the **?** button or F1, on every browsing screen): how search works and the keyboard
+  shortcuts in sections (browsing, photo size, selecting, viewing).
 - **On this day:** photos taken on today's date in earlier years, in a banner at the top of Photos (the ✕ hides it until tomorrow)
   (photos dated only by their file time are left out; 29 February shows on 28 February in years
   without one).

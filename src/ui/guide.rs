@@ -174,6 +174,31 @@ fn empty_text(ui: &mut egui::Ui, icon: MaterialIcon, text: &str, button: &str) -
     empty_state(ui, icon, &[Part::Text(text)], button)
 }
 
+/// The screen of an album with nothing in it: what to do, a button that starts it and the
+/// reassurance that files are never touched. Returns true when the button was clicked.
+fn empty_album_state(ui: &mut egui::Ui) -> bool {
+    let pal = Palette::of(ui.ctx());
+    let mut clicked = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.22).min(140.0));
+        ui.label(style::icon_text(icons::ICON_PHOTO_ALBUM, 56.0).color(pal.text2));
+        ui.add_space(12.0);
+        ui.label(style::semibold("This album is empty").size(17.0));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Add photos from Photos, or select photos anywhere and choose Add to album.",
+            )
+            .color(pal.text2),
+        );
+        ui.add_space(16.0);
+        clicked = style::primary_button(ui, "Add photos").clicked();
+        ui.add_space(12.0);
+        ui.label(RichText::new("Albums never change or delete your files.").color(pal.muted));
+    });
+    clicked
+}
+
 /// The screen for a view with nothing in it: an icon, one sentence and one main button.
 /// Returns true when the button was clicked.
 fn empty_state(ui: &mut egui::Ui, icon: MaterialIcon, sentence: &[Part<'_>], button: &str) -> bool {
@@ -214,12 +239,12 @@ impl App {
     /// What the album grids show when the current view has no items.
     pub(super) fn timeline_empty_state(&mut self, ui: &mut egui::Ui) {
         let go_photos = match self.tl.view {
-            View::Album(_) => empty_text(
-                ui,
-                icons::ICON_PHOTO_ALBUM,
-                "This album is empty. Select photos and choose Add to album.",
-                "Go to Photos",
-            ),
+            View::Album(id) => {
+                if empty_album_state(ui) {
+                    self.start_adding(id);
+                }
+                false
+            }
             View::Favorites => empty_state(
                 ui,
                 icons::ICON_FAVORITE,
@@ -622,7 +647,8 @@ impl Tip {
                  photos, or Shift-click to select everything in between."
             }
             Tip::Album => {
-                "Add photos to this album from Photos: select them and choose Add to album."
+                "Click Add photos to pick photos for this album, or select photos anywhere and choose \
+                 Add to album."
             }
         }
     }

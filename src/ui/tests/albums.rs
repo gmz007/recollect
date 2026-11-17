@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// What the Delete dialog says about album `name`.
+fn delete_text(name: &str) -> String {
+    format!(
+        "Delete the album “{name}”? The photos stay in your library — only the album is removed."
+    )
+}
+
+/// Opens the album's "⋯" menu and chooses `item`.
+fn open_album_menu(h: &mut Harness<'_>, item: &str) {
+    h.get_by_label("More actions").click();
+    h.run_steps(3);
+    h.get_by_label(item).click();
+    h.run_steps(2);
+}
+
 #[test]
 fn ctrl_and_shift_click_arrows_select_all_and_escape() {
     let d = tempfile::tempdir().unwrap();
@@ -121,8 +136,8 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label("Item p2.jpg");
     h.get_by_label("Item p0.jpg");
     assert!(h.query_by_label("Item p3.jpg").is_none());
-    h.get_by_label("Rename…");
-    h.get_by_label("Delete album…");
+    h.get_by_label("Add photos");
+    h.get_by_label("More actions");
 
     // Remove one from the album with the selection bar's button.
     click_with(&mut h, "Item p2.jpg", ctrl);
@@ -145,7 +160,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
         a.tl.items.is_empty() && a.tl.awaiting.is_none() && a.tl.loaded
     });
     h.run_steps(3);
-    h.get_by_label("This album is empty. Select photos and choose Add to album.");
+    h.get_by_label("This album is empty");
     assert_eq!(
         lib.timeline(&crate::store::db::TimelineFilter::default())
             .unwrap()
@@ -157,7 +172,7 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     let p1 = file_id_of(&lib, "p1.jpg");
     lib.add_to_album(lib.albums().unwrap()[0].id, &[p1])
         .unwrap();
-    h.get_by_label("Rename…").click();
+    open_album_menu(&mut h, "Rename…");
     h.run_steps(2);
     // The field starts with the old name: select all of it and replace it.
     h.key_press_modifiers(ctrl, egui::Key::A);
@@ -172,13 +187,13 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     h.get_by_label_contains("Holiday (");
 
     // Delete needs a confirmation that says the photos stay.
-    h.get_by_label("Delete album…").click();
+    open_album_menu(&mut h, "Delete album…");
     h.run_steps(3);
-    h.get_by_label("The photos and videos in it are not deleted.");
+    h.get_by_label(&delete_text("Holiday"));
     h.get_all_by_label("Cancel").last().unwrap().click();
     h.run_steps(3);
     assert_eq!(lib.albums().unwrap().len(), 1);
-    h.get_by_label("Delete album…").click();
+    open_album_menu(&mut h, "Delete album…");
     h.run_steps(3);
     h.get_by_label("Delete").click();
     // The sidebar's album list is read again in the background; wait for it as well.
@@ -325,7 +340,7 @@ fn typing_in_the_viewers_new_album_field_changes_only_the_text() {
 fn keys_do_not_reach_the_grid_behind_a_dialog_and_enter_never_deletes() {
     let d = tempfile::tempdir().unwrap();
     let (lib, app, mut h) = album_view(d.path(), 3, album_harness);
-    h.get_by_label("Delete album…").click();
+    open_album_menu(&mut h, "Delete album…");
     h.run_steps(3);
     // Clicks do not reach the grid behind the dialog either: select straight in the state.
     {
@@ -336,7 +351,7 @@ fn keys_do_not_reach_the_grid_behind_a_dialog_and_enter_never_deletes() {
         a.tl.grid.selected = Some(1);
     }
     h.run_steps(2);
-    h.get_by_label("The photos and videos in it are not deleted.");
+    h.get_by_label(&delete_text("A"));
     // Enter, F and arrows behind the dialog do nothing.
     for key in [egui::Key::Enter, egui::Key::F, egui::Key::ArrowRight] {
         h.key_press(key);
@@ -375,7 +390,7 @@ fn a_failing_remove_or_delete_changes_nothing_and_shows_an_error() {
     h.get_by_label("Item p1.jpg");
     assert_eq!(lib.albums().unwrap()[0].count, 3);
     // Deleting: the dialog stays, the view stays.
-    h.get_by_label("Delete album…").click();
+    open_album_menu(&mut h, "Delete album…");
     h.run_steps(3);
     h.get_by_label("Delete").click();
     // A click counts in the next frame: only then is the deletion queued for the writer.
@@ -527,4 +542,201 @@ fn small_tiles_expose_no_select_or_favorite_buttons() {
     h.get_by_label("Item img1.jpg");
     assert!(h.query_by_label("Select Item img1.jpg").is_none());
     assert!(h.query_by_label("Add Item img1.jpg to favorites").is_none());
+}
+
+/// Dates for `album_view`'s photos: 2017 for all of them (see `files_app`).
+#[test]
+fn the_album_header_counts_photos_and_gives_the_years() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app, h) = album_view(d.path(), 3, album_harness);
+    h.get_by_label("A");
+    h.get_by_label("3 photos · 2017");
+    assert_eq!(app.borrow().tl.years, Some((2017, 2017)));
+    // Two years: a range with the en dash.
+    {
+        let mut a = app.borrow_mut();
+        let mut items = (*a.tl.items).clone();
+        items[0].taken_at = titem(0, 2019, 5, 1).taken_at;
+        a.inject_timeline(items);
+    }
+    let mut h = h;
+    h.run_steps(3);
+    h.get_by_label("3 photos · 2017 – 2019");
+}
+
+#[test]
+fn the_more_menu_has_rename_and_delete() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app, mut h) = album_view(d.path(), 3, album_harness);
+    assert!(h.query_by_label("Rename…").is_none(), "hidden until opened");
+    h.get_by_label("More actions").click();
+    h.run_steps(3);
+    h.get_by_label("Rename…");
+    h.get_by_label("Delete album…");
+    h.get_by_label("Rename…").click();
+    h.run_steps(3);
+    assert!(app.borrow().dialogs.rename_album.is_some());
+}
+
+#[test]
+fn add_photos_chooses_photos_and_adds_them_with_undo() {
+    let d = tempfile::tempdir().unwrap();
+    let (lib, app) = files_app(d.path(), 5);
+    let first = file_id_of(&lib, "p0.jpg");
+    lib.create_album("Family", &[first]).unwrap();
+    let mut h = album_harness(&app);
+    settle(&mut h, || {
+        app.borrow().albums.len() == 1 && app.borrow().tl.items.len() == 5
+    });
+    h.get_by_label_contains("Family (1)").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        matches!(a.tl.view, View::Album(_)) && a.tl.items.len() == 1 && a.tl.awaiting.is_none()
+    });
+    h.run_steps(3);
+    h.get_by_label("Add photos").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.view == View::Timeline && a.tl.items.len() == 5 && a.tl.awaiting.is_none()
+    });
+    h.run_steps(3);
+    h.get_by_label("Choose photos to add to Family");
+    // Nothing chosen yet: the main button waits.
+    assert!(
+        h.get_by_label("Add to Family")
+            .accesskit_node()
+            .is_disabled()
+    );
+    // A plain click chooses a photo instead of opening it.
+    h.get_by_label("Item p3.jpg").click();
+    h.run_steps(3);
+    h.get_by_label("Item p4.jpg").click();
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+    h.get_by_label("2 selected");
+    h.get_by_label("Add to Family").click();
+    settle(&mut h, || lib.albums().unwrap()[0].count == 3);
+    settle(&mut h, || {
+        let a = app.borrow();
+        matches!(a.tl.view, View::Album(_)) && a.tl.items.len() == 3 && a.tl.awaiting.is_none()
+    });
+    h.run_steps(3);
+    assert!(app.borrow().adding_to().is_none());
+    h.get_by_label("Added 2 to Family");
+    h.get_by_label_contains("3 photos");
+    // Undo takes them out again.
+    h.get_by_label("Undo").click();
+    settle(&mut h, || lib.albums().unwrap()[0].count == 1);
+}
+
+/// Family with one photo in it, opened, then "Add photos" clicked and Photos shown.
+fn choosing_photos(d: &std::path::Path) -> (Arc<Library>, Rc<RefCell<App>>, Harness<'static>) {
+    let (lib, app) = files_app(d, 5);
+    let first = file_id_of(&lib, "p0.jpg");
+    lib.create_album("Family", &[first]).unwrap();
+    let mut h = album_harness(&app);
+    settle(&mut h, || {
+        app.borrow().albums.len() == 1 && app.borrow().tl.items.len() == 5
+    });
+    h.get_by_label_contains("Family (1)").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        matches!(a.tl.view, View::Album(_)) && a.tl.items.len() == 1 && a.tl.awaiting.is_none()
+    });
+    h.run_steps(3);
+    h.get_by_label("Add photos").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.tl.view == View::Timeline && a.tl.items.len() == 5 && a.tl.awaiting.is_none()
+    });
+    h.run_steps(3);
+    (lib, app, h)
+}
+
+#[test]
+fn cancel_and_escape_leave_add_photos_without_changes() {
+    for use_escape in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let (lib, app, mut h) = choosing_photos(d.path());
+        h.get_by_label("Item p3.jpg").click();
+        h.run_steps(3);
+        h.get_by_label("1 selected");
+        if use_escape {
+            h.key_press(egui::Key::Escape);
+        } else {
+            h.get_by_label("Cancel").click();
+        }
+        settle(&mut h, || {
+            let a = app.borrow();
+            matches!(a.tl.view, View::Album(_)) && a.tl.items.len() == 1 && a.tl.awaiting.is_none()
+        });
+        assert!(app.borrow().adding_to().is_none());
+        assert!(tl_selection(&app).is_empty());
+        assert_eq!(lib.albums().unwrap()[0].count, 1);
+        h.get_by_label("Add photos");
+    }
+}
+
+#[test]
+fn going_elsewhere_ends_add_photos() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app, mut h) = choosing_photos(d.path());
+    h.get_by_label("Recently added").click();
+    h.run_steps(4);
+    assert!(app.borrow().adding_to().is_none());
+    assert!(!app.borrow().tl.grid.picking);
+    assert!(h.query_by_label_contains("Choose photos to add").is_none());
+}
+
+#[test]
+fn an_empty_album_says_so_and_add_photos_starts_choosing() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app) = files_app(d.path(), 3);
+    let lib = Arc::clone(&app.borrow().lib);
+    lib.create_album("Quiet", &[]).unwrap();
+    let mut h = album_harness(&app);
+    settle(&mut h, || app.borrow().albums.len() == 1);
+    h.get_by_label("Quiet (0)").click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        // The timeline had photos: no items means the album's own (empty) list has arrived.
+        matches!(a.tl.view, View::Album(_))
+            && a.tl.items.is_empty()
+            && a.tl.loaded
+            && a.tl.awaiting.is_none()
+    });
+    h.run_steps(3);
+    h.get_by_label("This album is empty");
+    h.get_by_label("Add photos from Photos, or select photos anywhere and choose Add to album.");
+    h.get_by_label("Albums never change or delete your files.");
+    // Two buttons: the header's and the empty state's.
+    h.get_all_by_label("Add photos").last().unwrap().click();
+    settle(&mut h, || {
+        let a = app.borrow();
+        a.adding_to().is_some() && a.tl.items.len() == 3 && a.tl.awaiting.is_none()
+    });
+    h.run_steps(3);
+    h.get_by_label("Choose photos to add to Quiet");
+    assert_eq!(app.borrow().tl.view, View::Timeline);
+}
+
+#[test]
+fn help_opens_with_f1_on_an_album_and_on_search_results() {
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, app, mut h) = album_view(d.path(), 3, album_harness);
+    h.key_press(egui::Key::F1);
+    settle(&mut h, || app.borrow().dialogs.help_open);
+    h.get_by_label("Close help").click();
+    h.run_steps(3);
+    assert!(!app.borrow().dialogs.help_open);
+    // Search results (the same setup as the results tests).
+    let d = tempfile::tempdir().unwrap();
+    let app = Rc::new(RefCell::new(grid_app_with(d.path(), false)));
+    let mut h = album_harness(&app);
+    assert!(app.borrow().searching());
+    h.key_press(egui::Key::F1);
+    settle(&mut h, || app.borrow().dialogs.help_open);
+    h.get_by_label("Keyboard shortcuts help").click();
+    h.run_steps(3);
+    h.get_by_label("Tab, then Enter");
 }

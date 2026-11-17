@@ -121,6 +121,13 @@ viewer; ids that vanish in a reload are dropped. Range selection runs in
 list order from an anchor, so it follows the order on screen. After an action from the
 selection bar finishes (an album change, a favorite), the selection is cleared; Undo still works.
 
+"Add photos" on an album switches to Photos and keeps its grid in selection mode even with nothing
+selected (`GridState::choosing_for` holds the album id). A slim bar replaces the floating pill: it
+names the album, counts the choice and offers Cancel and "Add to …", which queues an ordinary add
+(so the confirmation and Undo are the usual ones) and returns to the album. Esc and Cancel return
+without changes; going to another view or starting a search ends the mode. An album's year range
+comes from items whose date is known (not the file's own time); it is left out when none is.
+
 ## Code layout
 
 One crate; each directory is one type or one screen split by concern, and no source file holds

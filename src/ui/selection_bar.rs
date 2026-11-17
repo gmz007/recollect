@@ -79,6 +79,10 @@ impl App {
         // Noted on every frame the grid shows, selection or not, so a toast keeps its place
         // when the selection ends instead of jumping to the window's centre.
         self.pill_anchor = Some(toast::pill_anchor_of(ui));
+        if self.adding_to().is_some() {
+            self.adding_bar(ui);
+            return;
+        }
         let grid = self.grid();
         let (count, picking) = (grid.sel.len(), grid.picking);
         if count == 0 || !picking || self.confirmation_showing() {
@@ -99,6 +103,46 @@ impl App {
             toast::pill_area(&ctx, id, self.pill_anchor, |ui| selection_bar(ui, &state)).inner
         {
             self.bulk_action(a);
+        }
+    }
+
+    /// While photos are being chosen for an album: a slim bar above the grid with what to do,
+    /// how many are chosen, "Cancel" and the button that adds them.
+    fn adding_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(album) = self.adding_to() else {
+            return;
+        };
+        let pal = style::Palette::of(ui.ctx());
+        let name = super::albums::short_name(self.album_name(album).unwrap_or("the album"), 40);
+        let count = self.grid().sel.len();
+        let (mut add, mut cancel) = (false, false);
+        egui::Frame::new()
+            .fill(pal.tint)
+            .corner_radius(egui::CornerRadius::same(style::CARD_RADIUS))
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(style::semibold(format!("Choose photos to add to {name}")));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.add_enabled_ui(count > 0, |ui| {
+                            add = style::primary_button(ui, &format!("Add to {name}")).clicked();
+                        });
+                        cancel = super::dialogs::secondary_button(ui, "Cancel").clicked();
+                        if count > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("{} selected", thousands(count)))
+                                    .color(pal.text2),
+                            );
+                        }
+                    });
+                });
+            });
+        ui.add_space(8.0);
+        if add {
+            self.finish_adding();
+        } else if cancel {
+            self.stop_adding();
         }
     }
 
