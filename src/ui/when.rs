@@ -67,16 +67,22 @@ impl DateFilter {
     /// the years that have items, newest first. Returns true when something changed.
     pub fn ui(&mut self, ui: &mut egui::Ui, years: &[i32], this_year: i32) -> bool {
         let before = *self;
-        let text = format!("When: {}", self.label());
-        style::chip(ui, &text, &text, |ui| {
-            ui.selectable_value(&mut self.when, When::Any, "Any time");
-            ui.selectable_value(&mut self.when, When::ThisYear, "This year");
-            ui.selectable_value(&mut self.when, When::LastYear, "Last year");
-            for &y in years {
-                ui.selectable_value(&mut self.when, When::Year(y), y.to_string());
-            }
-            ui.selectable_value(&mut self.when, When::Custom, "Custom…");
-        });
+        let accessible = format!("When: {}", self.label());
+        style::chip(
+            ui,
+            &accessible,
+            &self.label(),
+            self.when != When::Any,
+            |ui| {
+                ui.selectable_value(&mut self.when, When::Any, "Any time");
+                ui.selectable_value(&mut self.when, When::ThisYear, "This year");
+                ui.selectable_value(&mut self.when, When::LastYear, "Last year");
+                for &y in years {
+                    ui.selectable_value(&mut self.when, When::Year(y), y.to_string());
+                }
+                ui.selectable_value(&mut self.when, When::Custom, "Custom…");
+            },
+        );
         if self.when == When::Custom {
             if before.when != When::Custom {
                 // Start from the most recent year with items.
@@ -101,7 +107,7 @@ impl DateFilter {
             }
             for (label, value) in chips {
                 let text = format!("{label}: {value}");
-                style::chip(ui, &text, &text, |ui| {
+                style::chip(ui, &text, &text, true, |ui| {
                     for y in (lo..=hi).rev() {
                         ui.selectable_value(value, y, y.to_string());
                     }
@@ -120,16 +126,22 @@ pub fn sort_ui(ui: &mut egui::Ui, sort: &mut SearchSort) -> bool {
         SearchSort::Newest => "Newest",
         SearchSort::Oldest => "Oldest",
     };
-    let text = format!("Sort: {}", name(*sort));
-    style::chip(ui, &text, &text, |ui| {
-        for s in [
-            SearchSort::Relevance,
-            SearchSort::Newest,
-            SearchSort::Oldest,
-        ] {
-            ui.selectable_value(sort, s, name(s));
-        }
-    });
+    let accessible = format!("Sort: {}", name(*sort));
+    style::chip(
+        ui,
+        &accessible,
+        name(*sort),
+        *sort != SearchSort::Relevance,
+        |ui| {
+            for s in [
+                SearchSort::Relevance,
+                SearchSort::Newest,
+                SearchSort::Oldest,
+            ] {
+                ui.selectable_value(sort, s, name(s));
+            }
+        },
+    );
     *sort != before
 }
 

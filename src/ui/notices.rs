@@ -1,6 +1,7 @@
 //! Toasts: short messages about what just happened, and what the library reports.
 
 use super::{App, guide};
+use crate::library::AlbumOp;
 use std::time::{Duration, Instant};
 
 /// Short messages shown as toasts. An error stays visible until the next error or
@@ -8,6 +9,17 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub(super) struct Notices {
     pub(super) items: Vec<Notice>,
+}
+
+/// What the "Undo" button of a confirmation puts back.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Undo {
+    /// `files` were just put into `album`: take them out again.
+    TakeOutOfAlbum { album: i64, files: Vec<i64> },
+    /// `files` were just taken out of `album`: put them back.
+    PutBackInAlbum { album: i64, files: Vec<i64> },
+    /// Favorite marks that were changed: each file's mark as it was.
+    Favorites(Vec<(i64, bool)>),
 }
 
 pub(super) struct Notice {
@@ -18,6 +30,8 @@ pub(super) struct Notice {
     pub(super) details: Option<String>,
     /// A button that tries the failed thing again.
     pub(super) action: Option<NoticeAction>,
+    /// A confirmation of something the user did, with the way back.
+    pub(super) undo: Option<Undo>,
 }
 
 /// What the "Try again" button of an error does.
@@ -64,6 +78,7 @@ impl Notices {
             error,
             details,
             action,
+            undo: None,
         });
         while self.items.len() > Self::MAX {
             self.items.remove(0);
@@ -102,6 +117,48 @@ impl Notices {
 impl App {
     pub(super) fn notify(&mut self, msg: impl Into<String>) {
         self.notices.push(msg.into(), false, Instant::now());
+    }
+
+    /// A confirmation with an "Undo" button; it replaces the selection bar while it shows.
+    pub(super) fn notify_undoable(&mut self, msg: impl Into<String>, undo: Undo) {
+        self.notices.push(msg.into(), false, Instant::now());
+        if let Some(n) = self.notices.items.last_mut() {
+            n.undo = Some(undo);
+        }
+    }
+
+    /// Whether a confirmation with "Undo" is showing (the selection bar gives way to it).
+    pub(super) fn confirmation_showing(&self) -> bool {
+        self.notices
+            .current_notice()
+            .is_some_and(|n| n.undo.is_some())
+    }
+
+    /// Undoes what a confirmation stands for. The writes are silent: no confirmation of their
+    /// own, so Undo is not offered for Undo.
+    pub(super) fn undo(&mut self, undo: Undo) {
+        match undo {
+            Undo::TakeOutOfAlbum { album, files } => {
+                let t = self.lib.queue_album(AlbumOp::Remove { album, files });
+                self.silent_album_writes.insert(t);
+            }
+            Undo::PutBackInAlbum { album, files } => {
+                let t = self.lib.queue_album(AlbumOp::Add { album, files });
+                self.silent_album_writes.insert(t);
+            }
+            Undo::Favorites(previous) => {
+                for fav in [true, false] {
+                    let ids: Vec<i64> = (previous.iter())
+                        .filter(|(_, was)| *was == fav)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    if !ids.is_empty() {
+                        self.set_favorites(&ids, fav);
+                    }
+                }
+            }
+        }
+        self.notify("Undone");
     }
 
     /// Like [`Self::notify`] for failures: stays visible longer and is not pushed out by the

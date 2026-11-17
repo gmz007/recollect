@@ -91,8 +91,10 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     settle(&mut h, || {
         lib.albums().unwrap()[0].count == 3 && app.borrow().albums[0].count == 3
     });
-    h.get_by_label_contains("Added 3 items to “Trip”");
-    // Adding them again changes nothing.
+    h.get_by_label_contains("Added 3 to Trip");
+    // Adding them again changes nothing. (The confirmation took the bar's place.)
+    app.borrow_mut().notices.items.clear();
+    h.run_steps(2);
     h.get_by_label("Add to album…").click();
     h.run_steps(3);
     h.get_by_label("Trip").click();
@@ -128,7 +130,8 @@ fn albums_can_be_created_filled_trimmed_renamed_and_deleted() {
     });
     h.run_steps(2);
     assert!(h.query_by_label("Item p2.jpg").is_none());
-    // ...and two with the selection bar.
+    // ...and two with the selection bar (once the confirmation has given the bar back).
+    app.borrow_mut().notices.items.clear();
     click_with(&mut h, "Item p4.jpg", ctrl);
     click_with(&mut h, "Item p0.jpg", shift);
     h.get_by_label("Remove from album").click();

@@ -2,8 +2,10 @@
 
 use super::App;
 use super::albums::{AlbumChoice, album_menu};
-use super::style::{self, Palette, icons};
+use super::favorites::marked;
+use super::style::{self, icons};
 use super::timeline::{View, thousands};
+use super::toast;
 use crate::library::AlbumOp;
 use crate::store::db::AlbumInfo;
 use std::collections::HashSet;
@@ -17,72 +19,45 @@ pub(super) enum BulkAction {
     Clear,
 }
 
-/// Buttons on the accent colour: light text on a faint veil.
-fn veil_buttons(ui: &mut egui::Ui, pal: Palette) {
-    let v = ui.visuals_mut();
-    for w in [
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-    ] {
-        w.fg_stroke.color = pal.onaccent;
-        w.weak_bg_fill = pal.onaccent.gamma_multiply(0.16);
-        w.bg_fill = w.weak_bg_fill;
-    }
-    v.widgets.hovered.weak_bg_fill = pal.onaccent.gamma_multiply(0.28);
-    v.widgets.open.fg_stroke.color = pal.onaccent;
-    v.widgets.open.weak_bg_fill = pal.onaccent.gamma_multiply(0.28);
+/// What the selection bar shows.
+pub(super) struct BarState<'a> {
+    pub count: usize,
+    pub albums: &'a [AlbumInfo],
+    pub in_album: bool,
+    /// Every selected item is a favorite: the heart then takes the mark away.
+    pub all_favorite: bool,
 }
 
-/// The accent bar that replaces the view header while items are selected.
-pub(super) fn selection_bar(
-    ui: &mut egui::Ui,
-    count: usize,
-    albums: &[AlbumInfo],
-    in_album: bool,
-) -> Option<BulkAction> {
-    let pal = Palette::of(ui.ctx());
+/// The content of the floating selection pill: how many are selected and what can be done.
+pub(super) fn selection_bar(ui: &mut egui::Ui, state: &BarState<'_>) -> Option<BulkAction> {
     let mut action = None;
-    egui::Frame::new()
-        .fill(pal.accent)
-        .corner_radius(egui::CornerRadius::same(style::CARD_RADIUS))
-        .inner_margin(egui::Margin::symmetric(16, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            veil_buttons(ui, pal);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    style::semibold(format!("{} selected", thousands(count)))
-                        .size(16.0)
-                        .color(pal.onaccent),
-                );
-                ui.add_space(8.0);
-                if let Some(c) = album_menu(ui, albums) {
-                    action = Some(BulkAction::AddToAlbum(c));
-                }
-                if style::icon_label_button(ui, icons::ICON_STAR, "Favorite").clicked() {
-                    action = Some(BulkAction::Favorite(true));
-                }
-                if style::icon_label_button(ui, icons::ICON_STAR.outlined(), "Unfavorite").clicked()
-                {
-                    action = Some(BulkAction::Favorite(false));
-                }
-                if in_album
-                    && style::icon_label_button(
-                        ui,
-                        icons::ICON_PLAYLIST_REMOVE,
-                        "Remove from album",
-                    )
-                    .clicked()
-                {
-                    action = Some(BulkAction::RemoveFromAlbum);
-                }
-                if style::icon_label_button(ui, icons::ICON_CLOSE, "Cancel").clicked() {
-                    action = Some(BulkAction::Clear);
-                }
-            });
-        });
-    ui.add_space(8.0);
+    ui.spacing_mut().item_spacing.x = 6.0;
+    ui.label(style::semibold(format!(
+        "{} selected",
+        thousands(state.count)
+    )));
+    ui.add_space(6.0);
+    if let Some(c) = album_menu(ui, state.albums) {
+        action = Some(BulkAction::AddToAlbum(c));
+    }
+    if state.in_album {
+        let r = style::icon_label_button(ui, icons::ICON_PLAYLIST_REMOVE, "Remove from album")
+            .on_hover_text("Takes them out of this album. The photos stay in your library.");
+        if r.clicked() {
+            action = Some(BulkAction::RemoveFromAlbum);
+        }
+    }
+    let (icon, label) = if state.all_favorite {
+        (icons::ICON_FAVORITE, "Unfavorite")
+    } else {
+        (icons::ICON_FAVORITE.outlined(), "Favorite")
+    };
+    if style::icon_button_framed(ui, icon, label).clicked() {
+        action = Some(BulkAction::Favorite(!state.all_favorite));
+    }
+    if style::icon_button_framed(ui, icons::ICON_CLOSE, "Cancel").clicked() {
+        action = Some(BulkAction::Clear);
+    }
     action
 }
 
@@ -98,26 +73,46 @@ impl App {
             .collect()
     }
 
-    /// The selection bar, in place of the view header while items are selected. Returns whether
-    /// it was shown.
-    pub(super) fn selection_bar_ui(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Notes where the pill floats and shows the selection bar over the grid, unless a
+    /// confirmation (which takes its place) is showing. Nothing reflows.
+    pub(super) fn selection_bar_ui(&mut self, ui: &mut egui::Ui) {
+        // Noted on every frame the grid shows, selection or not, so a toast keeps its place
+        // when the selection ends instead of jumping to the window's centre.
+        self.pill_anchor = Some(toast::pill_anchor_of(ui));
         let grid = self.grid();
         let (count, picking) = (grid.sel.len(), grid.picking);
-        if count == 0 || !picking {
-            return false;
+        if count == 0 || !picking || self.confirmation_showing() {
+            return;
         }
         let in_album = !self.searching() && matches!(self.tl.view, View::Album(_));
-        if let Some(a) = selection_bar(ui, count, &self.albums, in_album) {
+        let all_favorite = self.selection_all_favorite();
+        let state = BarState {
+            count,
+            albums: &self.albums,
+            in_album,
+            all_favorite,
+        };
+        let ctx = ui.ctx().clone();
+        if let Some(a) = toast::pill_area(&ctx, bar_id(&state), self.pill_anchor, |ui| {
+            selection_bar(ui, &state)
+        }) {
             self.bulk_action(a);
         }
-        true
+    }
+
+    /// Whether every selected item is a favorite (as shown, with pending marks).
+    pub(super) fn selection_all_favorite(&self) -> bool {
+        let sel = &self.grid().sel;
+        self.listed()
+            .filter(|&(id, _)| sel.contains(id))
+            .all(|(id, fav)| marked(&self.fav_marks, id, fav))
     }
 
     pub(super) fn bulk_action(&mut self, action: BulkAction) {
         let files = self.selected_file_ids();
         match action {
             BulkAction::AddToAlbum(c) => self.add_to_album_choice(files, c),
-            BulkAction::Favorite(fav) => self.set_favorites(&files, fav),
+            BulkAction::Favorite(fav) => self.favorite_selection(&files, fav),
             BulkAction::RemoveFromAlbum => {
                 // The grid drops them once the library confirms (see `report_album_write`).
                 if let View::Album(album) = self.tl.view {
@@ -127,4 +122,14 @@ impl App {
             BulkAction::Clear => self.clear_selection(),
         }
     }
+}
+
+/// The selection bar's area changes with what changes its width (see [`toast::pill_area`]).
+fn bar_id(state: &BarState<'_>) -> egui::Id {
+    egui::Id::unique((
+        "selection-bar",
+        state.count,
+        state.in_album,
+        state.all_favorite,
+    ))
 }

@@ -140,9 +140,8 @@ impl App {
 
     /// The selection bar or view header, the tip and the "On this day" strip.
     fn timeline_header(&mut self, ui: &mut egui::Ui) {
-        if !self.selection_bar_ui(ui) {
-            self.view_header(ui);
-        }
+        self.selection_bar_ui(ui);
+        self.view_header(ui);
         self.tip_card(ui);
         if self.tl.view == View::Timeline {
             // "Today" changes at midnight, whether or not anything else happens by then.

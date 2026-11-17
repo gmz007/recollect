@@ -5,9 +5,11 @@
 //! egui's own fonts stay behind them as fallbacks for any character Inter does not have. The
 //! colours live in [`tokens`] so every screen draws from one palette.
 
+mod controls;
 mod mark;
 mod tokens;
 
+pub use controls::{PILL_HEIGHT, chip, filter_chip, menu_body, pill_buttons, pill_frame, switch};
 pub use mark::app_mark;
 pub use tokens::*;
 
@@ -134,7 +136,7 @@ fn apply_text_styles(style: &mut egui::Style) {
     s.item_spacing = Vec2::new(8.0, 6.0);
     s.button_padding = Vec2::new(12.0, 6.0);
     s.interact_size = Vec2::new(32.0, 28.0);
-    s.menu_margin = Margin::same(8);
+    s.menu_margin = Margin::same(6);
     s.window_margin = Margin::same(16);
     s.slider_width = 120.0;
     s.slider_rail_height = 6.0;
@@ -312,20 +314,6 @@ pub fn dropdown_job(ui: &egui::Ui, label: &str) -> egui::text::LayoutJob {
     job
 }
 
-/// A drop-down "chip": `text` with an arrow that opens a menu. The chip is named `accessible`
-/// for assistive technology.
-pub fn chip<R>(
-    ui: &mut egui::Ui,
-    accessible: &str,
-    text: &str,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> Response {
-    let job = dropdown_job(ui, text);
-    let r = ui.menu_button(job, add_contents).response;
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), accessible));
-    r
-}
-
 /// A frameless icon button for toolbars: tooltip `tooltip`, named `label` for assistive
 /// technology, drawn in `color` (default: the normal text colour) and highlighted when
 /// `selected`. With `text` the short word is shown next to the icon.
@@ -441,30 +429,4 @@ fn square_icon_button(
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     r.on_hover_text(tooltip)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A filter chip: fully rounded, the pill colours while `active`, the field colour otherwise.
-/// Named `accessible` for assistive technology; true when clicked.
-pub fn filter_chip(ui: &mut egui::Ui, text: &str, accessible: &str, active: bool) -> bool {
-    let pal = Palette::of(ui.ctx());
-    let font = TextStyle::Body.resolve(ui.style());
-    let fg = if active { pal.pilltext } else { pal.text };
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font, fg);
-    let size = Vec2::new(galley.size().x + 24.0, CHIP_HEIGHT);
-    let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let fill = if active {
-            pal.pill
-        } else if r.hovered() {
-            pal.hover
-        } else {
-            pal.field
-        };
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same((CHIP_HEIGHT / 2.0) as u8), fill);
-        let pos = rect.center() - galley.size() / 2.0;
-        ui.painter().galley(pos, galley, fg);
-    }
-    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, active, accessible));
-    r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }

@@ -82,10 +82,7 @@ impl App {
         }
         ui.add_space(10.0);
         let mut gpu = self.settings.use_gpu;
-        if ui
-            .checkbox(&mut gpu, "Use the graphics card when available")
-            .changed()
-        {
+        if style::switch(ui, &mut gpu, "Use the graphics card when available").changed() {
             self.change_settings(|s| s.use_gpu = gpu);
         }
         ui.add_space(6.0);

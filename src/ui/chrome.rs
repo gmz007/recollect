@@ -3,7 +3,7 @@
 
 use super::style::{self, Palette, icons};
 use super::timeline::{Group, View, thousands};
-use super::{App, NoticeAction, Notices};
+use super::{App, NoticeAction};
 use crate::media::MediaKind;
 use egui::{CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Vec2};
 use std::time::Instant;
@@ -49,13 +49,6 @@ fn count_text(photos: usize, videos: usize) -> String {
 struct SearchEdit {
     has_focus: bool,
     cleared: bool,
-}
-
-/// What was clicked on a toast.
-#[derive(Default)]
-struct ToastClicks {
-    dismiss: bool,
-    retry: Option<NoticeAction>,
 }
 
 impl App {
@@ -153,6 +146,14 @@ impl App {
             ui.set_width(width - 20.0);
             ui.horizontal(|ui| edit = self.search_edit_row(ui, id, width));
         });
+        // A click anywhere on the field (icon, padding) lands in the text box. (Asked for after the
+        // text box was drawn: a click beside it makes it let go of the focus first.)
+        let clicked_on_field = ui.input(|i| i.pointer.primary_clicked())
+            && ui.rect_contains_pointer(shown.response.rect);
+        if clicked_on_field {
+            ui.memory_mut(|m| m.request_focus(id));
+            edit.has_focus = true;
+        }
         self.search_help.field = Some(shown.response.rect);
         self.search_help.focused = edit.has_focus;
         if edit.has_focus {
@@ -219,11 +220,10 @@ impl App {
     /// The All / Photos / Videos chips of the search results.
     fn type_chips(&mut self, ui: &mut egui::Ui) -> bool {
         let before = self.kind;
-        // (Laid out right to left, so the last chip goes first.)
         for (kind, text, accessible) in [
-            (Some(MediaKind::Video), "Videos", "Videos only"),
-            (Some(MediaKind::Image), "Photos", "Photos only"),
             (None, "All", "Everything"),
+            (Some(MediaKind::Image), "Photos", "Photos only"),
+            (Some(MediaKind::Video), "Videos", "Videos only"),
         ] {
             if style::filter_chip(ui, text, accessible, self.kind == kind) {
                 self.kind = kind;
@@ -327,7 +327,7 @@ impl App {
         } else {
             "Oldest first"
         };
-        style::chip(ui, &format!("Sort: {label}"), label, |ui| {
+        style::chip(ui, &format!("Sort: {label}"), label, false, |ui| {
             ui.selectable_value(&mut self.tl.newest_first, true, "Newest first");
             ui.selectable_value(&mut self.tl.newest_first, false, "Oldest first");
         });
@@ -336,8 +336,7 @@ impl App {
             Group::Month => "Months",
             Group::Year => "Years",
         };
-        let job = style::dropdown_job(ui, current);
-        let r = ui.menu_button(job, |ui| {
+        style::chip(ui, current, current, false, |ui| {
             for (g, name) in [
                 (Group::Day, "Days"),
                 (Group::Month, "Months"),
@@ -346,8 +345,6 @@ impl App {
                 ui.selectable_value(&mut self.tl.group, g, name);
             }
         });
-        r.response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, current));
     }
 
     /// What was asked, as the heading of the results.
@@ -379,37 +376,31 @@ impl App {
         let year = chrono::Datelike::year(&self.today());
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(title).text_style(egui::TextStyle::Heading))
-                            .truncate(),
-                    );
-                    if self.res.awaiting.is_some() {
-                        ui.spinner();
-                    }
-                });
-                // An empty result list shows the problem itself; don't say it twice.
-                if let Some(e) = self
-                    .res
-                    .error
-                    .as_ref()
-                    .filter(|_| !self.res.hits.is_empty())
-                {
-                    ui.colored_label(pal.danger, &e.text);
-                } else if self.res.error.is_none() && !subtitle.is_empty() {
-                    ui.label(RichText::new(subtitle).color(pal.text2));
-                }
-            });
+            ui.add(
+                egui::Label::new(RichText::new(title).text_style(egui::TextStyle::Heading))
+                    .truncate(),
+            );
+            if self.res.awaiting.is_some() {
+                ui.spinner();
+            }
+            // An empty result list shows the problem itself; don't say it twice.
+            if let Some(e) = (self.res.error.as_ref()).filter(|_| !self.res.hits.is_empty()) {
+                ui.colored_label(pal.danger, &e.text);
+            } else if self.res.error.is_none() && !subtitle.is_empty() {
+                ui.label(RichText::new(subtitle).color(pal.text2));
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            changed |= self.type_chips(ui);
+            ui.add_space(4.0);
+            changed |= self.date.ui(ui, &self.known_years, year);
+            changed |= super::when::sort_ui(ui, &mut self.sort);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if style::icon_button_framed(ui, icons::ICON_CLOSE, "Clear search").clicked() {
+                if style::icon_button(ui, icons::ICON_CLOSE, "Clear search").clicked() {
                     self.clear_search();
                 }
-                changed |= super::when::sort_ui(ui, &mut self.sort);
-                changed |= self.date.ui(ui, &self.known_years, year);
-                ui.add_space(8.0);
-                changed |= self.type_chips(ui);
             });
         });
         if changed {
@@ -477,90 +468,6 @@ impl App {
                 format!("{e:#}"),
                 Some(NoticeAction::Download),
             );
-        }
-    }
-
-    /// The current notice as a card at the bottom of the window.
-    pub(super) fn toasts(&mut self, ctx: &egui::Context) {
-        let Some((text, error, details, action)) = self
-            .notices
-            .current_notice()
-            .map(|n| (n.text.clone(), n.error, n.details.clone(), n.action))
-        else {
-            return;
-        };
-        let pal = Palette::of(ctx);
-        let mut clicks = ToastClicks::default();
-        egui::Area::new(egui::Id::unique("toast"))
-            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(pal.field)
-                    .stroke(Stroke::new(1.0, if error { pal.danger } else { pal.line }))
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(Margin::symmetric(16, 10))
-                    .shadow(ctx.global_style().visuals.popup_shadow)
-                    .show(ui, |ui| {
-                        ui.set_max_width(520.0);
-                        clicks = toast_contents(ui, &pal, &text, error, details.as_deref(), action);
-                    });
-            });
-        if clicks.dismiss || clicks.retry.is_some() {
-            self.notices.dismiss_current();
-        }
-        if let Some(a) = clicks.retry {
-            self.retry(a);
-        }
-    }
-}
-
-/// The icon, message, "Try again" button, details and close button of a toast.
-fn toast_contents(
-    ui: &mut egui::Ui,
-    pal: &Palette,
-    text: &str,
-    error: bool,
-    details: Option<&str>,
-    action: Option<NoticeAction>,
-) -> ToastClicks {
-    let mut clicks = ToastClicks::default();
-    ui.horizontal(|ui| {
-        let (icon, color) = if error {
-            (icons::ICON_ERROR, pal.danger)
-        } else {
-            (icons::ICON_CHECK_CIRCLE, pal.accent)
-        };
-        ui.label(style::icon_text(icon, 22.0).color(color));
-        ui.vertical(|ui| {
-            ui.label(text);
-            if let Some(a) = action
-                && ui.button("Try again").clicked()
-            {
-                clicks.retry = Some(a);
-            }
-            if let Some(d) = details {
-                egui::CollapsingHeader::new("Details")
-                    .id_salt("toast-details")
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(d).small());
-                    });
-            }
-        });
-        if style::icon_button(ui, icons::ICON_CLOSE, "Dismiss").clicked() {
-            clicks.dismiss = true;
-        }
-    });
-    clicks
-}
-
-impl Notices {
-    /// Takes the message that [`Notices::current`] shows away (the toast's close button).
-    pub(super) fn dismiss_current(&mut self) {
-        if self.items.iter().any(|n| n.error) {
-            self.items.retain(|n| !n.error);
-        } else {
-            self.items.pop();
         }
     }
 }

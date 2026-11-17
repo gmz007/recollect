@@ -628,7 +628,12 @@ fn album_items_are_idempotent_and_the_cover_is_the_newest() {
     let info = &db.albums().unwrap()[0];
     assert_eq!(info.count, 2);
     assert_eq!(info.cover.as_ref().unwrap().file_id, c);
+    assert_eq!(
+        db.album_members_among(album, &[c, 777, a, c]).unwrap(),
+        [c, a]
+    );
     assert_eq!(db.remove_from_album(album, &[c, 777]).unwrap(), 1);
+    assert_eq!(db.album_members_among(album, &[c, a]).unwrap(), [a]);
     let info = &db.albums().unwrap()[0];
     assert_eq!((info.count, info.cover.as_ref().unwrap().file_id), (1, a));
 }

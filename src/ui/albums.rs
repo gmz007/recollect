@@ -8,6 +8,7 @@
 
 use super::App;
 use super::dialogs::{Confirmation, confirm_dialog, modal_window};
+use super::notices::Undo;
 use super::sidebar::{Leading, Row};
 use super::style::{self, icons};
 use super::timeline::{View, thousands};
@@ -104,6 +105,7 @@ fn items_text(n: usize) -> String {
 
 /// The entries of the "Add to album…" menus: the albums, then "New album…".
 fn album_menu_items(ui: &mut egui::Ui, albums: &[AlbumInfo], choice: &mut Option<AlbumChoice>) {
+    style::menu_body(ui);
     egui::ScrollArea::vertical()
         .max_height(280.0)
         .show(ui, |ui| {
@@ -454,6 +456,7 @@ impl App {
             .album
             .and_then(|id| self.album_name(id))
             .map(|n| short_name(n, 40));
+        let silent = self.silent_album_writes.remove(&w.ticket);
         match &w.op {
             AlbumOp::Create { name, add } if !add.is_empty() => {
                 self.notify(format!(
@@ -462,13 +465,29 @@ impl App {
                     items_text(w.changed)
                 ));
             }
-            AlbumOp::Add { files, .. } => {
+            AlbumOp::Add { album: id, files } if !silent => {
                 let to = album.unwrap_or_else(|| "the album".into());
-                self.notify(added_message(w.changed, files.len(), &to));
+                let text = added_message(w.changed, files.len(), &to);
+                if w.changed_files.is_empty() {
+                    self.notify(text);
+                } else {
+                    let undo = Undo::TakeOutOfAlbum {
+                        album: *id,
+                        files: w.changed_files.clone(),
+                    };
+                    self.notify_undoable(text, undo);
+                }
             }
             AlbumOp::Remove { album: id, files } => {
-                let from = album.unwrap_or_else(|| "the album".into());
-                self.notify(format!("Removed {} from “{from}”", items_text(w.changed)));
+                if !silent {
+                    let from = album.unwrap_or_else(|| "the album".into());
+                    let text = format!("Removed {} from {from}", thousands(w.changed));
+                    let undo = Undo::PutBackInAlbum {
+                        album: *id,
+                        files: w.changed_files.clone(),
+                    };
+                    self.notify_undoable(text, undo);
+                }
                 self.drop_removed_from_view(*id, files);
             }
             AlbumOp::Delete { id } => self.album_deleted(*id),
@@ -534,14 +553,14 @@ impl App {
 /// What was said about adding `requested` items to album `to` when `changed` were new to it.
 fn added_message(changed: usize, requested: usize, to: &str) -> String {
     if changed == requested {
-        format!("Added {} to “{to}”", items_text(changed))
+        format!("Added {} to {to}", thousands(changed))
     } else if changed == 0 {
-        format!("Already in “{to}”")
+        format!("Already in {to}")
     } else {
         format!(
-            "Added {} of {} to “{to}” (the rest were already in it)",
+            "Added {} of {} to {to} (the rest were already in it)",
             thousands(changed),
-            items_text(requested)
+            thousands(requested)
         )
     }
 }

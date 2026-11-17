@@ -188,9 +188,8 @@ impl App {
     }
 
     pub(super) fn results_grid(&mut self, ui: &mut egui::Ui) {
-        if !self.selection_bar_ui(ui) {
-            self.results_header(ui);
-        }
+        self.selection_bar_ui(ui);
+        self.results_header(ui);
         if self.res.hits.is_empty() {
             self.results_empty_state(ui);
             return;

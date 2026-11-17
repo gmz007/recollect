@@ -29,6 +29,7 @@ mod style;
 mod texture_loader;
 mod tiles;
 mod timeline;
+mod toast;
 mod viewer;
 mod welcome;
 mod when;
@@ -52,7 +53,7 @@ use notices::{NoticeAction, Notices};
 use preview::Previews;
 use results::ResultsState;
 use snapshot::Snapshot;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -150,6 +151,11 @@ pub struct App {
     /// The last finished run that was reported (see `Status::run_seq`).
     run_seq_seen: u64,
     notices: Notices,
+    /// Tickets of album writes that undo something: they are not confirmed again.
+    silent_album_writes: HashSet<u64>,
+    /// Bottom centre of the grid area, where the selection bar and confirmations float
+    /// (set while a grid is drawn, used once per frame).
+    pill_anchor: Option<egui::Pos2>,
     snapshot: Snapshot,
     snapshot_read: BgRead<Snapshot>,
     ctx: egui::Context,
@@ -259,6 +265,8 @@ impl App {
             error_seq_seen: 0,
             run_seq_seen: 0,
             notices: Notices::default(),
+            silent_album_writes: HashSet::new(),
+            pill_anchor: None,
             snapshot: Snapshot::default(),
             snapshot_read: w.snapshot_read,
             ctx: ctx.clone(),

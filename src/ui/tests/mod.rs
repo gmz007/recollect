@@ -5,6 +5,7 @@
 mod albums;
 mod favorites;
 mod guide;
+mod pill;
 mod search;
 mod settings;
 mod timeline;

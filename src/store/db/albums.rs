@@ -220,6 +220,21 @@ impl Db {
         Ok(added)
     }
 
+    /// Which of `file_ids` are in the album, each once, in the order given.
+    pub fn album_members_among(&self, album: i64, file_ids: &[i64]) -> Result<Vec<i64>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT 1 FROM album_items WHERE album_id = ?1 AND file_id = ?2")?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for &id in file_ids {
+            if seen.insert(id) && q.exists(params![album, id])? {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
     /// Takes files out of an album (they stay in the library). Returns how many were removed.
     pub fn remove_from_album(&mut self, album: i64, file_ids: &[i64]) -> Result<usize> {
         let tx = self.conn.transaction()?;

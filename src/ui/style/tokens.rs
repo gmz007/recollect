@@ -62,13 +62,6 @@ const fn rgb(hex: u32) -> Color32 {
 }
 
 /// The "on" colour of switches, the same in both themes.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "defined with the other theme values; used as screens adopt them"
-    )
-)]
 pub const SWITCH_ON: Color32 = rgb(0x3366E6);
 /// White overlays on photos (94 %).
 pub const OVERLAY_WHITE: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 240);

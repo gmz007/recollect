@@ -1,7 +1,8 @@
 //! Favorite marks: shown at once, saved in the background, and taken back if saving fails.
 
 use super::App;
-use super::timeline::View;
+use super::notices::Undo;
+use super::timeline::{View, thousands};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -40,6 +41,33 @@ impl App {
             .filter(|&(id, _)| self.grid().sel.contains(id))
             .all(|(id, fav)| marked(&self.fav_marks, id, fav));
         self.set_favorites(&ids, !all_fav);
+    }
+
+    /// Sets the mark of the selected `files` and confirms it with a way back: "Undo" restores
+    /// each file's earlier mark.
+    pub(super) fn favorite_selection(&mut self, files: &[i64], fav: bool) {
+        let sel = &self.grid().sel;
+        let before: HashMap<i64, bool> = self
+            .listed()
+            .filter(|&(id, _)| sel.contains(id))
+            .map(|(id, listed)| (id, marked(&self.fav_marks, id, listed)))
+            .collect();
+        let changed: Vec<(i64, bool)> = files
+            .iter()
+            .filter_map(|id| before.get(id).map(|&was| (*id, was)))
+            .filter(|&(_, was)| was != fav)
+            .collect();
+        self.set_favorites(files, fav);
+        if changed.is_empty() {
+            return;
+        }
+        let n = thousands(changed.len());
+        let text = if fav {
+            format!("Added {n} to Favorites")
+        } else {
+            format!("Removed {n} from Favorites")
+        };
+        self.notify_undoable(text, Undo::Favorites(changed));
     }
 
     /// Flips the favorite mark of a file whose stored flag is `listed`.

@@ -212,7 +212,6 @@ fn cancel_button_and_search_results_multi_select() {
     h.get_by_label("3 selected");
     h.get_by_label("Add to album…");
     h.get_by_label("Favorite");
-    h.get_by_label("Unfavorite");
     assert!(h.query_by_label("Remove from album").is_none());
     h.get_by_label("Cancel").click();
     h.run_steps(3);
