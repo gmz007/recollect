@@ -7,7 +7,11 @@ all-features = false
 # Unmaintained crates are reported but don't fail the build; vulnerabilities do.
 unmaintained = "workspace"
 yanked = "deny"
-ignore = []
+ignore = [
+    # chrono is marked unmaintained (no vulnerability). It carries every date in the app; moving
+    # to jiff is planned as its own change, not something to do in passing.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; migration to jiff planned" },
+]
 
 [licenses]
 # Permissive licenses compatible with distributing Recollect under MIT OR Apache-2.0.
