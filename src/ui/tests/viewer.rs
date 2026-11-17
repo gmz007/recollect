@@ -44,15 +44,10 @@ fn enter_opens_the_viewer_and_arrows_and_escape_navigate() {
     h.get_by_label("Next").click();
     h.run_steps(3);
     h.get_by_label_contains("2 of 240");
-    // With the panel open, the first Esc closes only the panel.
+    // Esc returns to the grid with the item selected, even with the details open.
     h.get_by_label("Info").click();
     h.run_steps(3);
     h.get_by_label("Details");
-    h.key_press(egui::Key::Escape);
-    h.run_steps(3);
-    assert!(app.borrow().viewer.is_some(), "the viewer stayed open");
-    assert!(h.query_by_label("Details").is_none(), "the panel closed");
-    // The next Esc returns to the grid with the item selected.
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
@@ -442,7 +437,7 @@ fn the_details_panel_stays_as_it_was_left_when_the_viewer_opens_again() {
 }
 
 #[test]
-fn escape_closes_the_viewer_at_once_when_the_details_are_closed() {
+fn escape_closes_the_viewer_at_once_whether_or_not_the_details_are_open() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     let mut h = quick_harness(&app);
@@ -452,4 +447,35 @@ fn escape_closes_the_viewer_at_once_when_the_details_are_closed() {
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert!(app.borrow().viewer.is_none());
+    // With the details open, one Esc still goes back.
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    h.get_by_label("Info").click();
+    h.run_steps(3);
+    h.get_by_label("Details");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(app.borrow().viewer.is_none());
+}
+
+#[test]
+fn the_filmstrip_and_arrows_stay_away_while_a_dialog_is_open() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut h = quick_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    h.run_steps(3);
+    assert!(h.query_all_by_label_contains("Go to").count() > 0);
+    h.get_by_label("Next");
+    h.get_by_label("Add to album…").click();
+    h.run_steps(3);
+    h.get_by_label("New album…").click();
+    h.run_steps(5);
+    h.get_by_label("Album name");
+    assert_eq!(
+        h.query_all_by_label_contains("Go to").count(),
+        0,
+        "the filmstrip would draw over the dialog"
+    );
+    assert!(h.query_by_label("Next").is_none());
 }

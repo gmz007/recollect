@@ -43,10 +43,14 @@ computer.
   albums and Find similar) and **⋯** (Open with default app, Show in folder, Zoom, Find similar).
   A filmstrip of the neighbouring items floats at the bottom and fades when the pointer rests;
   on a video it shows the matching moments as chips and a **Play at 1:23** button instead.
-- **Search results** say "Results for “beach”" (or "Photos similar to …") with the number of
-  photos and videos found, and three menus on the right: **When**, **Type** (Everything, Photos or
-  Videos, the same choice as the filter in the top bar) and **Sort** (Best match, Newest, Oldest);
-  **×** clears the search.
+- **Search results** are headed by the number found ("12 results for “beach”", or "Photos similar
+  to …"). Below it are the filters: **All**, **Photos** and **Videos** (the same choice as in the
+  top bar), **When** (a year or a range of years) and **Sort** (Best match, Newest, Oldest). When
+  the filters leave nothing, **Clear filters** brings the results back; while photos are still
+  being prepared for search, a note says how many are left, since more results may appear. Every
+  result offers **Find similar** (the button in its top right corner while hovered), shows the
+  year it was taken in its bottom right corner, and a video's tile shows the matching moment,
+  which plays from that point when clicked. **×** in the search box clears the search.
 - **Settings** (the gear in the top bar) opens a sheet with a list of sections. Changes apply at
   once; only switching smart search asks first, because it makes Recollect look at your photos
   again.

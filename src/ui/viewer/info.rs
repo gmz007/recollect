@@ -59,10 +59,13 @@ impl Viewer {
     /// "Matching moments": one chip per moment of a video; the chosen one is highlighted.
     fn moment_chips(&mut self, ui: &mut egui::Ui, e: &ViewerEntry) {
         ui.label(label_text(ui, "Matching moments"));
-        ui.horizontal_wrapped(|ui| {
+        // One aligned column, each moment as wide as the panel.
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
             for m in &e.moments {
-                let label = format!("{} – {}", fmt_time(m.t_start), fmt_time(m.t_end));
-                if ui.selectable_label(e.t == Some(m.t_start), label).clicked() {
+                if ui
+                    .selectable_label(e.t == Some(m.t_start), m.label())
+                    .clicked()
+                {
                     self.pick_moment(m.t_start);
                 }
             }

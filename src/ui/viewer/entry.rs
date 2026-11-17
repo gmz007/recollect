@@ -5,8 +5,9 @@ use crate::media::metadata::DateSource;
 use crate::search::SearchHit;
 use crate::store::db::TimelineItem;
 use crate::thumbs::ThumbKey;
+use crate::ui::fmt_time;
 use crate::ui::preview::{self, PreviewKey};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// A matching moment of a video (from a search hit).
@@ -16,6 +17,42 @@ pub(in crate::ui) struct MomentChip {
     pub t_start: f64,
     pub t_end: f64,
     pub score: f32,
+}
+
+impl MomentChip {
+    /// "7:22–7:23": how a moment reads everywhere in the viewer.
+    pub fn label(&self) -> String {
+        format!("{}–{}", fmt_time(self.t_start), fmt_time(self.t_end))
+    }
+}
+
+/// The file name of `path` (empty when it has none).
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The thumbnail of a file: for a video the frame at `t`, else at 10 % of its length (at most
+/// 5 s), like the timeline thumbnail.
+fn thumb_key_of(
+    path: &Path,
+    mtime: i64,
+    kind: MediaKind,
+    t: Option<f64>,
+    duration: Option<f64>,
+) -> ThumbKey {
+    ThumbKey {
+        path: path.to_path_buf(),
+        mtime,
+        t_ms: frame_time_of(kind, t, duration).map(crate::ui::to_millis),
+    }
+}
+
+/// Position of the frame shown for a video: `t`, else 10 % of the length (at most 5 s).
+fn frame_time_of(kind: MediaKind, t: Option<f64>, duration: Option<f64>) -> Option<f64> {
+    (kind == MediaKind::Video)
+        .then(|| t.unwrap_or_else(|| (duration.unwrap_or(0.0) * 0.1).clamp(0.0, 5.0)))
 }
 
 /// One item of the list being viewed, from a timeline row or a search hit.
@@ -96,27 +133,17 @@ impl ViewerEntry {
     }
 
     pub(super) fn name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        file_name(&self.path)
     }
 
     /// Position of the frame shown for a video: the chosen moment, else 10 % of the length
     /// (at most 5 s), like the timeline thumbnail.
     pub(super) fn frame_time(&self) -> Option<f64> {
-        (self.kind == MediaKind::Video).then(|| {
-            self.t
-                .unwrap_or_else(|| (self.duration.unwrap_or(0.0) * 0.1).clamp(0.0, 5.0))
-        })
+        frame_time_of(self.kind, self.t, self.duration)
     }
 
     pub(super) fn thumb_key(&self) -> ThumbKey {
-        ThumbKey {
-            path: self.path.clone(),
-            mtime: self.mtime,
-            t_ms: self.frame_time().map(crate::ui::to_millis),
-        }
+        thumb_key_of(&self.path, self.mtime, self.kind, self.t, self.duration)
     }
 
     pub(super) fn dims(&self) -> Option<(u32, u32)> {
@@ -161,6 +188,29 @@ impl Source {
             Source::Timeline(v) => v.len(),
             Source::Results(v) => v.len(),
             Source::Entries(v) => v.len(),
+        }
+    }
+
+    /// The thumbnail key and file name of item `i`, without building its whole entry. `moment`
+    /// is a moment picked for it, which wins over the one it was opened at.
+    pub(super) fn thumb_at(&self, i: usize, moment: Option<f64>) -> (ThumbKey, String) {
+        match self {
+            Source::Timeline(v) => {
+                let it = &v[i];
+                let key = thumb_key_of(&it.path, it.mtime, it.kind, moment, it.duration);
+                (key, file_name(&it.path))
+            }
+            Source::Results(v) => {
+                let h = &v[i];
+                let t = moment.or(h.t_start);
+                let key = thumb_key_of(&h.path, h.mtime, h.kind, t, h.duration);
+                (key, file_name(&h.path))
+            }
+            Source::Entries(v) => {
+                let e = &v[i];
+                let key = thumb_key_of(&e.path, e.mtime, e.kind, moment.or(e.t), e.duration);
+                (key, e.name())
+            }
         }
     }
 

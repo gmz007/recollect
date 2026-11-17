@@ -153,3 +153,34 @@ fn results_select_with_shift_and_show_the_selection_bar() {
     assert!(app.borrow().res.grid.sel.is_empty());
     assert!(h.query_by_label("3 selected").is_none());
 }
+
+#[test]
+fn while_selecting_the_find_similar_corner_selects_the_tile_instead() {
+    let d = tempfile::tempdir().unwrap();
+    let mut app = grid_app(d.path());
+    for (i, h) in Arc::make_mut(&mut app.res.hits).iter_mut().enumerate() {
+        h.file_id = i as i64 + 1;
+    }
+    let before = app.res.current.clone();
+    let app = Rc::new(RefCell::new(app));
+    let mut h = album_harness(&app);
+    h.get_by_label("Select a.jpg").click();
+    h.run_steps(3);
+    let tile = h.get_by_label("Result b.jpg").rect();
+    let corner = egui::pos2(tile.max.x - 12.0, tile.min.y + 12.0);
+    h.hover_at(corner);
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Find similar to").is_none());
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: corner,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+    }
+    let a = app.borrow();
+    assert_eq!(a.res.current, before, "no similar search was started");
+    assert_eq!(a.res.grid.sel.len(), 2, "the tile was selected");
+}

@@ -87,9 +87,21 @@ pub struct Previews {
     /// Bumped whenever the details cache is emptied; answers to older requests are ignored.
     details_epoch: u64,
     /// What the cached details were read under (see [`Self::sync_details`]).
-    details_stamp: Option<(u64, u64, u64)>,
+    details_stamp: Option<DetailsStamp>,
     details_tx: Sender<(i64, u64)>,
     details_rx: Receiver<(i64, u64, Option<FileDetails>)>,
+}
+
+/// What the library looked like when file details were read; details read under another one
+/// are stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetailsStamp {
+    /// The album's generation (it changes when the list of items does).
+    pub generation: u64,
+    /// How many background jobs have finished.
+    pub jobs_finished: u64,
+    /// Version of the albums (their members change).
+    pub albums_version: u64,
 }
 
 impl Previews {
@@ -260,7 +272,7 @@ impl Previews {
     /// Drops the cached details when `stamp` (what the library looked like when they were
     /// read: the album generation and the number of finished jobs) is not the one they were
     /// read under. Call every frame while the viewer is open.
-    pub fn sync_details(&mut self, stamp: (u64, u64, u64)) {
+    pub fn sync_details(&mut self, stamp: DetailsStamp) {
         if self.details_stamp != Some(stamp) {
             if self.details_stamp.is_some() {
                 self.details.clear();
@@ -375,17 +387,25 @@ mod tests {
         assert!(p.loader.states.contains_key(&key("fit", false)));
     }
 
+    fn stamp(generation: u64, jobs_finished: u64, albums_version: u64) -> DetailsStamp {
+        DetailsStamp {
+            generation,
+            jobs_finished,
+            albums_version,
+        }
+    }
+
     #[test]
     fn details_are_dropped_when_the_library_changes() {
         let (_d, mut p) = previews();
-        p.sync_details((1, 1, 1));
+        p.sync_details(stamp(1, 1, 1));
         p.details.insert(7, None);
-        p.sync_details((1, 1, 1));
+        p.sync_details(stamp(1, 1, 1));
         assert!(p.details.contains_key(&7));
-        p.sync_details((2, 1, 1));
+        p.sync_details(stamp(2, 1, 1));
         assert!(p.details.is_empty());
         p.details.insert(7, None);
-        p.sync_details((2, 2, 1));
+        p.sync_details(stamp(2, 2, 1));
         assert!(p.details.is_empty());
     }
 

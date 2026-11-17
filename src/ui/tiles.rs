@@ -1,7 +1,7 @@
 //! Photo and video tiles for the grids: a square centre-cropped thumbnail, edge to edge. A
 //! selection circle (top left) appears on hover; a selected tile shrinks onto a tinted cell. A
 //! favorite shows a small white heart (bottom left), and hovering any other tile offers an
-//! outlined one. Videos carry a duration pill.
+//! outlined one. Videos carry a duration pill (bottom right; bottom left on search results).
 
 mod extras;
 
@@ -10,7 +10,7 @@ use super::style::{self, Palette, icons};
 use super::workers::ThumbCache;
 use crate::thumbs::ThumbKey;
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
-use extras::{extra_zones, paint_pill, paint_similar};
+use extras::{extra_zones, paint_pill, paint_similar, paint_year};
 
 /// Size of the clickable areas of the circle and the heart.
 const ZONE: f32 = 34.0;
@@ -51,12 +51,14 @@ pub(super) struct Tile<'a> {
     pub key: &'a ThumbKey,
     /// Prefix of the accessible name of the tile ("Item", "Result").
     role: &'a str,
-    /// File name (for assistive technology and the hover text); built only when needed.
+    /// File name (for assistive technology); built only when needed.
     name: &'a dyn Fn() -> String,
     /// The hover text if it is not just the name; built only when the tile is hovered.
     tip: Option<&'a dyn Fn() -> String>,
     /// Text of the pill on videos (a time).
     badge: Option<String>,
+    /// The year of the capture date, shown at the bottom right (result tiles).
+    year: Option<i32>,
     favorite: bool,
     mark: TileMark,
     /// Whether the tile has a selection circle (a tile that only opens has none).
@@ -71,6 +73,8 @@ struct Extras {
     similar: bool,
     /// The pill is a button that plays the video at the time it shows.
     plays: bool,
+    /// The user is picking photos: the extra buttons are off and a click selects the tile.
+    selecting: bool,
 }
 
 impl<'a> Tile<'a> {
@@ -82,6 +86,7 @@ impl<'a> Tile<'a> {
             name,
             tip: None,
             badge: None,
+            year: None,
             favorite: false,
             mark: TileMark::None,
             selectable: false,
@@ -96,6 +101,18 @@ impl<'a> Tile<'a> {
 
     pub(super) fn badge(mut self, badge: Option<String>) -> Self {
         self.badge = badge;
+        self
+    }
+
+    /// Shows the year of the capture date at the bottom right (nothing when unknown).
+    pub(super) fn year(mut self, year: Option<i32>) -> Self {
+        self.year = year;
+        self
+    }
+
+    /// Tells the tile whether the user is picking photos, which turns its extra buttons off.
+    pub(super) fn selecting(mut self, selecting: bool) -> Self {
+        self.extras.selecting = selecting;
         self
     }
 
@@ -259,12 +276,11 @@ pub(super) fn show(
     if hovered && (over_control || resp.hovered()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let resp = if over_control {
-        resp
-    } else {
-        resp.on_hover_ui(|ui| {
-            ui.label(tile.tip.map_or_else(|| (tile.name)(), |tip| tip()));
-        })
+    let resp = match tile.tip {
+        Some(tip) if !over_control => resp.on_hover_ui(|ui| {
+            ui.label(tip());
+        }),
+        _ => resp,
     };
     TileOut {
         resp,
@@ -419,11 +435,15 @@ fn paint(
     if !small && (tile.favorite || hovered) {
         paint_heart(&painter, photo, tile.favorite);
     }
-    if tile.extras.similar && hovered && !small {
+    if tile.extras.similar && !tile.extras.selecting && hovered && !small {
         paint_similar(ui, &painter, photo);
     }
-    if let Some(text) = &tile.badge {
-        paint_pill(&painter, photo, text);
+    let pill_end = tile
+        .badge
+        .as_ref()
+        .and_then(|text| paint_pill(&painter, photo, text, small, tile.extras.plays));
+    if let Some(year) = tile.year {
+        paint_year(&painter, photo, year, pill_end);
     }
     if tile.mark == TileMark::Focused {
         painter.rect_stroke(

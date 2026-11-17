@@ -131,10 +131,9 @@ fn viewer_from_a_search_hit_offers_the_moments_of_a_video() {
     h.run_steps(3);
     h.get_by_label("clip.mp4");
     h.get_by_label("Matching moments");
-    h.get_by_label("0:42 – 0:44");
-    // The filmstrip's place holds the same moments as chips.
-    h.get_by_label("0:42–0:44");
-    h.get_by_label("1:40 – 1:44").click();
+    // The panel and the filmstrip list the same moments in the same format.
+    assert_eq!(h.get_all_by_label("0:42–0:44").count(), 2);
+    h.get_all_by_label("1:40–1:44").next().unwrap().click();
     h.run_steps(3);
     h.get_by_label("Play at 1:40");
     // Next goes to the following hit (an image).
@@ -142,9 +141,7 @@ fn viewer_from_a_search_hit_offers_the_moments_of_a_video() {
     h.run_steps(3);
     h.get_by_label("b.jpg");
     assert!(h.query_by_label("Matching moments").is_none());
-    // The first Esc closes the open details, the second the viewer.
-    h.key_press(egui::Key::Escape);
-    h.run_steps(3);
+    // One Esc leaves the viewer, details open or not.
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert_eq!(app.borrow().res.grid.selected, Some(1));

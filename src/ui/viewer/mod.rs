@@ -20,10 +20,10 @@ mod toolbar;
 pub(super) use entry::{Source, ViewerEntry};
 
 use super::albums::AlbumChoice;
-use super::preview::Previews;
+use super::preview::{DetailsStamp, Previews};
 use super::style;
 use super::workers::ThumbCache;
-use super::{App, Query, consume_plain_key, platform};
+use super::{App, consume_plain_key, platform};
 use crate::media::MediaKind;
 use crate::store::db::AlbumInfo;
 use egui::Vec2;
@@ -182,10 +182,8 @@ impl Viewer {
                 consume_plain_key(i, Key::F),
             )
         });
-        // Esc closes the topmost thing: the details panel first, then the viewer.
-        if esc > 0 && self.info {
-            self.info = false;
-        } else if esc > 0 {
+        // Esc always goes back (a menu or dialog took the key before we got here).
+        if esc > 0 {
             actions.push(Action::Close);
         }
         let last = n.saturating_sub(1);
@@ -267,7 +265,9 @@ impl Viewer {
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(colors.stage))
-            .show(ui, |ui| self.canvas(ui, previews, thumbs, &mut actions));
+            .show(ui, |ui| {
+                self.canvas(ui, previews, thumbs, keys, &mut actions);
+            });
         actions
     }
 }
@@ -347,11 +347,11 @@ impl App {
         };
         let can_similar = self.snapshot.model_installed;
         // Details (file size, camera) are re-read once the library has changed under them.
-        self.previews.sync_details((
-            self.tl.generation,
-            self.lib.jobs_finished(),
-            self.lib.albums_version(),
-        ));
+        self.previews.sync_details(DetailsStamp {
+            generation: self.tl.generation,
+            jobs_finished: self.lib.jobs_finished(),
+            albums_version: self.lib.albums_version(),
+        });
         let keys = !self.keys_blocked(ui.ctx());
         let actions = viewer.show(
             ui,
@@ -379,17 +379,8 @@ impl App {
                     "Couldn't show that file in its folder. It may have been moved or \
                      deleted.",
                 ),
-                Action::PlayAt(p, t) => self.report(
-                    platform::open_video_at(&p, t),
-                    "Couldn't play that video. Install a video player such as VLC, or \
-                     open the file from its folder.",
-                ),
-                Action::FindSimilar { item_id, label } => {
-                    self.end_viewer();
-                    self.tl.grid.selected = None;
-                    self.query.clear();
-                    self.submit(Query::Similar { item_id, label });
-                }
+                Action::PlayAt(p, t) => self.play_video(&p, t),
+                Action::FindSimilar { item_id, label } => self.find_similar(item_id, label),
             }
         }
     }

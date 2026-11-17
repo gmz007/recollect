@@ -138,9 +138,7 @@ fn the_on_this_day_banner_opens_the_viewer_on_its_own_list() {
     h.run_steps(3);
     h.get_by_label_contains("2 of 20");
     h.get_by_label("img22.jpg"); // March 2018
-    // Not in the other views. The first Esc closes the details, the second the viewer.
-    h.key_press(egui::Key::Escape);
-    h.run_steps(3);
+    // Not in the other views. One Esc leaves the viewer, details open or not.
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     h.get_by_label("Recently added").click();

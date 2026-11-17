@@ -6,7 +6,7 @@ use crate::ui::style::Palette;
 
 impl App {
     /// Width of the ruler beside the shown grid, or `None` when there is nothing to scroll.
-    fn ruler_width(&self) -> Option<f32> {
+    pub(in crate::ui) fn ruler_width(&self) -> Option<f32> {
         if self.snapshot.folders.is_empty() {
             return None;
         }

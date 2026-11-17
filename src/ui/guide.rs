@@ -394,13 +394,16 @@ fn suggestion_row(
             style::icon_font_id(icon, 16.0),
             pal.muted,
         );
-        painter.text(
-            Pos2::new(rect.min.x + 36.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            text,
+        // A long search ends in "…" inside the row instead of running past its edge.
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            text.to_string(),
             egui::TextStyle::Body.resolve(ui.style()),
             pal.text,
         );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 36.0 - 10.0);
+        let galley = painter.layout_job(job);
+        let at = Pos2::new(rect.min.x + 36.0, rect.center().y - galley.size().y / 2.0);
+        painter.galley(at, galley, pal.text);
     }
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     ids.push(r.id);

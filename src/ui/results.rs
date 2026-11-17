@@ -1,6 +1,5 @@
 //! Search: starting one when typing pauses, taking in the answer, and the results grid.
 
-#[cfg(not(test))]
 use super::platform;
 use super::ruler::{Mapping, Month, RulerState, month_at_fraction};
 use super::selection::ClickMods;
@@ -245,39 +244,47 @@ impl App {
     /// What a click on a result's extra button does.
     fn result_action(&mut self, hit: &SearchHit, action: tiles::TileAction) {
         match action {
-            tiles::TileAction::FindSimilar => self.find_similar_to(hit),
-            tiles::TileAction::PlayAtBadge => self.play_result(hit),
+            tiles::TileAction::FindSimilar => {
+                let label = hit
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.find_similar(hit.item_id, label);
+            }
+            tiles::TileAction::PlayAtBadge => {
+                self.play_video(&hit.path, hit.t_start.unwrap_or(0.0));
+            }
         }
     }
 
-    /// Plays the video of `hit` at its matching moment, in the system's player.
-    fn play_result(&mut self, hit: &SearchHit) {
-        let t = hit.t_start.unwrap_or(0.0);
-        #[cfg(test)]
-        self.res.played.push((hit.path.clone(), t));
-        #[cfg(not(test))]
+    /// Plays the video at `path` from second `t`, in the system's player.
+    pub(super) fn play_video(&mut self, path: &std::path::Path, t: f64) {
+        if cfg!(test) {
+            // Tests record the request instead of starting a player.
+            #[cfg(test)]
+            self.res.played.push((path.to_path_buf(), t));
+            return;
+        }
         self.report(
-            platform::open_video_at(&hit.path, t),
+            platform::open_video_at(path, t),
             "Couldn't play that video. Install a video player such as VLC, or open the file \
              from its folder.",
         );
     }
 
-    /// Replaces the results with photos like `hit` (the field is emptied: nothing was typed).
-    pub(super) fn find_similar_to(&mut self, hit: &SearchHit) {
+    /// Replaces the view with photos like item `item_id` (`label` names the photo they are
+    /// like). The field is emptied, since nothing was typed, and the viewer, if open, is left.
+    pub(super) fn find_similar(&mut self, item_id: i64, label: String) {
+        self.end_viewer();
         self.query.clear();
         self.query_changed_at = None;
+        self.tl.grid.selected = None;
         self.res.grid.clear();
+        self.res.grid.scroll_to = None;
+        self.res.grid.keyboard_moved = false;
         self.res.selected_t = None;
-        let label = hit
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.submit(Query::Similar {
-            item_id: hit.item_id,
-            label,
-        });
+        self.submit(Query::Similar { item_id, label });
     }
 
     /// Draws the rows of results that intersect `viewport`.
@@ -351,15 +358,18 @@ impl App {
                 .unwrap_or_default()
         };
         let grid = &self.res.grid;
+        let selecting = grid.picking || grid.sel.is_multi();
         let mark = TileMark::of(
             grid.sel.contains(hit.file_id),
             grid.selected == Some(i),
-            grid.picking || grid.sel.is_multi(),
+            selecting,
         );
         let tile = Tile::new(&key, "Result", &name)
             .find_similar()
             .badge((hit.kind == MediaKind::Video).then(|| fmt_time(hit.t_start.unwrap_or(0.0))))
             .plays_at_badge()
+            .year(Month::of_timestamp(hit.taken_at).map(|m| m.year))
+            .selecting(selecting)
             .favorite(marked(&self.fav_marks, hit.file_id, hit.favorite))
             .selectable(mark);
         let id = ui.make_persistent_id(("result", i));

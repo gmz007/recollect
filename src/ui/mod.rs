@@ -506,12 +506,13 @@ impl App {
             .show(ui, |ui| self.top_bar(ui));
         self.ruler_panel(ui);
         let has_folders = !self.snapshot.folders.is_empty();
+        // Next to the ruler the rows run right up to it: the ruler brings its own space.
+        let mut margin = egui::Margin::symmetric(PANEL_MARGIN.0, PANEL_MARGIN.1);
+        if self.ruler_width().is_some() {
+            margin.right = 0;
+        }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.bg)
-                    .inner_margin(egui::Margin::symmetric(PANEL_MARGIN.0, PANEL_MARGIN.1)),
-            )
+            .frame(egui::Frame::new().fill(pal.bg).inner_margin(margin))
             .show(ui, |ui| {
                 if has_folders {
                     self.search_banner(ui);

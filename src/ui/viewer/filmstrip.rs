@@ -37,7 +37,8 @@ impl Viewer {
         actions: &mut Vec<Action>,
     ) {
         let ctx = ui.ctx().clone();
-        let opacity = self.controls_opacity(&ctx, area);
+        let strip = ui.make_persistent_id("viewer-strip");
+        let opacity = self.controls_opacity(&ctx, strip);
         if opacity <= 0.0 {
             return;
         }
@@ -47,7 +48,7 @@ impl Viewer {
         let mut moment = None;
         let mut play = None;
         let video = self.current.kind == MediaKind::Video;
-        egui::Area::new(egui::Id::unique("viewer-strip"))
+        egui::Area::new(strip)
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .pivot(Align2::CENTER_BOTTOM)
@@ -76,16 +77,15 @@ impl Viewer {
 
     /// How visible the floating controls are: fully while the pointer moves or rests on them,
     /// then fading away. Moving the pointer or stepping to another item brings them back.
-    fn controls_opacity(&mut self, ctx: &egui::Context, area: Rect) -> f32 {
+    fn controls_opacity(&mut self, ctx: &egui::Context, strip: egui::Id) -> f32 {
         let now = ctx.input(|i| i.time);
+        // Where the strip was drawn last (nothing before it first appears).
+        let strip = ctx.memory(|m| m.area_rect(strip));
         let (moving, over) = ctx.input(|i| {
-            let over = i.pointer.hover_pos().is_some_and(|p| {
-                let strip = Rect::from_center_size(
-                    egui::pos2(area.center().x, area.bottom() - BOTTOM_GAP - THUMB / 2.0),
-                    Vec2::new(area.width().min(520.0), THUMB + 16.0),
-                );
-                strip.contains(p)
-            });
+            let over = i
+                .pointer
+                .hover_pos()
+                .is_some_and(|p| strip.is_some_and(|r| r.contains(p)));
             (i.pointer.is_moving() || i.pointer.any_pressed(), over)
         });
         let last = match self.last_motion {
@@ -109,10 +109,10 @@ impl Viewer {
         let last = (self.index + REACH).min(self.len() - 1);
         let mut clicked = None;
         for i in first..=last {
-            let entry = self.entry_at(i);
+            let (key, name) = self.source.thumb_at(i, self.moments.get(&i).copied());
             let (rect, r) = ui.allocate_exact_size(Vec2::splat(THUMB), Sense::click());
             let radius = CornerRadius::same(THUMB_RADIUS);
-            if let Some(tex) = thumbs.get(&entry.thumb_key()) {
+            if let Some(tex) = thumbs.get(&key) {
                 let tint = Color32::WHITE.gamma_multiply(opacity);
                 let shape = egui::epaint::RectShape::filled(rect, radius, tint)
                     .with_texture(tex.id(), square_uv(tex.size_vec2()));
@@ -127,7 +127,7 @@ impl Viewer {
                 ui.painter()
                     .rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
             }
-            let label = format!("Go to {}", entry.name());
+            let label = format!("Go to {name}");
             r.widget_info(|| {
                 egui::WidgetInfo::selected(egui::Role::Button, true, i == self.index, &label)
             });
@@ -158,7 +158,7 @@ impl Viewer {
                 .filter(|(i, m)| *i < MAX_MOMENT_CHIPS || e.t == Some(m.t_start))
                 .map(|(_, m)| m);
             for m in shown_moments {
-                let text = format!("{}–{}", fmt_time(m.t_start), fmt_time(m.t_end));
+                let text = m.label();
                 let selected = e.t == Some(m.t_start);
                 if chip(ui, &text, &text, selected, colors, opacity).clicked() {
                     *moment = Some(m.t_start);

@@ -78,11 +78,13 @@ impl Viewer {
     }
 
     /// The media area: preview (or the thumbnail until it is ready), zoom and previous / next.
+    /// `controls` is false while a dialog or menu is open.
     pub(super) fn canvas(
         &mut self,
         ui: &mut egui::Ui,
         previews: &mut Previews,
         thumbs: &mut ThumbCache,
+        controls: bool,
         actions: &mut Vec<Action>,
     ) {
         let ctx = ui.ctx().clone();
@@ -104,8 +106,11 @@ impl Viewer {
             self.draw_picture(ui, area, &resp, &tex, loading, ppp);
         }
         paint_status(ui, area, loading, failed);
-        self.nav_buttons(ui, area);
-        self.filmstrip(ui, area, thumbs, actions);
+        // The floating controls give way to a dialog or menu, which they would draw over.
+        if controls {
+            self.nav_buttons(ui, area);
+            self.filmstrip(ui, area, thumbs, actions);
+        }
     }
 
     /// A pinch (or Ctrl+scroll) over the picture zooms in to 100 %, and back out to fit.
