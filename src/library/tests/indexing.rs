@@ -8,16 +8,16 @@ fn long_videos_do_not_crowd_out_other_files() {
     {
         let lib = open(d.path());
         let mut db = lib.db.lock();
-        let f = db.add_folder(Path::new("/lib")).unwrap();
+        let f = db.add_folder(Path::new("/nowhere")).unwrap();
         let mut files = vec![ScannedFile {
-            path: "/lib/long.mp4".into(),
+            path: "/nowhere/long.mp4".into(),
             kind: MediaKind::Video,
             size: 1,
             mtime: 1,
         }];
         for i in 0..30 {
             files.push(ScannedFile {
-                path: format!("/lib/{i:02}.jpg").into(),
+                path: format!("/nowhere/{i:02}.jpg").into(),
                 kind: MediaKind::Image,
                 size: 1,
                 mtime: 1,
@@ -149,9 +149,9 @@ fn empty_mount_point_keeps_the_index_and_missing_files_stay_pending() {
 #[test]
 fn retry_errors_and_sync_of_a_removed_folder() {
     let mut db = Db::open_in_memory().unwrap();
-    let f = db.add_folder(Path::new("/lib")).unwrap();
+    let f = db.add_folder(Path::new("/nowhere")).unwrap();
     let file = ScannedFile {
-        path: "/lib/a.jpg".into(),
+        path: "/nowhere/a.jpg".into(),
         kind: MediaKind::Image,
         size: 1,
         mtime: 1,

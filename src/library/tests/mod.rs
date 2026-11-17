@@ -22,9 +22,9 @@ fn open(dir: &Path) -> Arc<Library> {
 /// Stores one indexed image with a CLIP-sized vector; returns its item id.
 fn seed(lib: &Library) -> i64 {
     let mut db = lib.db.lock();
-    let f = db.add_folder(Path::new("/lib")).unwrap();
+    let f = db.add_folder(Path::new("/nowhere")).unwrap();
     let file = ScannedFile {
-        path: "/lib/a.jpg".into(),
+        path: "/nowhere/a.jpg".into(),
         kind: MediaKind::Image,
         size: 1,
         mtime: 1,
@@ -120,7 +120,7 @@ fn names(hits: &[search::SearchHit]) -> Vec<String> {
 /// By date: b (2022) is newest, then d (2021), a (2020), c (2019).
 fn seed_dated(lib: &Library, undated: &[&str]) -> Vec<Embedded> {
     let mut db = lib.db.lock();
-    let f = db.add_folder(Path::new("/lib")).unwrap();
+    let f = db.add_folder(Path::new("/nowhere")).unwrap();
     let spec = [
         ("a", 0.1, day(2020, 6, 1)),
         ("b", 0.2, day(2022, 12, 31)),
@@ -130,7 +130,7 @@ fn seed_dated(lib: &Library, undated: &[&str]) -> Vec<Embedded> {
     let files: Vec<_> = spec
         .iter()
         .map(|(n, _, _)| ScannedFile {
-            path: format!("/lib/{n}.jpg").into(),
+            path: format!("/nowhere/{n}.jpg").into(),
             kind: MediaKind::Image,
             size: 1,
             mtime: 1,
