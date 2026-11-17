@@ -19,12 +19,11 @@ pub enum AfterAdd {
 impl Library {
     /// Adds a folder to the library (does not start indexing).
     pub fn add_folder(&self, path: &Path) -> Result<()> {
-        let canon = std::fs::canonicalize(path)
-            .with_context(|| format!("cannot open {}", path.display()))?;
+        let canon =
+            canonical_path(path).with_context(|| format!("cannot open {}", path.display()))?;
         if !canon.is_dir() {
             bail!("{} is not a folder", canon.display());
         }
-        let canon = strip_verbatim(canon);
         self.db.lock().add_folder(&canon)?;
         self.rescan_requested.store(true, Ordering::Release);
         self.notify();
@@ -134,6 +133,13 @@ impl Library {
     pub(crate) fn remove_files_from_index(&self, ids: &HashSet<i64>) {
         self.index.write().remove_files(ids);
     }
+}
+
+/// A path in the form the library stores it: absolute, with links resolved, and on Windows
+/// without the `\\?\` prefix that `canonicalize` adds. Compare with stored folders and files
+/// only in this form.
+pub fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(strip_verbatim)
 }
 
 /// On Windows `canonicalize` returns `\\?\C:\...`; keep paths in their familiar form.

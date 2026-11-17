@@ -111,7 +111,7 @@ impl std::fmt::Display for Report {
 }
 
 fn canon(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    crate::library::canonical_path(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 fn parse_expected(root: &Path, q: &Query) -> Vec<Expected> {

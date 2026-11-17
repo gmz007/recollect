@@ -12,7 +12,7 @@ mod model;
 mod status;
 mod writes;
 
-pub use folders::AfterAdd;
+pub use folders::{AfterAdd, canonical_path};
 pub use jobs::{Control, Request};
 #[cfg(test)]
 pub(crate) use model::HARDWARE_CHECKS;

@@ -208,7 +208,7 @@ fn print_status(lib: &Library) -> Result<()> {
 
 /// Removes the library folder at `path` (as given or as it resolves on disk).
 fn remove_folder(lib: &Library, path: &Path) -> Result<()> {
-    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canon = crate::library::canonical_path(path).unwrap_or_else(|_| path.to_path_buf());
     let Some(f) = lib
         .folders()?
         .into_iter()
