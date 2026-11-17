@@ -59,21 +59,17 @@ jobs:
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      # Plain output, so failures can be read back as annotations (see the script).
+      - name: cargo clippy
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: bash .github/scripts/annotate-failures.sh cargo clippy --all-targets -- -D warnings
       - name: cargo nextest run
         shell: bash
-        run: |
-          set -o pipefail
-          if ! cargo nextest run --no-fail-fast 2>&1 | tee nextest.log; then
-            # Name the failing tests and their panic messages as annotations, so the run page
-            # (and the API, without signing in) says what failed.
-            grep -E '^[[:space:]]+(FAIL|SIGSEGV|SIGABRT|TIMEOUT)' nextest.log | sed -E 's/^[[:space:]]+//' |
-              sort -u | head -10 | sed -e 's/%/%25/g' -e 's/^/::error::/'
-            grep -E -A 1 'panicked at' nextest.log | grep -v -- '^--$' | paste -d ' ' - - |
-              sed -E 's/[[:space:]]+/ /g; s/^ //' | sort -u | head -10 |
-              sed -e 's/%/%25/g' -e 's/^/::error::/'
-            exit 1
-          fi
+        env:
+          CARGO_TERM_COLOR: never
+        run: bash .github/scripts/annotate-failures.sh cargo nextest run --no-fail-fast
       - run: cargo test --doc
 
   deny:
