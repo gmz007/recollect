@@ -501,23 +501,20 @@ fn the_search_suggestions_work_with_the_keyboard() {
 
 #[test]
 fn asking_to_check_for_new_photos_while_busy_says_it_will_wait() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), false);
     let lib = Arc::clone(&app.borrow().lib);
-    let release = Arc::new(AtomicBool::new(false));
-    let r = Arc::clone(&release);
+    let mut h = album_harness(&app);
+    // A job held until `release` sends, or is dropped when the test fails (so it never hangs).
+    let (release, hold) = std::sync::mpsc::channel::<()>();
     lib.spawn(move || {
-        while !r.load(Ordering::Acquire) {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        let _ = hold.recv();
     })
     .unwrap();
-    let mut h = album_harness(&app);
     app.borrow_mut().start_indexing();
     h.run_steps(3);
     h.get_by_label("Recollect will check for new photos when it finishes the current task.");
-    release.store(true, Ordering::Release);
+    release.send(()).unwrap();
     lib.wait();
     settle(&mut h, || lib.job_log.lock().contains(&"scan"));
     lib.wait();

@@ -116,7 +116,13 @@ fn the_star_marks_a_favorite_and_the_favorites_view_lists_it() {
     h.get_by_label("Remove b.jpg from favorites").click();
     h.run_steps(3);
     assert!(h.query_by_label("Item b.jpg").is_none());
-    settle(&mut h, || app.borrow().tl.awaiting.is_none());
+    // Once the write is in, the Favorites view is read again; wait for that reload too.
+    settle(&mut h, || {
+        let a = app.borrow();
+        lib.timeline(&fav).unwrap().is_empty()
+            && a.fav_version_seen == lib.favorites_version()
+            && a.tl.awaiting.is_none()
+    });
     h.run_steps(2);
     h.get_by_label("Click the star on any photo to add it here.");
     h.get_by_label("Go to Photos");

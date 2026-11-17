@@ -1,0 +1,5 @@
+# cargo-nextest settings: https://nexte.st/docs/configuration/
+[profile.default]
+# A test still running after 5 minutes is stopped and reported as failed, so a hang can't hold
+# up a run (or CI) for hours. The slowest tests take a few seconds.
+slow-timeout = { period = "60s", terminate-after = 5 }

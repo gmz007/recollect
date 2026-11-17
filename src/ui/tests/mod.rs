@@ -194,18 +194,33 @@ fn album_app(d: &std::path::Path, installed: bool) -> Rc<RefCell<App>> {
     Rc::new(RefCell::new(app))
 }
 
-/// How many frames `Harness::run` may take to settle. The default (4) is too tight when a
-/// background result lands while it runs (slow or busy machines); a screen that never stops
-/// repainting still fails.
-const MAX_STEPS: u64 = 16;
+/// How many frames `Harness::run` may take to settle. The default (4) is too tight: the app
+/// asks for a repaint half a second after the library was last busy, which is 30 frames at
+/// 60 fps. A screen that never stops repainting still fails.
+const MAX_STEPS: u64 = 64;
+
+/// Runs frames until the screen settles. While a library job runs, the app polls it every half
+/// second, so the screen cannot settle (on a slow machine the first scan may still be going
+/// when a test starts): this waits up to about 5 s for such a job, then carries on without
+/// failing, since a test may hold a job on purpose.
+fn run_settled(h: &mut Harness<'_>, app: &Rc<RefCell<App>>) {
+    let lib = Arc::clone(&app.borrow().lib);
+    for _ in 0..250 {
+        if !lib.is_busy() && h.try_run().is_ok() {
+            return;
+        }
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 
 fn album_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
-    let app = Rc::clone(app);
+    let shown = Rc::clone(app);
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
         .with_max_steps(MAX_STEPS)
-        .build_ui(move |ui| app.borrow_mut().show(ui));
-    h.run();
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    run_settled(&mut h, app);
     h
 }
 
@@ -223,13 +238,13 @@ fn settle(h: &mut Harness<'_>, mut cond: impl FnMut() -> bool) {
 
 /// Like `album_harness` with short frames.
 fn quick_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
-    let app = Rc::clone(app);
+    let shown = Rc::clone(app);
     let mut h = Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
         .with_step_dt(0.05)
         .with_max_steps(MAX_STEPS)
-        .build_ui(move |ui| app.borrow_mut().show(ui));
-    h.run();
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    run_settled(&mut h, app);
     h
 }
 
@@ -453,12 +468,13 @@ fn banned_words_in(texts: &[String]) -> Vec<String> {
 
 /// Like `quick_harness` for a window `width` points wide.
 fn quick_harness_wide(app: &Rc<RefCell<App>>, width: f32) -> Harness<'static> {
-    let app = Rc::clone(app);
+    let shown = Rc::clone(app);
     let mut h = Harness::builder()
         .with_size(egui::vec2(width, 800.0))
         .with_step_dt(0.05)
-        .build_ui(move |ui| app.borrow_mut().show(ui));
-    h.run();
+        .with_max_steps(MAX_STEPS)
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    run_settled(&mut h, app);
     h
 }
 

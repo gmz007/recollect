@@ -80,19 +80,18 @@ fn a_failed_download_still_leaves_the_folders_scanned() {
 fn a_scan_asked_for_while_busy_waits_instead_of_being_dropped() {
     let d = tempfile::tempdir().unwrap();
     let lib = open(&d.path().join("home"));
-    let release = Arc::new(AtomicBool::new(false));
-    let r = Arc::clone(&release);
+    // A job held until `release` sends, or is dropped when the test fails (so it never hangs).
+    let (release, hold) = std::sync::mpsc::channel::<()>();
     lib.spawn(move || {
-        while !r.load(Ordering::Acquire) {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        let _ = hold.recv();
     })
     .unwrap();
     assert_eq!(lib.request_scan().unwrap(), Request::Queued);
     assert_eq!(lib.request_download().unwrap(), Request::Queued);
     assert!(lib.job_log.lock().is_empty(), "nothing started yet");
-    release.store(true, Ordering::Release);
+    // Before the release: the queued download must never reach the network.
     lib.fail_download.store(true, Ordering::Release);
+    release.send(()).unwrap();
     wait_until(&lib, || lib.job_log.lock().len() >= 2);
     assert_eq!(*lib.job_log.lock(), ["scan", "download"]);
     // With nothing running, a request starts at once.
