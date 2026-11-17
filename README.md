@@ -109,7 +109,8 @@ Requirements:
   libswscale, libswresample), `pkg-config`, and clang (for `bindgen`)
   - Debian/Ubuntu: `sudo apt install libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config clang`
   - macOS: `brew install ffmpeg pkg-config`
-  - Windows: download a *shared* FFmpeg build (e.g. BtbN's LGPL build), set `FFMPEG_DIR` to it,
+  - Windows: download a *shared* FFmpeg 8 build (e.g. an `lgpl-shared` build from
+    [FFmpeg-Builds](https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases)), set `FFMPEG_DIR` to it,
     put its `bin` directory on `PATH`, and install LLVM for `bindgen` (set `LIBCLANG_PATH` to
     LLVM's `bin` directory if it is not found).
 - On Linux, the usual GUI libraries (X11/Wayland, xkbcommon, Vulkan or OpenGL).

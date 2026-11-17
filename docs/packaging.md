@@ -18,8 +18,9 @@ Windows the executable's directory is searched by default. Keep them in the same
 
 FFmpeg is linked dynamically. A package must either depend on the system FFmpeg (Linux
 distributions) or bundle the FFmpeg shared libraries (Windows, macOS). **Use an LGPL build of
-FFmpeg for distributed binaries** (e.g. BtbN's `*-lgpl-shared` builds on Windows); GPL builds
-would make the whole distributed package GPL.
+FFmpeg for distributed binaries** (e.g. the `*-lgpl-shared` builds from
+[FFmpeg-Builds](https://github.com/FFmpeg-Builds/FFmpeg-Builds) on Windows); GPL builds would make
+the whole distributed package GPL.
 
 ## Licenses to include
 
