@@ -3,7 +3,8 @@
 use super::rows::{Rows, footnote, group};
 use super::widgets::committed_slider;
 use crate::store::db::Stats;
-use crate::ui::style::{self, icons};
+use crate::ui::sidebar::activity_text;
+use crate::ui::style::{self, Palette, icons};
 use crate::ui::timeline::thousands;
 use crate::ui::{App, folder_labels};
 use egui::{Margin, RichText};
@@ -31,13 +32,95 @@ pub(in crate::ui) fn counts_text(stats: &Stats, installed: bool) -> String {
 
 const BUTTON_WIDTH: f32 = 150.0;
 
+/// What the folder rows asked for in one frame.
+enum FolderAction {
+    None,
+    /// "Stop showing" was clicked: ask first.
+    Ask(i64, String),
+    Confirm(i64),
+    Cancel,
+}
+
+/// The group of folders, each with "Stop showing" (or, for the one being asked about, the
+/// question). `rows` are (id, name, path).
+fn folder_rows(
+    ui: &mut egui::Ui,
+    rows: &[(i64, String, String)],
+    pending: Option<i64>,
+) -> FolderAction {
+    let mut act = FolderAction::None;
+    if rows.is_empty() {
+        return act;
+    }
+    group(ui, |ui, group_rows| {
+        for (id, name, path) in rows {
+            if pending == Some(*id) {
+                stop_question(ui, group_rows, name, &mut act, *id);
+                continue;
+            }
+            group_rows.row(ui, name, Some(path), BUTTON_WIDTH, |ui| {
+                let label = format!(
+                    "Stop showing “{}”…",
+                    crate::ui::albums::short_name(name, 24)
+                );
+                let r = ui.button("Stop showing");
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+                if r.clicked() {
+                    act = FolderAction::Ask(*id, name.clone());
+                }
+            });
+        }
+    });
+    act
+}
+
+/// The row of a folder that is being asked about: the question, and its two answers.
+fn stop_question(ui: &mut egui::Ui, rows: &mut Rows, name: &str, act: &mut FolderAction, id: i64) {
+    let title = format!("Stop showing “{name}”?");
+    rows.row(
+        ui,
+        &title,
+        Some("Your files stay where they are."),
+        BUTTON_WIDTH + 90.0,
+        |ui| {
+            if ui.button("Cancel").clicked() {
+                *act = FolderAction::Cancel;
+            }
+            if style::primary_button(ui, "Stop showing").clicked() {
+                *act = FolderAction::Confirm(id);
+            }
+        },
+    );
+}
+
 impl App {
     pub(super) fn settings_library(&mut self, ui: &mut egui::Ui) {
+        self.background_work(ui);
         self.settings_folders(ui);
         ui.add_space(16.0);
         self.settings_library_summary(ui);
         ui.add_space(14.0);
         self.settings_advanced(ui);
+    }
+
+    /// What Recollect is doing in the background, with Pause and Stop, whatever the sidebar
+    /// shows. Nothing is drawn while it is idle.
+    pub(in crate::ui) fn background_work(&mut self, ui: &mut egui::Ui) {
+        let Some((text, fraction)) = activity_text(&self.status.activity) else {
+            return;
+        };
+        let pal = Palette::of(ui.ctx());
+        egui::Frame::new()
+            .fill(pal.tint)
+            .corner_radius(egui::CornerRadius::same(style::CARD_RADIUS))
+            .inner_margin(Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(style::medium("Working in the background"));
+                ui.add_space(2.0);
+                self.activity_details(ui, &text, fraction);
+            });
+        ui.add_space(16.0);
     }
 
     fn settings_folders(&mut self, ui: &mut egui::Ui) {
@@ -52,28 +135,19 @@ impl App {
             .zip(labels)
             .map(|(f, l)| (f.id, l, f.path.display().to_string()))
             .collect();
-        let mut stop = None;
-        if !rows.is_empty() {
-            group(ui, |ui, group_rows| {
-                for (id, name, path) in &rows {
-                    group_rows.row(ui, name, Some(path), BUTTON_WIDTH, |ui| {
-                        let label = format!(
-                            "Stop showing “{}”…",
-                            crate::ui::albums::short_name(name, 24)
-                        );
-                        let r = ui.button("Stop showing");
-                        r.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
-                        });
-                        if r.clicked() {
-                            stop = Some((*id, name.clone()));
-                        }
-                    });
-                }
-            });
-        }
-        if let Some((id, name)) = stop {
-            self.dialogs.stop_folder = Some(crate::ui::folders::StopFolder { id, name });
+        let pending = self.dialogs.settings_stop_folder.as_ref().map(|s| s.id);
+        let act = folder_rows(ui, &rows, pending);
+        match act {
+            FolderAction::None => {}
+            FolderAction::Ask(id, name) => {
+                self.dialogs.settings_stop_folder =
+                    Some(crate::ui::folders::StopFolder { id, name });
+            }
+            FolderAction::Confirm(id) => {
+                self.dialogs.settings_stop_folder = None;
+                self.stop_showing_folder(id);
+            }
+            FolderAction::Cancel => self.dialogs.settings_stop_folder = None,
         }
         footnote(
             ui,
@@ -81,8 +155,9 @@ impl App {
         );
         ui.add_space(4.0);
         if style::icon_label_button(ui, icons::ICON_CREATE_NEW_FOLDER, "Add a folder…").clicked()
+            && let Some(dir) = crate::ui::folders::pick_folder()
         {
-            self.open_add_folder();
+            self.add_folder(dir);
         }
     }
 

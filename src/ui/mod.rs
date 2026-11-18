@@ -445,6 +445,11 @@ impl App {
             self.res.grid.shown = false;
             self.tl.grid.shown = false;
             self.show_viewer(ui);
+            // Settings stays open (and drawn) over the viewer: skipping a frame would close
+            // its window.
+            if self.dialogs.settings_open {
+                self.settings_window(&ctx);
+            }
             self.album_dialogs(&ctx);
             self.toasts(&ctx);
             return;
@@ -491,8 +496,8 @@ impl App {
         {
             if self.dialog_open() {
                 self.dialogs.cancel();
-            } else if self.dialogs.model_confirm.take().is_none() {
-                self.dialogs.settings_open = false;
+            } else if !self.dialogs.take_settings_question() {
+                self.close_settings();
             }
         }
     }

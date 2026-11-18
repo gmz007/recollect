@@ -20,6 +20,9 @@ pub(super) struct Dialogs {
     pub(super) settings_section: settings::Section,
     /// A smart-search choice waiting for the user to confirm the switch.
     pub(super) model_confirm: Option<&'static str>,
+    /// A folder in Settings › Library waiting for the user to confirm that it stops being
+    /// shown.
+    pub(super) settings_stop_folder: Option<folders::StopFolder>,
 }
 
 impl Dialogs {
@@ -34,6 +37,15 @@ impl Dialogs {
             || self.help_open
     }
 
+    /// Drops the questions Settings asks inline; true when there was one. They belong to their
+    /// section: they end when another section is chosen or Settings closes.
+    pub(super) fn take_settings_question(&mut self) -> bool {
+        let asked = self.model_confirm.is_some() || self.settings_stop_folder.is_some();
+        self.model_confirm = None;
+        self.settings_stop_folder = None;
+        asked
+    }
+
     /// Esc: closes the questions and the help sheet (a deletion already sent to the library
     /// stays up until it is answered).
     pub(super) fn cancel(&mut self) {
@@ -42,7 +54,6 @@ impl Dialogs {
         self.add_folder_dialog = None;
         self.stop_folder = None;
         self.help_open = false;
-        self.model_confirm = None;
         if self.delete_album.as_ref().is_some_and(|d| !d.pending) {
             self.delete_album = None;
         }

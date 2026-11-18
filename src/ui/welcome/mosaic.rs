@@ -82,6 +82,11 @@ impl PhotoSet {
     }
 }
 
+/// How many times a set of photos was started decoding (tests only).
+#[cfg(test)]
+pub(in crate::ui) static DECODE_RUNS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 enum State {
     /// Being decoded; `None` marks a photo that could not be.
     Decoding(Receiver<Vec<Option<ColorImage>>>),
@@ -106,6 +111,8 @@ impl Mosaic {
     pub(super) fn new(ctx: &Context, set: PhotoSet) -> Self {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
+        #[cfg(test)]
+        DECODE_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::thread::spawn(move || {
             let images = set.photos().iter().map(|b| decode(b)).collect();
             // The receiver is gone when the welcome was closed meanwhile; nothing to do then.

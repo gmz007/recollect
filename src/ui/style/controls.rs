@@ -145,6 +145,91 @@ pub fn switch_bare(ui: &mut egui::Ui, on: &mut bool, label: &str) -> Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Side of a checkbox's square.
+const CHECKBOX_SIZE: f32 = 18.0;
+/// Space between a checkbox's square and its text.
+const CHECKBOX_GAP: f32 = 8.0;
+
+/// A checkbox with `text` beside it: a ring-coloured outline when off, an accent fill with a
+/// tick when on. The whole line is clickable; assistive technology reads it as a checkbox
+/// named after `text`.
+pub fn checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    text: impl Into<egui::WidgetText>,
+) -> Response {
+    let pal = Palette::of(ui.ctx());
+    let galley = text.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        TextStyle::Body,
+    );
+    let height = CHECKBOX_SIZE
+        .max(galley.size().y)
+        .max(ui.spacing().interact_size.y);
+    let size = Vec2::new(CHECKBOX_SIZE + CHECKBOX_GAP + galley.size().x, height);
+    let (rect, mut r) = ui.allocate_exact_size(size, Sense::click());
+    if r.clicked() {
+        *checked = !*checked;
+        r.mark_changed();
+    }
+    let label = galley.text().to_string();
+    if ui.is_rect_visible(rect) {
+        let square = egui::Rect::from_min_size(
+            egui::pos2(rect.min.x, rect.center().y - CHECKBOX_SIZE / 2.0),
+            Vec2::splat(CHECKBOX_SIZE),
+        );
+        paint_checkbox(ui, square, *checked, &pal);
+        let at = egui::pos2(
+            square.max.x + CHECKBOX_GAP,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(at, galley, pal.text);
+    }
+    let value = *checked;
+    r.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), value, &label)
+    });
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Paints the square of a checkbox in `square`.
+fn paint_checkbox(ui: &egui::Ui, square: egui::Rect, checked: bool, pal: &Palette) {
+    let radius = CornerRadius::same(5);
+    let painter = ui.painter();
+    if checked {
+        painter.rect_filled(square, radius, pal.accent);
+        let tick = [(0.24, 0.52), (0.43, 0.70), (0.76, 0.32)]
+            .map(|(x, y)| square.min + Vec2::new(x, y) * square.size());
+        painter.add(egui::Shape::line(
+            tick.to_vec(),
+            Stroke::new(2.0, pal.onaccent),
+        ));
+    } else {
+        painter.rect_stroke(
+            square.shrink(0.75),
+            radius,
+            Stroke::new(1.5, pal.ring),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// A bordered group of rows: the frame the Settings sections and the first-run folder list
+/// share. `rows` draws the rows one under the other, without space between them.
+pub fn row_group(ui: &mut egui::Ui, rows: impl FnOnce(&mut egui::Ui)) {
+    let pal = Palette::of(ui.ctx());
+    Frame::new()
+        .stroke(Stroke::new(1.0, pal.line))
+        .corner_radius(CornerRadius::same(super::CARD_RADIUS))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            rows(ui);
+        });
+}
+
 /// The frame of the floating pill: the pill colours, fully rounded, 44 points high.
 pub fn pill_frame(ctx: &egui::Context) -> Frame {
     let pal = Palette::of(ctx);

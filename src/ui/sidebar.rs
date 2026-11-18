@@ -14,7 +14,7 @@ use egui_material_icons::MaterialIcon;
 
 /// One line of the activity card: what is happening in plain words and, when it is known, how
 /// far along it is (0 to 1).
-fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
+pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
     Some(match a {
         Activity::Idle => return None,
         Activity::Downloading { done, total, .. } => (
@@ -617,7 +617,12 @@ impl App {
     }
 
     /// What is going on in words, with Pause and Stop.
-    fn activity_details(&mut self, ui: &mut egui::Ui, text: &str, fraction: Option<f32>) {
+    pub(super) fn activity_details(
+        &mut self,
+        ui: &mut egui::Ui,
+        text: &str,
+        fraction: Option<f32>,
+    ) {
         let downloading = matches!(self.status.activity, Activity::Downloading { .. });
         let pausable = is_pausable(&self.status.activity);
         let paused = self.status.paused;

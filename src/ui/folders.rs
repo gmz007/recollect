@@ -56,6 +56,13 @@ fn folder_suggestions(
         .collect()
 }
 
+/// The system's folder picker; `None` when it was closed without a choice.
+pub(super) fn pick_folder() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Choose a folder with photos and videos")
+        .pick_folder()
+}
+
 /// Shown when a typed folder path is not an existing folder given in full.
 pub(super) const BAD_FOLDER_PATH: &str = "That folder couldn't be found. Type the full path \
      of the folder, or use the folder picker instead.";
@@ -123,6 +130,15 @@ impl App {
         self.stop_folder_dialog(ctx);
     }
 
+    /// Takes a folder out of the library (its files are not touched).
+    pub(super) fn stop_showing_folder(&mut self, id: i64) {
+        // Cancels any running job first; runs in the background.
+        self.lib.start_remove_folder(id);
+        self.snapshot.folders.retain(|f| f.id != id);
+        // A fetch already in flight may predate the removal: fetch again after it.
+        self.snapshot_read.mark_again();
+    }
+
     pub(super) fn add_folder_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut dlg) = self.dialogs.add_folder_dialog.take() else {
             return;
@@ -161,11 +177,7 @@ impl App {
         );
         match choice {
             Some(Confirmation::Confirmed) => {
-                // Cancels any running job first; runs in the background.
-                self.lib.start_remove_folder(s.id);
-                self.snapshot.folders.retain(|f| f.id != s.id);
-                // A fetch already in flight may predate the removal: fetch again after it.
-                self.snapshot_read.mark_again();
+                self.stop_showing_folder(s.id);
                 self.dialogs.stop_folder = None;
             }
             Some(Confirmation::Cancelled) => self.dialogs.stop_folder = None,
@@ -223,12 +235,8 @@ fn pick_folder_rows(ui: &mut egui::Ui, suggestions: &[(String, PathBuf)]) -> Opt
          it never changes or moves your files.",
     );
     ui.add_space(8.0);
-    if style::icon_label_button(ui, icons::ICON_FOLDER_OPEN, "Choose a folder…").clicked()
-        && let Some(dir) = rfd::FileDialog::new()
-            .set_title("Choose a folder with photos and videos")
-            .pick_folder()
-    {
-        chosen = Some(dir);
+    if style::icon_label_button(ui, icons::ICON_FOLDER_OPEN, "Choose a folder…").clicked() {
+        chosen = pick_folder();
     }
     if !suggestions.is_empty() {
         ui.add_space(12.0);

@@ -71,7 +71,7 @@ pub(super) struct Welcome {
     /// The model that suits this computer, worked out once (asking the graphics hardware is
     /// not something to do every frame).
     recommended: &'static str,
-    /// The photo mosaic, only while the window is wide enough to show it.
+    /// The photo mosaic (painted only while the window is wide enough).
     mosaic: Option<Mosaic>,
 }
 
@@ -130,13 +130,12 @@ impl Welcome {
         self.download = true;
     }
 
-    /// Shows the mosaic in the photo set of the theme, or drops it (and its textures) when
-    /// the window is too narrow.
-    fn sync_mosaic(&mut self, ctx: &egui::Context, wide: bool, dark: bool) {
+    /// Keeps the mosaic in the photo set of the theme. It is kept (with its textures) while
+    /// the welcome is open, whatever the window's width, so resizing never decodes the photos
+    /// again; a narrow window just doesn't paint it.
+    fn sync_mosaic(&mut self, ctx: &egui::Context, dark: bool) {
         let set = PhotoSet::for_theme(dark);
-        if !wide {
-            self.mosaic = None;
-        } else if self.mosaic.as_ref().is_none_or(|m| m.set() != set) {
+        if self.mosaic.as_ref().is_none_or(|m| m.set() != set) {
             self.mosaic = Some(Mosaic::new(ctx, set));
         }
     }
@@ -200,8 +199,8 @@ impl App {
         };
         let pal = Palette::of(ui.ctx());
         let wide = ui.available_width() >= MOSAIC_MIN_WIDTH;
-        w.sync_mosaic(ui.ctx(), wide, pal.dark);
-        if let Some(mosaic) = w.mosaic.as_mut() {
+        w.sync_mosaic(ui.ctx(), pal.dark);
+        if let Some(mosaic) = w.mosaic.as_mut().filter(|_| wide) {
             egui::Panel::right("welcome-mosaic")
                 .resizable(false)
                 .exact_size(ui.available_width() / 2.0)

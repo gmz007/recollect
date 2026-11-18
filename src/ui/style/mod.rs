@@ -11,7 +11,8 @@ mod mark;
 mod tokens;
 
 pub use controls::{
-    PILL_HEIGHT, chip, filter_chip, menu_body, pill_buttons, pill_frame, switch_bare,
+    PILL_HEIGHT, checkbox, chip, filter_chip, menu_body, pill_buttons, pill_frame, row_group,
+    switch_bare,
 };
 pub use fading::{fade_opacity, pill_chip};
 pub use mark::app_mark;

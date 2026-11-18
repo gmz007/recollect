@@ -710,7 +710,16 @@ impl App {
                     ui.label(style::icon_text(icons::ICON_LIGHTBULB, 22.0).color(pal.accent));
                     ui.label(tip.text());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        dismiss = ui.button("Got it").clicked();
+                        let got_it =
+                            egui::Label::new(RichText::new("Got it").color(pal.accent).strong())
+                                .sense(egui::Sense::click());
+                        let r = ui
+                            .add(got_it)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, "Got it")
+                        });
+                        dismiss = r.clicked();
                     });
                 });
             });

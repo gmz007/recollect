@@ -292,13 +292,17 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
             .collect::<Vec<_>>()
             .is_empty()
     );
-    // Stopping a folder asks the same question as in the sidebar.
+    // Stopping a folder asks in its own row, inside Settings.
     h.get_by_label("Stop showing “nowhere”…").click();
     h.run_steps(3);
     h.get_by_label("Stop showing “nowhere”?");
     h.get_by_label("Your files stay where they are.");
     assert_eq!(lib.folders().unwrap().len(), 1);
-    h.get_all_by_label("Cancel").last().unwrap().click();
+    assert!(
+        app.borrow().dialogs.stop_folder.is_none(),
+        "no window over the main one"
+    );
+    h.get_by_label("Cancel").click();
     h.run_steps(3);
     assert!(
         h.query_by_label("Your files stay where they are.")
@@ -306,6 +310,57 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
     );
     assert_eq!(lib.folders().unwrap().len(), 1);
     assert!(app.borrow().dialogs.settings_open, "the sheet stays open");
+    // The question ends when another section is chosen.
+    h.get_by_label("Stop showing “nowhere”…").click();
+    h.run_steps(3);
+    h.get_by_label("Appearance settings").click();
+    h.run_steps(3);
+    h.get_by_label("Library settings").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Your files stay where they are.")
+            .is_none()
+    );
+    // Confirming takes the folder out.
+    h.get_by_label("Stop showing “nowhere”…").click();
+    h.run_steps(3);
+    h.get_by_label("Stop showing").click();
+    settle(&mut h, || lib.folders().unwrap().is_empty());
+}
+
+#[test]
+fn settings_stay_open_while_the_viewer_is_open() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    app.borrow_mut().open_settings();
+    h.run_steps(3);
+    h.get_by_label("Close settings");
+    h.run_steps(5);
+    h.get_by_label("Close settings");
+    assert!(app.borrow().dialogs.settings_open);
+}
+
+#[test]
+fn background_work_can_be_paused_from_settings_with_the_sidebar_ring_off() {
+    use crate::library::Activity;
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    lib.update_settings(|s| s.show_sidebar_progress = false)
+        .unwrap();
+    let mut h = harness(Arc::clone(&lib));
+    open_section(&mut h, "Library");
+    assert!(h.query_by_label("Working in the background").is_none());
+    lib.update_status(|s| s.activity = Activity::ReadingDates { done: 1, total: 4 });
+    h.run_steps(3);
+    h.get_by_label("Working in the background");
+    h.get_by_label_contains("Reading photo dates");
+    h.get_by_label("Pause").click();
+    settle(&mut h, || lib.status().paused);
+    h.get_by_label("Resume").click();
+    settle(&mut h, || !lib.status().paused);
+    h.get_by_label("Stop");
 }
 
 #[test]

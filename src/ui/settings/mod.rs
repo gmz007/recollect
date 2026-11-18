@@ -139,6 +139,12 @@ impl App {
         self.dialogs.settings_open = true;
     }
 
+    /// Closes Settings, dropping any question it was asking.
+    pub(super) fn close_settings(&mut self) {
+        self.dialogs.settings_open = false;
+        self.dialogs.take_settings_question();
+    }
+
     /// Opens Settings on `section`.
     pub(super) fn open_settings_at(&mut self, section: Section) {
         self.dialogs.settings_section = section;
@@ -226,7 +232,11 @@ impl App {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
         ui.horizontal_top(|ui| {
             let radius = if sheet { SHEET_RADIUS } else { 0 };
+            let before = self.dialogs.settings_section;
             settings_nav(ui, &pal, &mut self.dialogs.settings_section, size.y, radius);
+            if self.dialogs.settings_section != before {
+                self.dialogs.take_settings_question();
+            }
             close = self.settings_content(ui, Vec2::new(size.x - NAV_WIDTH, size.y), sheet);
         });
         close
@@ -253,7 +263,7 @@ impl App {
             close = self.settings_viewport_ui(ui);
         });
         if close {
-            self.dialogs.settings_open = false;
+            self.close_settings();
         }
     }
 
@@ -265,7 +275,7 @@ impl App {
         let mut close = ctx.input(|i| i.viewport().close_requested());
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             // A pending question is answered "no" first.
-            if self.dialogs.model_confirm.take().is_none() {
+            if !self.dialogs.take_settings_question() {
                 close = true;
             }
         }
@@ -306,7 +316,7 @@ impl App {
             });
         let nothing_on_top = !self.dialog_open();
         if close || (out.backdrop_response.clicked() && nothing_on_top) {
-            self.dialogs.settings_open = false;
+            self.close_settings();
         }
     }
 }

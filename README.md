@@ -65,8 +65,9 @@ computer.
   - **Smart search:** whether it is on, off or downloading; a **Search style** of *Best quality* or
     *Faster* (changing it asks first; the download size is shown); whether to use the graphics card; a folded **Details**
     part with the name, license and source of what it downloads.
-  - **Library:** your folders (**Stop showing…** asks first and never touches your files),
-    **Add a folder…**, how many photos and videos are ready for search and how many couldn't be
+  - **Library:** what Recollect is working on right now, with **Pause**/**Resume** and **Stop**
+    (shown whenever something runs, even with the sidebar progress turned off), your folders
+    (**Stop showing…** asks in the row and never touches your files), **Add a folder…**, how many photos and videos are ready for search and how many couldn't be
     opened (**Show** lists them, **Try again** retries), and **Check for new photos**. A folded
     **Advanced** part has the technical options.
   - **Storage:** how much room photo previews take (with **Clear previews**), how much they may
@@ -163,13 +164,12 @@ screen if you would rather not):
 1. **Welcome**: what Recollect does ("Find any photo by describing it") and that everything stays
    on your computer. Button: **Get started**.
 2. **Where are your photos?** The standard folders that exist (Pictures and Videos are ticked;
-   Desktop and Downloads are offered by name), **Add another folder…** (a folder picker; under
+   Desktop and Downloads are offered by name), **Add a folder…** (a folder picker; under
    **More options** you can type a path instead). **Continue** adds exactly the folders that are
-   ticked or added; with none chosen it reads **Continue without folders** and you add them
-   later from the sidebar.
+   ticked or added; it stays off until at least one folder is chosen.
 3. **Turn on smart search**: the **Best quality** and **Faster** choices with their download
-   sizes (the one that suits your computer is marked), and a privacy note. **Download and turn
-   on** starts the one-time download; **Not now** leaves it off. Nothing is downloaded
+   sizes (the one that suits your computer is marked), and a privacy note. **Turn on**
+   starts the one-time download; **Not now** leaves it off. Nothing is downloaded
    without this choice, and without smart search you can still browse your library by date.
 4. **You're all set**: **Start** adds the folders, looks through them, then starts the download
    if you chose it, and shows Photos. Progress shows at the bottom left and you can browse right

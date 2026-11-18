@@ -71,3 +71,48 @@ fn space_is_written_in_mb_and_gb() {
     assert_eq!(parse_space("300 MB"), Some(300.0));
     assert_eq!(parse_space("lots"), None);
 }
+
+/// A row with a 150 point control, in a `width` wide window: the title's and the control's
+/// rectangles.
+fn row_rects(width: f32) -> (egui::Rect, egui::Rect) {
+    use egui_kittest::kittest::Queryable as _;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(width, 300.0))
+        .build_ui(|ui| {
+            // The app's fonts are installed after the harness is built; they load a few
+            // passes later.
+            if ui.ctx().cumulative_pass_nr() < 3 {
+                return;
+            }
+            super::rows::group(ui, |ui, rows| {
+                rows.row(
+                    ui,
+                    "Row title",
+                    Some("A longer line of explanation"),
+                    150.0,
+                    |ui| {
+                        let _ = ui.button("Control");
+                    },
+                );
+            });
+        });
+    crate::ui::style::apply(
+        &h.ctx,
+        crate::config::Theme::default(),
+        crate::config::TextSize::default(),
+    );
+    h.run();
+    (
+        h.get_by_label("Row title").rect(),
+        h.get_by_label("Control").rect(),
+    )
+}
+
+#[test]
+fn a_row_puts_its_control_under_the_text_when_both_do_not_fit() {
+    let (title, control) = row_rects(300.0);
+    assert!(control.min.y >= title.max.y, "{title:?} vs {control:?}");
+    let (title, control) = row_rects(700.0);
+    assert!(control.min.x >= title.max.x, "side by side when wide");
+    assert!(control.min.y < title.max.y);
+}

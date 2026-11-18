@@ -6,7 +6,7 @@ use crate::ui::App;
 use crate::ui::folders::{BAD_FOLDER_PATH, typed_folder};
 use crate::ui::settings::{choice_card, quality_blurb, quality_name};
 use crate::ui::style::{self, Palette, icons};
-use egui::{RichText, Stroke, Ui};
+use egui::{RichText, Ui};
 use egui_material_icons::MaterialIcon;
 
 const HEADLINE_SIZE: f32 = 26.0;
@@ -40,15 +40,7 @@ fn headline(ui: &mut Ui, title: &str, text: &str) {
 
 /// A bordered block of rows, divided by hairlines.
 fn card(ui: &mut Ui, add_rows: impl FnOnce(&mut Ui)) {
-    let pal = Palette::of(ui.ctx());
-    egui::Frame::new()
-        .stroke(Stroke::new(1.0, pal.line))
-        .corner_radius(style::CARD_RADIUS)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 0.0;
-            add_rows(ui);
-        });
+    style::row_group(ui, add_rows);
 }
 
 /// A hairline across the card, between two rows.
@@ -360,12 +352,8 @@ fn welcome_folder_rows(ui: &mut Ui, w: &mut Welcome) {
     for s in &mut w.suggestions {
         row(ui, |ui| {
             ui.horizontal(|ui| {
-                let r = ui
-                    .checkbox(&mut s.checked, style::medium(&s.name))
+                style::checkbox(ui, &mut s.checked, style::medium(&s.name))
                     .on_hover_text(s.path.display().to_string());
-                r.widget_info(|| {
-                    egui::WidgetInfo::selected(egui::Role::CheckBox, true, s.checked, &s.name)
-                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(suggestion_note(&s.name)).color(pal.muted));
                 });
@@ -375,9 +363,7 @@ fn welcome_folder_rows(ui: &mut Ui, w: &mut Welcome) {
     }
     row(ui, |ui| {
         if add_folder_button(ui).clicked()
-            && let Some(dir) = rfd::FileDialog::new()
-                .set_title("Choose a folder with photos and videos")
-                .pick_folder()
+            && let Some(dir) = crate::ui::folders::pick_folder()
             && !w.added.contains(&dir)
         {
             w.added.push(dir);

@@ -5,7 +5,7 @@ use super::widgets::{committed_slider, fmt_space};
 use crate::ui::{App, platform, prune_thumbnails};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const BUTTON_WIDTH: f32 = 130.0;
@@ -18,10 +18,38 @@ fn space_id() -> egui::Id {
     egui::Id::NULL.with("preview-space")
 }
 
+/// Stands for "not measured yet" in [`PreviewSpace::bytes`].
+const UNMEASURED: u64 = u64::MAX;
+
 #[derive(Clone)]
 struct PreviewSpace {
     bytes: Arc<AtomicU64>,
-    measured: Instant,
+    /// A walk over the previews is under way; only one runs at a time.
+    walking: Arc<AtomicBool>,
+    /// When the last walk was started.
+    measured: Option<Instant>,
+}
+
+impl Default for PreviewSpace {
+    fn default() -> Self {
+        Self {
+            bytes: Arc::new(AtomicU64::new(UNMEASURED)),
+            walking: Arc::default(),
+            measured: None,
+        }
+    }
+}
+
+/// The description of the previews row: the space used, or that it is being measured.
+fn preview_desc(used: Option<u64>) -> String {
+    let rest = "Safe to clear: they’re made again when needed.";
+    match used {
+        Some(bytes) => format!(
+            "{} used. {rest}",
+            fmt_space(bytes as f64 / f64::from(1 << 20))
+        ),
+        None => format!("Measuring… {rest}"),
+    }
 }
 
 impl App {
@@ -31,10 +59,7 @@ impl App {
         let mut new_limit = None;
         let limit = self.settings.thumb_cache_mb;
         group(ui, |ui, rows| {
-            let desc = format!(
-                "{} used. Safe to clear: they’re made again when needed.",
-                fmt_space(used as f64 / f64::from(1 << 20))
-            );
+            let desc = preview_desc(used);
             rows.row(ui, "Photo previews", Some(&desc), BUTTON_WIDTH, |ui| {
                 clear = ui.button("Clear previews").clicked();
             });
@@ -77,28 +102,28 @@ impl App {
         );
     }
 
-    /// The bytes previews take; measured in the background and refreshed now and then.
-    fn preview_space_used(&self, ui: &egui::Ui) -> u64 {
+    /// The bytes previews take, or `None` until the first measurement is in. Measured in the
+    /// background (one walk at a time) and refreshed now and then.
+    fn preview_space_used(&self, ui: &egui::Ui) -> Option<u64> {
         let id = space_id();
-        let stale = |p: &PreviewSpace| p.measured.elapsed() > MEASURE_EVERY;
-        let known = ui.data(|d| d.get_temp::<PreviewSpace>(id));
-        if let Some(p) = known.as_ref().filter(|p| !stale(p)) {
-            return p.bytes.load(Ordering::Relaxed);
+        let mut space = ui
+            .data(|d| d.get_temp::<PreviewSpace>(id))
+            .unwrap_or_default();
+        let stale = space.measured.is_none_or(|t| t.elapsed() > MEASURE_EVERY);
+        if stale && !space.walking.swap(true, Ordering::AcqRel) {
+            let dir = self.lib.paths().thumbs_dir();
+            let (out, walking) = (Arc::clone(&space.bytes), Arc::clone(&space.walking));
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                out.store(crate::thumbs::used_bytes(&dir), Ordering::Relaxed);
+                walking.store(false, Ordering::Release);
+                ctx.request_repaint();
+            });
+            space.measured = Some(Instant::now());
         }
-        let bytes = known.map_or_else(Arc::default, |p| p.bytes);
-        let (dir, out) = (self.lib.paths().thumbs_dir(), Arc::clone(&bytes));
-        let ctx = ui.ctx().clone();
-        std::thread::spawn(move || {
-            out.store(crate::thumbs::used_bytes(&dir), Ordering::Relaxed);
-            ctx.request_repaint();
-        });
-        let current = bytes.load(Ordering::Relaxed);
-        let space = PreviewSpace {
-            bytes,
-            measured: Instant::now(),
-        };
+        let bytes = space.bytes.load(Ordering::Relaxed);
         ui.data_mut(|d| d.insert_temp(id, space));
-        current
+        (bytes != UNMEASURED).then_some(bytes)
     }
 
     fn data_folders(&mut self, ui: &mut egui::Ui) {
@@ -146,5 +171,16 @@ impl App {
                 None,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_previews_row_says_measuring_until_a_size_is_known() {
+        assert!(preview_desc(None).starts_with("Measuring…"));
+        assert!(preview_desc(Some(3 << 20)).contains("used."));
     }
 }

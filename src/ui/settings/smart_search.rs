@@ -6,6 +6,7 @@ use super::widgets::segmented;
 use crate::library::Activity;
 use crate::model::registry::{self, ModelSpec, megabytes};
 use crate::ui::App;
+use crate::ui::sidebar::activity_text;
 use crate::ui::style::{self, Palette};
 use crate::ui::timeline::thousands;
 
@@ -155,7 +156,6 @@ impl App {
             return;
         }
         let pal = Palette::of(ui.ctx());
-        let here = self.snapshot.installed_models.contains(&spec.id);
         let mut answer = None;
         ui.add_space(10.0);
         egui::Frame::new()
@@ -164,26 +164,7 @@ impl App {
             .inner_margin(egui::Margin::same(14))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(format!(
-                    "Change to {}? Recollect will look through your photos again, which can \
-                     take a while. You can keep using it meanwhile.",
-                    quality_name(spec)
-                ));
-                if !here {
-                    ui.label(format!(
-                        "It needs a one-time download of {} MB.",
-                        spec.size_mb()
-                    ));
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if style::primary_button(ui, "Change").clicked() {
-                        answer = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        answer = Some(false);
-                    }
-                });
+                answer = self.style_change_body(ui, spec);
             });
         match answer {
             Some(true) => {
@@ -195,12 +176,51 @@ impl App {
         }
     }
 
+    /// The text and buttons of the question; the answer once one was clicked. While Recollect
+    /// is busy the work is shown with its Stop button and "Change" waits.
+    fn style_change_body(&mut self, ui: &mut egui::Ui, spec: &'static ModelSpec) -> Option<bool> {
+        let busy = self.lib.is_busy();
+        ui.label(format!(
+            "Change to {}? Recollect will look through your photos again, which can \
+             take a while. You can keep using it meanwhile.",
+            quality_name(spec)
+        ));
+        if !self.snapshot.installed_models.contains(&spec.id) {
+            ui.label(format!(
+                "It needs a one-time download of {} MB.",
+                spec.size_mb()
+            ));
+        }
+        if busy {
+            ui.add_space(6.0);
+            ui.label(
+                "Recollect is busy right now. Wait for it to finish, or stop it here, \
+                 then change.",
+            );
+            if let Some((text, fraction)) = activity_text(&self.status.activity) {
+                self.activity_details(ui, &text, fraction);
+            }
+        }
+        ui.add_space(6.0);
+        let mut answer = None;
+        ui.horizontal(|ui| {
+            let change = ui.add_enabled_ui(!busy, |ui| style::primary_button(ui, "Change"));
+            if change.inner.clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+        answer
+    }
+
     /// Makes `spec` the smart-search choice (waits if a long task is running).
     pub(super) fn switch_model(&mut self, spec: &'static ModelSpec) {
         if self.lib.is_busy() {
             self.notify(
-                "Recollect is busy right now. Wait for it to finish, or press Stop in the left \
-                 panel, then try again.",
+                "Recollect is busy right now. Wait for it to finish, or stop it in Settings › \
+                 Library, then try again.",
             );
             return;
         }

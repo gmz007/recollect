@@ -393,7 +393,7 @@ fn the_mosaic_shows_in_wide_windows_only_and_follows_the_theme() {
     assert_eq!(set(&app), Some(PhotoSet::Dark));
     drop(h);
 
-    // A narrow window shows the content alone, and the photos are not even decoded.
+    // A narrow window shows the content alone.
     let d2 = tempfile::tempdir().unwrap();
     let app = fresh_app(d2.path());
     let shown = Rc::clone(&app);
@@ -403,5 +403,24 @@ fn the_mosaic_shows_in_wide_windows_only_and_follows_the_theme() {
         .build_ui(move |ui| shown.borrow_mut().show(ui));
     narrow.run_steps(5);
     narrow.get_by_label("Find any photo by describing it");
-    assert_eq!(set(&app), None);
+}
+
+#[test]
+fn resizing_across_the_mosaic_width_does_not_decode_the_photos_again() {
+    use crate::ui::welcome::mosaic::DECODE_RUNS;
+    use std::sync::atomic::Ordering;
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let shown = Rc::clone(&app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_max_steps(MAX_STEPS)
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    h.run_steps(3);
+    assert_eq!(DECODE_RUNS.load(Ordering::Relaxed), 1);
+    for width in [700.0, 1200.0, 800.0, 1000.0] {
+        h.set_size(egui::vec2(width, 800.0));
+        h.run_steps(3);
+    }
+    assert_eq!(DECODE_RUNS.load(Ordering::Relaxed), 1, "decoded once, kept");
 }

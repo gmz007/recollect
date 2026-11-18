@@ -24,6 +24,41 @@ const TEXT_MARGIN: f32 = 20.0;
 const HIDE_SIZE: f32 = 28.0;
 const SEE_HEIGHT: f32 = 32.0;
 
+/// Height of the shade behind the text: clear at its top, `OVERLAY_BLACK` at the bottom.
+const SHADE_HEIGHT: f32 = 150.0;
+/// Segments of each rounded bottom corner of the shade.
+const CORNER_SEGMENTS: usize = 6;
+
+/// Darkens the lower part of the photo in `rect` with a gradient that follows the banner's
+/// rounded bottom corners, so the text stays readable without a hard edge.
+fn paint_shade(painter: &egui::Painter, rect: Rect) {
+    let top = rect.max.y - SHADE_HEIGHT;
+    let r = f32::from(RADIUS);
+    let colour_at = |y: f32| {
+        let t = ((y - top) / SHADE_HEIGHT).clamp(0.0, 1.0);
+        Color32::from_black_alpha((f32::from(style::OVERLAY_BLACK.a()) * t).round() as u8)
+    };
+    let mut outline = vec![egui::pos2(rect.min.x, top), egui::pos2(rect.max.x, top)];
+    // Bottom-right corner, then bottom-left, as arcs.
+    for (cx, from) in [(rect.max.x - r, 0.0_f32), (rect.min.x + r, 90.0)] {
+        for i in 0..=CORNER_SEGMENTS {
+            let a = (from + 90.0 * i as f32 / CORNER_SEGMENTS as f32).to_radians();
+            outline.push(egui::pos2(cx + r * a.cos(), rect.max.y - r + r * a.sin()));
+        }
+    }
+    let middle = egui::pos2(rect.center().x, f32::midpoint(top, rect.max.y));
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(middle, colour_at(middle.y));
+    for p in &outline {
+        mesh.colored_vertex(*p, colour_at(p.y));
+    }
+    let n = outline.len() as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// What the banner shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Banner {
@@ -70,16 +105,7 @@ pub(super) fn show(
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, BANNER_HEIGHT), Sense::hover());
     let text_top = rect.max.y - TEXT_HEIGHT;
     paint_photo(ui, pics, items.get(banner.entries[0]), rect, &pal);
-    ui.painter().rect_filled(
-        Rect::from_min_max(egui::pos2(rect.min.x, text_top), rect.max),
-        CornerRadius {
-            nw: 0,
-            ne: 0,
-            sw: RADIUS,
-            se: RADIUS,
-        },
-        style::OVERLAY_BLACK,
-    );
+    paint_shade(ui.painter(), rect);
     let text_area = Rect::from_min_max(egui::pos2(rect.min.x, text_top), rect.max)
         .shrink2(Vec2::new(TEXT_MARGIN, 0.0));
     let mut event = None;
