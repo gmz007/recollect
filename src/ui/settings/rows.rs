@@ -101,10 +101,3 @@ pub(super) fn footnote(ui: &mut Ui, text: &str) {
     ui.add_space(8.0);
     ui.label(RichText::new(text).size(12.0).color(pal.muted));
 }
-
-/// A small heading above a group.
-pub(super) fn group_title(ui: &mut Ui, text: &str) {
-    ui.add_space(16.0);
-    ui.label(style::semibold(text));
-    ui.add_space(6.0);
-}

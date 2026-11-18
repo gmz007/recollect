@@ -316,7 +316,10 @@ fn storage_settings_set_the_preview_space_and_show_where_data_lives() {
     let mut h = harness(Arc::clone(&lib));
     open_section(&mut h, "Storage");
     assert!(h.get_all_by_label("Space for previews").count() >= 1);
-    h.get_by_label("Where Recollect keeps its data");
+    // The folders' paths are technical, so they wait behind a collapsed heading.
+    assert!(h.query_by_label("Open folder for library").is_none());
+    h.get_by_label("Where Recollect keeps its data").click();
+    h.run_steps(3);
     h.get_by_label("Open folder for library");
     h.get_by_label("Open folder for previews");
     h.get_by_label("Open folder for settings");

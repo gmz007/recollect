@@ -1,6 +1,6 @@
 //! Settings › Storage: the room photo previews take and where Recollect keeps its data.
 
-use super::rows::{footnote, group, group_title};
+use super::rows::{footnote, group};
 use super::widgets::{committed_slider, fmt_space};
 use crate::ui::{App, platform, prune_thumbnails};
 use std::path::Path;
@@ -67,7 +67,14 @@ impl App {
                 p.bytes.store(0, Ordering::Relaxed);
             }
         }
-        self.data_folders(ui);
+        // The folder paths are technical (and name system folders like "Caches"): collapsed.
+        egui::CollapsingHeader::new("Where Recollect keeps its data")
+            .id_salt("settings-data-folders")
+            .show(ui, |ui| self.data_folders(ui));
+        footnote(
+            ui,
+            "Recollect never writes anything into your photo folders.",
+        );
     }
 
     /// The bytes previews take; measured in the background and refreshed now and then.
@@ -95,7 +102,6 @@ impl App {
     }
 
     fn data_folders(&mut self, ui: &mut egui::Ui) {
-        group_title(ui, "Where Recollect keeps its data");
         let paths = self.lib.paths().clone();
         let places = [
             (
@@ -125,10 +131,6 @@ impl App {
                 });
             }
         });
-        footnote(
-            ui,
-            "Recollect never writes anything into your photo folders.",
-        );
         if let Some(dir) = open {
             self.open_data_folder(&dir);
         }
