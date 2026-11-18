@@ -10,7 +10,9 @@ mod fading;
 mod mark;
 mod tokens;
 
-pub use controls::{PILL_HEIGHT, chip, filter_chip, menu_body, pill_buttons, pill_frame, switch};
+pub use controls::{
+    PILL_HEIGHT, chip, filter_chip, menu_body, pill_buttons, pill_frame, switch_bare,
+};
 pub use fading::{fade_opacity, pill_chip};
 pub use mark::app_mark;
 pub use tokens::*;
@@ -18,7 +20,7 @@ pub use tokens::*;
 use crate::config::{TextSize, Theme};
 use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Response,
-    RichText, Stroke, TextStyle, Vec2, epaint::text::FontInsert,
+    RichText, TextStyle, Vec2, epaint::text::FontInsert,
 };
 use egui_material_icons::MaterialIcon;
 use std::sync::Arc;
@@ -351,15 +353,6 @@ pub fn dropdown_job(ui: &egui::Ui, label: &str) -> egui::text::LayoutJob {
         },
     );
     job
-}
-
-/// A rounded card frame on the surface colour.
-pub fn card(ui: &egui::Ui) -> egui::Frame {
-    egui::Frame::new()
-        .fill(ui.visuals().window_fill)
-        .stroke(Stroke::new(1.0, ui.visuals().window_stroke.color))
-        .corner_radius(CornerRadius::same(CARD_RADIUS))
-        .inner_margin(Margin::same(16))
 }
 
 /// The name of the platform's command key as shown in tooltips.

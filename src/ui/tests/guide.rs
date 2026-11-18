@@ -270,14 +270,21 @@ fn check_main_window(check: &mut dyn FnMut(&str, &Harness<'_>), dir: &std::path:
         a.snapshot.errors = vec![("/nowhere/x.jpg".into(), "unreadable".into())];
         a.failed_open = true;
     }
-    for section in ["Appearance", "Smart search", "Library", "Storage", "About"] {
+    for section in [
+        "Appearance",
+        "Features",
+        "Smart search",
+        "Library",
+        "Storage",
+        "About",
+    ] {
         open_section(&mut h, section);
         check(&format!("settings: {section}"), &h);
     }
     open_section(&mut h, "Smart search");
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch to Best quality?");
+    h.get_by_label_contains("Change to Best quality?");
     check("settings: switching", &h);
     h.get_by_label("Cancel").click();
     h.run_steps(3);
@@ -684,8 +691,8 @@ fn tips_show_one_at_a_time_once_each() {
     let mut h = album_harness(&restarted);
     assert!(h.query_by_label("Got it").is_none());
     // Settings can bring them back.
-    open_section(&mut h, "Appearance");
-    h.get_by_label("Show tips again").click();
+    open_section(&mut h, "Features");
+    h.get_by_label("Show again").click();
     h.run_steps(3);
     assert!(lib.settings().tips_dismissed.is_empty());
     h.get_by_label("Close settings").click();

@@ -130,10 +130,7 @@ fn settings_has_a_photo_size_row_that_sets_the_same_size() {
     open_section(&mut h, "Appearance");
     h.get_by_label("Photo size");
     // The default is Medium (and so is the text size).
-    assert_eq!(
-        selected_choices(&h),
-        ["Match my computer", "Medium", "Medium"]
-    );
+    assert_eq!(selected_choices(&h), ["System", "Medium", "Medium"]);
     // The photo size row comes after the text size row.
     h.get_all_by_label("Large").nth(1).unwrap().click();
     h.run();
@@ -145,7 +142,7 @@ fn settings_has_a_photo_size_row_that_sets_the_same_size() {
     // A size in between marks none of the three.
     app.borrow_mut().tl.tile_size = 150.0;
     h.run();
-    assert_eq!(selected_choices(&h), ["Match my computer", "Medium"]);
+    assert_eq!(selected_choices(&h), ["System", "Medium"]);
 }
 
 #[test]

@@ -450,6 +450,7 @@ fn help_sections(
     ui: &mut egui::Ui,
     pal: &Palette,
     recent: &[String],
+    examples: bool,
     ids: &mut Vec<egui::Id>,
 ) -> HelpPicks {
     let mut picks = HelpPicks::default();
@@ -463,10 +464,12 @@ fn help_sections(
             }
         }
     }
-    help_heading(ui, pal, "Try", if recent.is_empty() { 4.0 } else { 10.0 });
-    for q in EXAMPLE_SEARCHES {
-        if suggestion_row(ui, icons::ICON_SEARCH, q, q, ids) {
-            picks.chosen = Some(q.to_string());
+    if examples {
+        help_heading(ui, pal, "Try", if recent.is_empty() { 4.0 } else { 10.0 });
+        for q in EXAMPLE_SEARCHES {
+            if suggestion_row(ui, icons::ICON_SEARCH, q, q, ids) {
+                picks.chosen = Some(q.to_string());
+            }
         }
     }
     ui.add_space(6.0);
@@ -506,7 +509,7 @@ impl App {
     /// Remembers a search the user ran (newest first, no repeats).
     pub(super) fn remember_search(&mut self, q: &str) {
         let q = q.trim();
-        if q.is_empty() {
+        if q.is_empty() || !self.settings.remember_searches {
             return;
         }
         let lower = q.to_lowercase();
@@ -568,6 +571,17 @@ impl App {
         self.search_help.inside = target.is_some() || current.is_some();
     }
 
+    /// The recent searches and whether examples are offered. Recent searches are offered only
+    /// while they are remembered; the list itself is kept until the user clears it.
+    fn offered_searches(&self) -> (Vec<String>, bool) {
+        let recent = if self.settings.remember_searches {
+            self.settings.recent_searches.clone()
+        } else {
+            Vec::new()
+        };
+        (recent, self.settings.show_example_searches)
+    }
+
     /// Recent and example searches under the search field while it is focused and empty.
     pub(super) fn search_help_dropdown(&mut self, ctx: &egui::Context) {
         let pointer_inside = self
@@ -575,9 +589,11 @@ impl App {
             .dropdown
             .zip(ctx.pointer_latest_pos())
             .is_some_and(|(r, p)| r.contains(p));
+        let (recent, examples) = self.offered_searches();
         let show = self.snapshot.model_installed
+            && (examples || !recent.is_empty())
             && self.query.is_empty()
-            && !self.dialogs.settings_open
+            && !self.settings_is_modal(ctx)
             && !self.dialog_open()
             && !self.search_help.suppressed
             && (self.search_help.focused
@@ -592,7 +608,6 @@ impl App {
         };
         let mut ids: Vec<egui::Id> = Vec::new();
         let pal = Palette::of(ctx);
-        let recent = self.settings.recent_searches.clone();
         let mut picks = HelpPicks::default();
         let out = egui::Area::new(egui::Id::unique("search-help"))
             .order(egui::Order::Foreground)
@@ -606,7 +621,7 @@ impl App {
                     .shadow(ctx.global_style().visuals.popup_shadow)
                     .show(ui, |ui| {
                         ui.set_width(field.width() - 12.0);
-                        picks = help_sections(ui, &pal, &recent, &mut ids);
+                        picks = help_sections(ui, &pal, &recent, examples, &mut ids);
                     });
             });
         self.search_help.dropdown = Some(out.response.rect);
@@ -657,7 +672,8 @@ impl Tip {
 impl App {
     /// The tip to show now, if any. Only one at a time, and only on a grid with photos in it.
     fn pending_tip(&self) -> Option<Tip> {
-        if self.tl.grid.picking
+        if !self.settings.show_tips
+            || self.tl.grid.picking
             || !self.tl.loaded
             || self.tl.items.is_empty()
             || self.search_offer_visible()

@@ -1,11 +1,15 @@
-//! The Settings sheet: a centered panel with a list of sections on the left and the chosen
-//! section on the right. Changes apply as soon as they are made; only switching the
-//! smart-search choice asks first, because it makes Recollect look at every photo again.
+//! Settings: its own window (or, where windows can't be opened, a centered sheet over the main
+//! one) with a list of sections on the left and the chosen section on the right. Changes apply
+//! as soon as they are made; only changing the search style asks first, because it makes
+//! Recollect look at every photo again.
 //!
-//! Each section has its own file (`smart_search`, `library`, `storage`); `widgets` holds the
-//! controls they share.
+//! Each section has its own file; `rows` and `widgets` hold the controls they share.
 
+mod about;
+mod appearance;
+mod features;
 mod library;
+mod rows;
 mod smart_search;
 mod storage;
 mod widgets;
@@ -14,28 +18,36 @@ pub(super) use smart_search::{quality_blurb, quality_name};
 pub(super) use widgets::choice_card;
 
 use super::App;
-use super::photo_size::PhotoSizeLevel;
 use super::sidebar::plain_row;
 use super::style::{self, Palette, icons};
-use crate::config::{Settings, TextSize, Theme};
-use egui::{CornerRadius, Margin, RichText, Stroke, Vec2};
+use crate::config::Settings;
+use egui::{Color32, CornerRadius, Margin, Stroke, Vec2};
 use egui_material_icons::MaterialIcon;
-use widgets::segmented;
 
-/// The sections of the sheet.
+/// The sections of Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Section {
     #[default]
     Appearance,
+    Features,
     SmartSearch,
     Library,
     Storage,
     About,
 }
 
+/// Width of the section list.
+const NAV_WIDTH: f32 = 200.0;
+/// Corner radius of the sheet.
+const SHEET_RADIUS: u8 = 12;
+/// The window's size when it opens, and the smallest it can be made.
+const WINDOW_SIZE: [f32; 2] = [820.0, 600.0];
+const WINDOW_MIN_SIZE: [f32; 2] = [640.0, 480.0];
+
 impl Section {
-    const ALL: [Section; 5] = [
+    const ALL: [Section; 6] = [
         Section::Appearance,
+        Section::Features,
         Section::SmartSearch,
         Section::Library,
         Section::Storage,
@@ -45,6 +57,7 @@ impl Section {
     fn name(self) -> &'static str {
         match self {
             Section::Appearance => "Appearance",
+            Section::Features => "Features",
             Section::SmartSearch => "Smart search",
             Section::Library => "Library",
             Section::Storage => "Storage",
@@ -55,43 +68,52 @@ impl Section {
     fn icon(self) -> MaterialIcon {
         match self {
             Section::Appearance => icons::ICON_PALETTE,
-            Section::SmartSearch => icons::ICON_AUTO_AWESOME,
-            Section::Library => icons::ICON_PHOTO_LIBRARY,
+            Section::Features => icons::ICON_TUNE,
+            Section::SmartSearch => icons::ICON_SEARCH,
+            Section::Library => icons::ICON_FOLDER,
             Section::Storage => icons::ICON_STORAGE,
             Section::About => icons::ICON_INFO,
         }
     }
 }
 
-fn heading(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(6.0);
-    ui.label(style::semibold(text).size(15.0));
-    ui.add_space(2.0);
+/// The fill of the Settings content: a slightly raised grey in the dark theme.
+pub(super) fn surface(pal: &Palette) -> Color32 {
+    if pal.dark {
+        style::SETTINGS_WINDOW_DARK
+    } else {
+        pal.bg
+    }
 }
 
+/// A line of quiet small text under a control.
 fn hint(ui: &mut egui::Ui, text: &str) {
     let pal = Palette::of(ui.ctx());
-    ui.label(RichText::new(text).small().color(pal.text2));
+    ui.label(egui::RichText::new(text).size(12.0).color(pal.muted));
 }
 
-/// The section list on the left of the sheet.
-fn settings_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut Section, nav_w: f32, h: f32) {
+fn settings_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("recollect-settings")
+}
+
+/// The section list on the left. `radius` rounds its outer corners (the sheet's).
+fn settings_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut Section, h: f32, radius: u8) {
     egui::Frame::new()
-        .fill(pal.field)
+        .fill(pal.side)
         .corner_radius(CornerRadius {
-            nw: 16,
-            sw: 16,
+            nw: radius,
+            sw: radius,
             ne: 0,
             se: 0,
         })
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.set_width(nav_w - 24.0);
+                ui.set_width(NAV_WIDTH - 24.0);
                 ui.set_height(h - 24.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
                 ui.add_space(4.0);
-                ui.label(style::semibold("Settings").size(18.0));
+                ui.label(style::semibold("Settings").size(15.0));
                 ui.add_space(10.0);
                 for s in Section::ALL {
                     let (_, r) = plain_row(
@@ -111,15 +133,16 @@ fn settings_nav(ui: &mut egui::Ui, pal: &Palette, current: &mut Section, nav_w: 
 }
 
 impl App {
-    /// Opens Settings on the section the user saw last.
+    /// Opens Settings on the section the user saw last, or brings the open window forward.
     pub(super) fn open_settings(&mut self) {
+        self.dialogs.settings_focus = self.dialogs.settings_open;
         self.dialogs.settings_open = true;
     }
 
     /// Opens Settings on `section`.
     pub(super) fn open_settings_at(&mut self, section: Section) {
         self.dialogs.settings_section = section;
-        self.dialogs.settings_open = true;
+        self.open_settings();
     }
 
     /// Changes the settings `f` touches (and only those) and saves them at once.
@@ -141,47 +164,42 @@ impl App {
         self.change_settings(|s| s.search_prompt_dismissed = dismissed);
     }
 
-    /// The title, close button and settings of the chosen section; true when the button was
-    /// clicked.
-    fn settings_content(&mut self, ui: &mut egui::Ui, width: f32, height: f32) -> bool {
+    /// The title, (in the sheet) a close button, and the settings of the chosen section; true
+    /// when the button was clicked.
+    fn settings_content(&mut self, ui: &mut egui::Ui, size: Vec2, with_close: bool) -> bool {
         let mut close = false;
         let section = self.dialogs.settings_section;
         egui::Frame::new()
-            .inner_margin(Margin::symmetric(20, 14))
+            .inner_margin(Margin::symmetric(28, 20))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width(width);
-                    ui.set_height(height);
+                    ui.set_width(size.x - 56.0);
+                    ui.set_height(size.y - 40.0);
                     ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(section.name()).text_style(egui::TextStyle::Heading),
-                        );
+                        ui.label(style::semibold(section.name()).size(18.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if style::icon_button_framed(ui, icons::ICON_CLOSE, "Close settings")
+                            if with_close
+                                && style::icon_button_framed(
+                                    ui,
+                                    icons::ICON_CLOSE,
+                                    "Close settings",
+                                )
                                 .clicked()
                             {
                                 close = true;
                             }
                         });
                     });
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     // A scrollbar that takes its own room: the content never runs under it.
                     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                     egui::ScrollArea::vertical()
                         .id_salt(("settings-scroll", section as u8))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            ui.add_space(2.0);
-                            // Breathing room between the content and the bar.
                             ui.set_max_width(ui.available_width() - 8.0);
-                            match section {
-                                Section::Appearance => self.settings_appearance(ui),
-                                Section::SmartSearch => self.settings_smart_search(ui),
-                                Section::Library => self.settings_library(ui),
-                                Section::Storage => self.settings_storage(ui),
-                                Section::About => Self::settings_about(ui),
-                            }
+                            self.settings_section(ui, section);
                             ui.add_space(24.0);
                         });
                 });
@@ -189,133 +207,107 @@ impl App {
         close
     }
 
-    /// The sheet itself. Closed by its × button, by Esc and by a click outside it.
-    pub(super) fn settings_sheet(&mut self, ctx: &egui::Context) {
+    fn settings_section(&mut self, ui: &mut egui::Ui, section: Section) {
+        match section {
+            Section::Appearance => self.settings_appearance(ui),
+            Section::Features => self.settings_features(ui),
+            Section::SmartSearch => self.settings_smart_search(ui),
+            Section::Library => self.settings_library(ui),
+            Section::Storage => self.settings_storage(ui),
+            Section::About => Self::settings_about(ui),
+        }
+    }
+
+    /// The section list and the chosen section side by side, filling `ui`.
+    fn settings_body(&mut self, ui: &mut egui::Ui, sheet: bool) -> bool {
+        let pal = Palette::of(ui.ctx());
+        let size = ui.available_size();
+        let mut close = false;
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        ui.horizontal_top(|ui| {
+            let radius = if sheet { SHEET_RADIUS } else { 0 };
+            settings_nav(ui, &pal, &mut self.dialogs.settings_section, size.y, radius);
+            close = self.settings_content(ui, Vec2::new(size.x - NAV_WIDTH, size.y), sheet);
+        });
+        close
+    }
+
+    /// Settings: its own window where the system allows it, otherwise a sheet over the main
+    /// window with the same content.
+    pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
+        if ctx.embed_viewports() {
+            self.settings_sheet(ctx);
+            return;
+        }
+        let id = settings_viewport_id();
+        if std::mem::take(&mut self.dialogs.settings_focus) {
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+        }
+        let builder = egui::ViewportBuilder::default()
+            .with_title("Settings")
+            .with_inner_size(WINDOW_SIZE)
+            .with_min_inner_size(WINDOW_MIN_SIZE)
+            .with_resizable(true);
+        let mut close = false;
+        ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            close = self.settings_viewport_ui(ui);
+        });
+        if close {
+            self.dialogs.settings_open = false;
+        }
+    }
+
+    /// The content of the Settings window; true when it asks to be closed (its close button
+    /// or Esc).
+    fn settings_viewport_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        let pal = Palette::of(&ctx);
+        let mut close = ctx.input(|i| i.viewport().close_requested());
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            // A pending question is answered "no" first.
+            if self.dialogs.model_confirm.take().is_none() {
+                close = true;
+            }
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(surface(&pal)))
+            .show(ui, |ui| {
+                self.settings_body(ui, false);
+            });
+        close
+    }
+
+    /// The sheet: Settings drawn over the main window. Closed by its × button, by Esc and by a
+    /// click outside it.
+    fn settings_sheet(&mut self, ctx: &egui::Context) {
         let pal = Palette::of(ctx);
         let screen = ctx.content_rect().size();
-        let w = (screen.x - 48.0).clamp(380.0, 640.0);
-        let h = (screen.y - 48.0).clamp(320.0, 560.0);
-        let nav_w = if w < 520.0 { 150.0 } else { 188.0 };
+        let w = (screen.x - 48.0).clamp(380.0, WINDOW_SIZE[0]);
+        let h = (screen.y - 48.0).clamp(320.0, WINDOW_SIZE[1]);
         let frame = egui::Frame::new()
-            .fill(pal.side)
+            .fill(surface(&pal))
             .stroke(Stroke::new(1.0, pal.line))
-            .corner_radius(CornerRadius::same(16))
+            .corner_radius(CornerRadius::same(SHEET_RADIUS))
             .shadow(ctx.global_style().visuals.popup_shadow)
             .inner_margin(Margin::ZERO);
+        let backdrop = if pal.dark {
+            style::SETTINGS_BACKDROP_DARK.gamma_multiply(0.8)
+        } else {
+            Color32::from_black_alpha(90)
+        };
         let mut close = false;
-        let out = egui::Modal::new(egui::Id::unique("settings-sheet"))
+        let out = egui::Modal::new(egui::Id::NULL.with("settings-sheet"))
             .frame(frame)
+            .backdrop_color(backdrop)
             .show(ctx, |ui| {
                 ui.set_width(w);
                 ui.set_height(h);
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
-                ui.horizontal_top(|ui| {
-                    settings_nav(ui, &pal, &mut self.dialogs.settings_section, nav_w, h);
-                    close = self.settings_content(ui, w - nav_w - 40.0, h - 28.0);
-                });
+                close = self.settings_body(ui, true);
             });
         let nothing_on_top = !self.dialog_open();
         if close || (out.backdrop_response.clicked() && nothing_on_top) {
             self.dialogs.settings_open = false;
         }
-    }
-
-    fn settings_appearance(&mut self, ui: &mut egui::Ui) {
-        let s = self.settings.clone();
-        heading(ui, "Colors");
-        if let Some(t) = segmented(
-            ui,
-            &[
-                (Theme::System, "Match my computer"),
-                (Theme::Light, "Light"),
-                (Theme::Dark, "Dark"),
-            ],
-            s.theme,
-        ) {
-            self.change_settings(|s| s.theme = t);
-        }
-        hint(
-            ui,
-            "“Match my computer” follows your system’s light or dark setting.",
-        );
-        ui.add_space(14.0);
-        heading(ui, "Text size");
-        if let Some(t) = segmented(
-            ui,
-            &[
-                (TextSize::Small, "Small"),
-                (TextSize::Medium, "Medium"),
-                (TextSize::Large, "Large"),
-            ],
-            s.text_size,
-        ) {
-            self.change_settings(|s| s.text_size = t);
-        }
-        hint(ui, "Everything scales with the text size.");
-        ui.add_space(14.0);
-        self.settings_photo_size(ui);
-        ui.add_space(14.0);
-        heading(ui, "Tips");
-        ui.label("Short hints appear now and then to show you what Recollect can do.");
-        ui.add_space(4.0);
-        if ui.button("Show tips again").clicked() {
-            self.change_settings(|s| s.tips_dismissed.clear());
-        }
-    }
-
-    /// The size of the photos in the grids: Small, Medium or Large (none is marked while the
-    /// size was set to something in between by pinching or scrolling).
-    fn settings_photo_size(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "Photo size");
-        let items = PhotoSizeLevel::ALL.map(|l| (Some(l), l.label()));
-        if let Some(Some(level)) = segmented(ui, &items, PhotoSizeLevel::of(self.tl.tile_size)) {
-            self.choose_photo_size(level);
-        }
-        hint(
-            ui,
-            "You can also pinch, or hold Ctrl (Cmd on a Mac) and scroll, to make photos bigger \
-             or smaller.",
-        );
-    }
-
-    fn settings_about(ui: &mut egui::Ui) {
-        let pal = Palette::of(ui.ctx());
-        ui.horizontal(|ui| {
-            ui.label(style::icon_text(icons::ICON_PHOTO_LIBRARY, 34.0).color(pal.accent));
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(style::semibold("Recollect").size(18.0));
-                ui.label(
-                    RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                        .color(pal.text2),
-                );
-            });
-        });
-        heading(ui, "Your photos stay private");
-        ui.label(
-            "Everything Recollect does happens on this computer. Your photos, videos and \
-             searches never leave it, and nothing is sent to anyone. The only time Recollect \
-             uses the internet is the one-time download for smart search.",
-        );
-        heading(ui, "Free and open source");
-        ui.label(
-            "Recollect is free software. You can read how it works, and how to build it, in \
-             the project's documentation.",
-        );
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Open-source licenses")
-            .id_salt("settings-licenses")
-            .show(ui, |ui| {
-                for line in [
-                    "Recollect: MIT or Apache License 2.0",
-                    "Inter typeface: SIL Open Font License 1.1",
-                    "Material Symbols icons: Apache License 2.0",
-                    "ONNX Runtime: MIT License",
-                    "FFmpeg: GNU LGPL",
-                ] {
-                    ui.label(line);
-                }
-            });
     }
 }
 

@@ -76,7 +76,7 @@ fn clicking_the_disabled_search_field_opens_settings() {
         app.borrow().dialogs.settings_section,
         crate::ui::settings::Section::SmartSearch
     );
-    h.get_by_label("Smart search");
+    h.get_all_by_label("Smart search").next().unwrap();
     h.get_by_label("Download and turn on (608 MB)");
 }
 
@@ -105,12 +105,36 @@ fn settings_sheet_lists_its_sections() {
     h.run();
     // Appearance is first; every section can be reached from the list on the left.
     h.get_by_label("Appearance");
-    for section in ["Appearance", "Smart search", "Library", "Storage", "About"] {
+    for section in [
+        "Appearance",
+        "Features",
+        "Smart search",
+        "Library",
+        "Storage",
+        "About",
+    ] {
         h.get_by_label(&format!("{section} settings"));
     }
+    // The list switches the section on the right.
+    h.get_by_label("Features settings").click();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Progress in the sidebar");
+    h.get_by_label("Library settings").click();
+    h.run();
+    h.get_by_label("Add a folder…");
     h.get_by_label("Close settings").click();
     h.run();
     assert!(h.query_by_label("Close settings").is_none());
+}
+
+#[test]
+fn the_settings_shortcut_opens_settings() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = harness(library(d.path()));
+    assert!(h.query_by_label("Close settings").is_none());
+    h.key_combination_modifiers(egui::Modifiers::COMMAND, &[egui::Key::Comma]);
+    h.run_steps(3);
+    h.get_by_label("Close settings");
 }
 
 #[test]
@@ -120,7 +144,7 @@ fn appearance_changes_apply_at_once() {
     let lib = library(d.path());
     let mut h = harness(Arc::clone(&lib));
     open_section(&mut h, "Appearance");
-    h.get_by_label("Match my computer");
+    h.get_by_label("System");
     h.get_by_label("Dark").click();
     h.run();
     assert_eq!(lib.settings().theme, Theme::Dark);
@@ -154,26 +178,20 @@ fn smart_search_settings_show_status_and_confirm_a_switch() {
     open_section(&mut h, "Smart search");
     h.get_by_label("On — faster");
     h.get_by_label("Best quality");
-    let described = |h: &Harness<'_>, title: &str| {
-        h.get_by_label(title)
-            .accesskit_node()
-            .description()
-            .unwrap_or_default()
-    };
-    assert_eq!(
-        described(&h, "Best quality"),
-        "Finds photos most reliably. Works best on computers with a graphics card. 486 MB."
+    h.get_by_label("Faster");
+    h.get_by_label_contains("Quicker on older computers. 608 MB.");
+    h.get_by_role_and_label(
+        egui::accesskit::Role::CheckBox,
+        "Use the graphics card when available",
     );
-    assert_eq!(
-        described(&h, "Faster"),
-        "Quicker on older computers. 608 MB."
-    );
-    h.get_by_label("Use the graphics card when available");
     h.get_by_label("Details");
     assert!(h.query_by_label_contains("huggingface").is_none());
     // The graphics card option is saved at once.
-    h.get_by_label("Use the graphics card when available")
-        .click();
+    h.get_by_role_and_label(
+        egui::accesskit::Role::CheckBox,
+        "Use the graphics card when available",
+    )
+    .click();
     h.run();
     assert!(!lib.settings().use_gpu);
     // Status in words while things happen.
@@ -194,16 +212,20 @@ fn smart_search_settings_show_status_and_confirm_a_switch() {
     // Choosing the other option asks first and explains what happens.
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch to Best quality?");
-    h.get_by_label_contains("look at all your photos again");
+    h.get_by_label_contains("Change to Best quality?");
+    h.get_by_label_contains("look through your photos again");
     h.get_by_label_contains("one-time download of 486 MB");
+    assert_eq!(lib.model().id, registry::CLIP_B32.id, "asks first");
     h.get_by_label("Cancel").click();
     h.run_steps(3);
-    assert!(h.query_by_label("Switch to Best quality?").is_none());
+    assert!(
+        h.query_by_label_contains("Change to Best quality?")
+            .is_none()
+    );
     assert_eq!(lib.model().id, registry::CLIP_B32.id, "nothing changed yet");
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch").click();
+    h.get_by_label("Change").click();
     settle(&mut h, || lib.model().id == registry::SIGLIP_B16.id);
     assert_eq!(
         lib.settings().model.as_deref(),
@@ -315,7 +337,8 @@ fn about_states_the_privacy_promise_and_the_version() {
     open_section(&mut h, "About");
     h.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
     h.get_by_label("Your photos stay private");
-    h.get_by_label_contains("never leave it");
+    h.get_by_label_contains("Your photos never leave this computer.");
+    h.get_by_label_contains("never changes or deletes your files");
     h.get_by_label_contains("one-time download for smart search");
     h.get_by_label("Open-source licenses").click();
     h.run_steps(3);
@@ -334,10 +357,13 @@ fn escape_closes_the_sheet_and_the_topmost_question_first() {
     open_section(&mut h, "Smart search");
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch to Best quality?");
+    h.get_by_label_contains("Change to Best quality?");
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
-    assert!(h.query_by_label("Switch to Best quality?").is_none());
+    assert!(
+        h.query_by_label_contains("Change to Best quality?")
+            .is_none()
+    );
     h.get_by_label("Close settings");
     h.key_press(egui::Key::Escape);
     h.run_steps(3);

@@ -15,6 +15,8 @@ pub(super) struct Dialogs {
     pub(super) help_open: bool,
     pub(super) help_topic: help::HelpTopic,
     pub(super) settings_open: bool,
+    /// Settings was asked for while its window is open: bring that window forward.
+    pub(super) settings_focus: bool,
     pub(super) settings_section: settings::Section,
     /// A smart-search choice waiting for the user to confirm the switch.
     pub(super) model_confirm: Option<&'static str>,
@@ -30,7 +32,6 @@ impl Dialogs {
             || self.add_folder_dialog.is_some()
             || self.stop_folder.is_some()
             || self.help_open
-            || self.model_confirm.is_some()
     }
 
     /// Esc: closes the questions and the help sheet (a deletion already sent to the library
@@ -49,6 +50,12 @@ impl Dialogs {
 }
 
 impl App {
+    /// Whether Settings is open as a sheet over the main window (it blocks the window behind
+    /// it). As its own window it blocks nothing.
+    pub(super) fn settings_is_modal(&self, ctx: &egui::Context) -> bool {
+        self.dialogs.settings_open && ctx.embed_viewports()
+    }
+
     pub(super) fn dialog_open(&self) -> bool {
         self.dialogs.any_open()
     }
@@ -56,7 +63,7 @@ impl App {
     /// True when keys must not reach the views: a text field has focus, Settings is open, an
     /// album dialog is, or a menu is open (keys then belong to the menu).
     pub(super) fn keys_blocked(&self, ctx: &egui::Context) -> bool {
-        self.dialogs.settings_open
+        self.settings_is_modal(ctx)
             || self.dialog_open()
             || ctx.text_edit_focused()
             || self.search_help.inside

@@ -108,42 +108,35 @@ pub fn filter_chip(ui: &mut egui::Ui, text: &str, accessible: &str, active: bool
     r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
-/// A switch (40 by 24 points, knob 18) with its `label` beside it. Behaves like a checkbox for
-/// assistive technology; the label is part of the click area.
-pub fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> Response {
-    const GAP: f32 = 10.0;
+/// Paints a switch track and knob in `rect` (40 by 24 points).
+fn paint_switch(ui: &egui::Ui, rect: egui::Rect, on: bool) {
     let pal = Palette::of(ui.ctx());
-    let font = TextStyle::Body.resolve(ui.style());
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), font, pal.text);
-    let size = Vec2::new(SWITCH_SIZE.x + GAP + galley.size().x, SWITCH_SIZE.y);
-    let (rect, mut r) = ui.allocate_exact_size(size, Sense::click());
+    let track = if on { super::SWITCH_ON } else { pal.sel };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(12), track);
+    let inset = (SWITCH_SIZE.y - SWITCH_KNOB) / 2.0;
+    let x = if on {
+        rect.right() - inset - SWITCH_KNOB / 2.0
+    } else {
+        rect.left() + inset + SWITCH_KNOB / 2.0
+    };
+    ui.painter().circle_filled(
+        egui::pos2(x, rect.center().y),
+        SWITCH_KNOB / 2.0,
+        Color32::WHITE,
+    );
+}
+
+/// A switch without text beside it, for rows that draw their own title and description.
+/// `label` is what assistive technology reads.
+pub fn switch_bare(ui: &mut egui::Ui, on: &mut bool, label: &str) -> Response {
+    let (rect, mut r) = ui.allocate_exact_size(SWITCH_SIZE, Sense::click());
     if r.clicked() {
         *on = !*on;
         r.mark_changed();
     }
     if ui.is_rect_visible(rect) {
-        let track_rect = egui::Rect::from_min_size(rect.min, SWITCH_SIZE);
-        let track = if *on { super::SWITCH_ON } else { pal.sel };
-        ui.painter()
-            .rect_filled(track_rect, CornerRadius::same(12), track);
-        let inset = (SWITCH_SIZE.y - SWITCH_KNOB) / 2.0;
-        let x = if *on {
-            track_rect.right() - inset - SWITCH_KNOB / 2.0
-        } else {
-            track_rect.left() + inset + SWITCH_KNOB / 2.0
-        };
-        ui.painter().circle_filled(
-            egui::pos2(x, track_rect.center().y),
-            SWITCH_KNOB / 2.0,
-            Color32::WHITE,
-        );
-        let text_pos = egui::pos2(
-            track_rect.right() + GAP,
-            rect.center().y - galley.size().y / 2.0,
-        );
-        ui.painter().galley(text_pos, galley, pal.text);
+        paint_switch(ui, rect, *on);
     }
     let value = *on;
     r.widget_info(|| {

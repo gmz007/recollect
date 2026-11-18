@@ -483,14 +483,15 @@ impl App {
         }
     }
 
-    /// Escape closes the topmost thing first: a question, otherwise the Settings sheet.
+    /// Escape closes the topmost thing first: a question, otherwise the Settings sheet (the
+    /// Settings window handles its own Escape).
     fn close_topmost_on_escape(&mut self, ctx: &egui::Context) {
-        if (self.dialog_open() || self.dialogs.settings_open)
+        if (self.dialog_open() || self.settings_is_modal(ctx))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             if self.dialog_open() {
                 self.dialogs.cancel();
-            } else {
+            } else if self.dialogs.model_confirm.take().is_none() {
                 self.dialogs.settings_open = false;
             }
         }
@@ -535,9 +536,8 @@ impl App {
     /// Sheets, dialogs, the search help and the toasts, drawn over the panels.
     fn show_overlays(&mut self, ctx: &egui::Context) {
         if self.dialogs.settings_open {
-            self.settings_sheet(ctx);
+            self.settings_window(ctx);
         }
-        self.model_confirm_dialog(ctx);
         if self.dialogs.help_open {
             self.help_sheet(ctx);
         }

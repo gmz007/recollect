@@ -145,7 +145,7 @@ fn take_size_keys(ctx: &egui::Context) -> Vec<SizeInput> {
 impl App {
     /// Reads this frame's pinch, Ctrl/Cmd and scroll, and size keys while a grid is shown.
     pub(super) fn handle_photo_size(&mut self, ctx: &egui::Context, grid_shown: bool) {
-        if !grid_shown || self.dialogs.settings_open || self.dialog_open() {
+        if !grid_shown || self.settings_is_modal(ctx) || self.dialog_open() {
             return;
         }
         let mut inputs = Vec::new();

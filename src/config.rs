@@ -152,6 +152,10 @@ pub fn clamp_photo_size(size: f32) -> f32 {
 /// User-adjustable settings, stored as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a flat settings file: each switch is independent"
+)]
 pub struct Settings {
     /// Embedding model id (see [`crate::model::registry`]). `None` = pick by hardware.
     pub model: Option<String>,
@@ -178,6 +182,16 @@ pub struct Settings {
     pub recent_searches: Vec<String>,
     /// Ids of the one-time tips the user has already seen or closed.
     pub tips_dismissed: Vec<String>,
+    /// Show the "On this day" banner at the top of Photos.
+    pub show_on_this_day: bool,
+    /// Show one-time tips.
+    pub show_tips: bool,
+    /// Remember searches and offer them in the search box.
+    pub remember_searches: bool,
+    /// Offer example searches in the search box.
+    pub show_example_searches: bool,
+    /// Show the progress ring at the foot of the sidebar.
+    pub show_sidebar_progress: bool,
 }
 
 impl Default for Settings {
@@ -195,6 +209,11 @@ impl Default for Settings {
             welcome_done: false,
             recent_searches: Vec::new(),
             tips_dismissed: Vec::new(),
+            show_on_this_day: true,
+            show_tips: true,
+            remember_searches: true,
+            show_example_searches: true,
+            show_sidebar_progress: true,
         }
     }
 }
@@ -264,6 +283,11 @@ mod tests {
             welcome_done: true,
             recent_searches: vec!["snow".into(), "dog".into()],
             tips_dismissed: vec!["search".into()],
+            show_on_this_day: false,
+            show_tips: false,
+            remember_searches: false,
+            show_example_searches: false,
+            show_sidebar_progress: false,
         };
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap(), s);
@@ -294,6 +318,21 @@ mod tests {
         assert_eq!(Settings::load(&p).unwrap(), Settings::default());
         assert!((TextSize::Small.zoom() - 12.0 / 13.0).abs() < 1e-6);
         assert!((TextSize::Large.zoom() - 15.0 / 13.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn files_from_before_the_features_switches_have_every_feature_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.toml");
+        std::fs::write(&p, "theme = \"Dark\"\nrecent_searches = [\"snow\"]\n").unwrap();
+        let l = Settings::load(&p).unwrap();
+        assert!(
+            l.show_on_this_day
+                && l.show_tips
+                && l.remember_searches
+                && l.show_example_searches
+                && l.show_sidebar_progress
+        );
     }
 
     #[test]

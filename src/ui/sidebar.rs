@@ -539,7 +539,9 @@ impl App {
             .show(ui, |ui| {
                 ui.add_space(8.0);
                 if let Some((text, fraction)) = activity {
-                    self.activity_row(ui, &text, fraction);
+                    if self.settings.show_sidebar_progress {
+                        self.activity_row(ui, &text, fraction);
+                    }
                 } else if offer {
                     let card = egui::Frame::new()
                         .fill(pal.field)

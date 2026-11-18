@@ -142,7 +142,7 @@ more than a few hundred lines of code.
 | `media/` | `scan`, `image`, `metadata` (capture dates), `video/` (`stream`, `convert`, `sample`, `still`) |
 | `model/` | `registry`, `download`, `embedder` |
 | `search.rs` | turning index candidates into hits |
-| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `ruler/` (the timeline ruler that replaces the scroll bar), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/`, and one file per remaining screen or widget |
+| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `ruler/` (the timeline ruler that replaces the scroll bar), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/` (the Settings window: one file per section, `rows` for the shared row layout), and one file per remaining screen or widget |
 | `cli.rs`, `bench.rs`, `eval.rs` | command-line entry points |
 
 Functions are kept to 50 lines of code (a clippy threshold); longer scenario tests are the
@@ -199,3 +199,17 @@ crash reporting, no remote APIs. Library folders are only ever read.
   (caption queries → Recall@K, category queries → precision@10, video queries → Hit@K).
 - `recollect --home <scratch> bench search|rescan` measures startup, memory, search latency and
   rescan time on a synthetic library of configurable size.
+
+## Settings window
+
+Settings is an egui immediate viewport (`show_viewport_immediate`), so it reads and changes the
+app's state directly, with no channels. Where the backend embeds viewports (`Context::embed_viewports`, as in
+headless tests) the same content is shown as a centred sheet over the main window. The window
+is about 820 by 600 points (minimum 640 by 480); the sheet keeps the same proportions. Esc and the
+close button close only Settings; a pending search-style question is answered first.
+
+The Features switches are fields of `Settings` (`show_on_this_day`, `show_tips`,
+`remember_searches`, `show_example_searches`, `show_sidebar_progress`), all `true` by default so
+older files load unchanged. Each one is checked where its feature is drawn: the banner, the tip
+card, the recording and offering of recent searches, the example searches in the search menu and
+the ring in the sidebar's foot.

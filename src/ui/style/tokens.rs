@@ -63,21 +63,7 @@ pub const OVERLAY_WHITE_TEXT: Color32 = rgb(0x1C1C1B);
 /// Black overlays on photos (55 %).
 pub const OVERLAY_BLACK: Color32 = Color32::from_rgba_unmultiplied_const(0, 0, 0, 140);
 /// The Settings window and the backdrop behind it in the dark theme.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "defined with the other theme values; used as screens adopt them"
-    )
-)]
 pub const SETTINGS_WINDOW_DARK: Color32 = rgb(0x1A1A19);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "defined with the other theme values; used as screens adopt them"
-    )
-)]
 pub const SETTINGS_BACKDROP_DARK: Color32 = rgb(0x0C0C0C);
 
 /// Surfaces and text of the photo viewer in one theme.

@@ -4,6 +4,7 @@
 
 mod albums;
 mod favorites;
+mod features;
 mod guide;
 mod photo_grid;
 mod pill;

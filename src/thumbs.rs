@@ -72,6 +72,19 @@ fn save_jpeg(file: &Path, rgb: &Rgb) -> Result<()> {
     })
 }
 
+/// The bytes the thumbnails in `cache_dir` take.
+pub fn used_bytes(cache_dir: &Path) -> u64 {
+    let Ok(dirs) = std::fs::read_dir(cache_dir) else {
+        return 0;
+    };
+    dirs.flatten()
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flat_map(std::iter::Iterator::flatten)
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
+
 /// Deletes the least recently used thumbnails until the cache is below `max_bytes`.
 /// Returns the number of files removed.
 pub fn prune(cache_dir: &Path, max_bytes: u64) -> usize {

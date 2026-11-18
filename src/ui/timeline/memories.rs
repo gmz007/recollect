@@ -75,6 +75,9 @@ impl App {
     /// date in earlier years and the user has not hidden it today.
     pub(super) fn on_this_day_banner(&mut self) -> Option<Banner> {
         let today = self.today();
+        if !self.settings.show_on_this_day {
+            return None;
+        }
         if self.settings.on_this_day_hidden_on.as_deref() == Some(today.to_string().as_str()) {
             return None;
         }

@@ -85,9 +85,8 @@ impl App {
     /// The top bar: the search field in the middle, Help and Settings on the right.
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         // The sheets must not stack on top of a dialog, Settings or a menu.
-        let sheets_allowed = !(self.dialogs.settings_open
-            || self.dialog_open()
-            || egui::Popup::is_any_open(ui.ctx()));
+        let others_allowed = !(self.dialog_open() || egui::Popup::is_any_open(ui.ctx()));
+        let sheets_allowed = others_allowed && !self.settings_is_modal(ui.ctx());
         if sheets_allowed && ui.input(|i| i.key_pressed(egui::Key::F1)) {
             self.dialogs.help_open = true;
         }

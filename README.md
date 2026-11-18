@@ -51,18 +51,26 @@ computer.
   result offers **Find similar** (the button in its top right corner while hovered), shows the
   year it was taken in its bottom right corner, and a video's tile shows the matching moment,
   which plays from that point when clicked. **×** in the search box clears the search.
-- **Settings** (the gear in the top bar) opens a sheet with a list of sections. Changes apply at
-  once; only switching smart search asks first, because it makes Recollect look at your photos
-  again.
-  - **Appearance:** colors (match my computer, light, dark) and text size (normal, large).
-  - **Smart search:** whether it is on, off or downloading; a choice between *Best quality* and
-    *Faster* with their download sizes; whether to use the graphics card; a folded **Details**
+- **Settings** (the gear in the top bar, or Ctrl/Cmd+,) opens in its own window, with a list of
+  sections on the left; opening it again brings the open window forward, and Esc or the window's
+  close button closes only Settings. (Where the system can't open a second window, it shows as a
+  sheet over the main one.) Changes apply at once; only changing the search style asks first,
+  because it makes Recollect look at your photos again.
+  - **Appearance:** color (System, Light, Dark), text size and photo size (Small, Medium,
+    Large).
+  - **Features:** switches, all on by default, for **On this day**, **Tips**, **Remember recent
+    searches**, **Example searches** and **Progress in the sidebar**. Turning recent searches off
+    stops recording new ones and keeps the old ones until **Clear now**. **Show again** brings
+    back the tips you closed.
+  - **Smart search:** whether it is on, off or downloading; a **Search style** of *Best quality* or
+    *Faster* (changing it asks first; the download size is shown); whether to use the graphics card; a folded **Details**
     part with the name, license and source of what it downloads.
   - **Library:** your folders (**Stop showing…** asks first and never touches your files),
     **Add a folder…**, how many photos and videos are ready for search and how many couldn't be
     opened (**Show** lists them, **Try again** retries), and **Check for new photos**. A folded
     **Advanced** part has the technical options.
-  - **Storage:** how much room previews may take, and where Recollect keeps its data, with an
+  - **Storage:** how much room photo previews take (with **Clear previews**), how much they may
+    take, and where Recollect keeps its data, with an
     **Open folder** button for each.
   - **About:** the version, the privacy promise (nothing leaves your computer; the only use of
     the internet is the smart-search download) and the licenses of what Recollect is built on.
@@ -168,7 +176,7 @@ screen if you would rather not):
    away; search works once the download finishes.
 
 People who already have folders never see the welcome. Afterwards, short one-time tips appear at
-useful moments (turn them back on in Settings, Appearance, **Show tips again**), the search field
+useful moments (turn them off or bring them back in Settings, Features), the search field
 shows example and recent searches when you click it (stored on your computer only; **Clear recent
 searches** removes them), and the **?** button opens a Help sheet (getting started, searching,
 organizing, keyboard shortcuts, privacy).
