@@ -3,61 +3,38 @@
 use super::*;
 
 #[test]
-fn timeline_shows_month_headers_and_regroups() {
+fn the_timeline_has_day_headers_and_no_view_header() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
-    let mut h = album_harness(&app);
-    h.get_by_label("December 2019 · 1");
-    h.get_by_label("240 photos");
-    h.get_by_label("Thumbnail size");
-    h.get_by_label("Sort: Newest first");
-    // The "Months" menu regroups the timeline.
-    h.get_by_label("Months").click();
-    h.run();
-    h.get_by_label("Years").click();
-    h.run();
-    h.get_by_label("2019 · 12");
-    assert!(h.query_by_label("December 2019 · 1").is_none());
-    h.get_by_label("Years").click();
-    h.run();
-    h.get_by_label("Days").click();
-    h.run();
-    h.get_by_label("Sunday 15 December 2019 · 1");
-    // The sort menu says what it is set to and flips the order.
-    h.get_by_label("Sort: Newest first").click();
-    h.run_steps(8);
-    h.get_by_label("Oldest first").click();
-    // The list is read again in the new order (a spinner shows meanwhile).
-    h.run_steps(2);
-    settle(&mut h, || {
-        let a = app.borrow();
-        !a.tl.newest_first && a.tl.awaiting.is_none() && a.tl.loaded
-    });
-    h.run_steps(2);
-    h.get_by_label("Sort: Oldest first");
-    assert!(!app.borrow().tl.newest_first);
+    let h = album_harness(&app);
+    h.get_by_label("Sunday 15 December 2019");
+    // The title row with its count and the size, sort and grouping controls are gone.
+    assert!(h.query_by_label("240 photos").is_none());
+    assert!(h.query_by_label("Thumbnail size").is_none());
+    assert!(h.query_by_label("Sort: Newest first").is_none());
+    assert!(h.query_by_label("Months").is_none());
 }
 
 #[test]
-fn navigator_jumps_to_a_year() {
+fn the_top_bar_holds_only_help_and_settings_beside_the_search_field() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
-    let mut h = album_harness(&app);
-    assert!(h.query_by_label("December 2005 · 1").is_none());
-    // The date list is folded away until asked for.
-    assert!(h.query_by_label("2005 (12)").is_none());
-    h.get_by_label("Jump to date").click();
-    h.run();
-    // The sidebar's date list is short in a window this size: scroll the year into view.
-    h.get_by_label("2005 (12)").scroll_to_me();
-    h.run();
-    h.get_by_label("2005 (12)").click();
-    h.run();
-    h.run();
-    h.get_by_label("December 2005 · 1");
-    assert!(h.query_by_label("December 2019 · 1").is_none());
-    // The year stays expanded and its months are listed.
-    h.get_by_label("June (1)");
+    let h = album_harness(&app);
+    h.get_by_label("Help");
+    h.get_by_label("Settings");
+    // The type filter lives with the search results, not in the bar.
+    assert!(h.query_by_label("Everything").is_none());
+    assert!(h.query_by_label("Photos only").is_none());
+}
+
+#[test]
+fn the_sidebar_has_no_date_list() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let h = album_harness(&app);
+    assert!(h.query_by_label("Jump to date").is_none());
+    h.get_by_label("Recently added");
+    h.get_by_label("Favorites");
 }
 
 #[test]
@@ -86,8 +63,7 @@ fn banner_shows_while_the_timeline_stays_visible() {
     h.get_by_label("Turn on smart search to find photos by describing them");
     h.get_by_label("Turn on");
     h.get_by_label("Not now");
-    h.get_by_label("December 2019 · 1");
-    assert_eq!(app.borrow().tl.group, Group::Month);
+    h.get_by_label("Sunday 15 December 2019");
 }
 
 #[test]
@@ -98,12 +74,19 @@ fn clicking_a_tile_opens_the_viewer_with_the_details() {
     h.get_by_label("Item img1.jpg").click();
     h.run_steps(3);
     assert!(app.borrow().viewer.is_some());
+    assert!(h.query_by_label("Details").is_none(), "closed at first");
+    h.get_by_label("Info").click();
+    h.run_steps(3);
     h.get_by_label("img1.jpg");
-    h.get_by_label_contains("Sunday 15 December 2019");
+    assert_eq!(
+        h.get_all_by_label_contains("Sunday 15 December 2019")
+            .count(),
+        2
+    );
     h.get_by_label("Test Camera");
-    h.get_by_label("4000×3000");
+    h.get_by_label_contains("4000×3000");
     h.get_by_label("Find similar photos");
-    h.get_by_label("Open with default app");
+    h.get_by_label("More");
 }
 
 #[test]
@@ -135,25 +118,27 @@ fn only_the_circle_and_modifier_keys_select_instead_of_opening() {
 }
 
 #[test]
-fn on_this_day_strip_opens_the_viewer_on_its_own_list() {
+fn the_on_this_day_banner_opens_the_viewer_on_its_own_list() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     // 15 March: one photo per year from 2000 to 2019 was taken on that day.
     app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
     let mut h = album_harness(&app);
     h.get_by_label("On this day");
-    h.get_by_label("7 years ago");
-    h.get_by_label("26 years ago");
-    // Newest first: 2019 comes first. March 2019 is img10 in `spread_items` (Dec = 1).
-    h.get_by_label("On this day img10.jpg").click();
+    // The newest of them is from 2019.
+    h.get_by_label("15 March over the years");
+    h.get_by_label("See 20 photos").click();
+    h.run_steps(3);
+    // March 2019 is img10 in `spread_items` (Dec = 1).
+    h.get_by_label_contains("1 of 20");
+    h.get_by_label("Info").click();
     h.run_steps(3);
     h.get_by_label("img10.jpg");
-    h.get_by_label("1 of 20");
     h.key_press(egui::Key::ArrowRight);
     h.run_steps(3);
-    h.get_by_label("2 of 20");
+    h.get_by_label_contains("2 of 20");
     h.get_by_label("img22.jpg"); // March 2018
-    // Not in the other views.
+    // Not in the other views. One Esc leaves the viewer, details open or not.
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     h.get_by_label("Recently added").click();
@@ -162,13 +147,99 @@ fn on_this_day_strip_opens_the_viewer_on_its_own_list() {
 }
 
 #[test]
-fn on_this_day_tiles_open_and_have_no_selection_circle() {
+fn the_on_this_day_banner_can_be_hidden_until_tomorrow() {
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), true);
     app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("On this day");
+    h.get_by_label("Hide On this day").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("On this day").is_none());
+    let lib = Arc::clone(&app.borrow().lib);
+    assert_eq!(
+        lib.settings().on_this_day_hidden_on.as_deref(),
+        Some("2026-03-15")
+    );
+    // The next day, it is back (there are photos from the 16th too: none, so pick another day).
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 4, 15);
+    h.run_steps(3);
+    h.get_by_label("On this day");
+}
+
+#[test]
+fn there_is_no_on_this_day_banner_without_photos_from_that_day() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    // Photos were taken on the 15th of each month only.
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 16);
     let h = album_harness(&app);
-    h.get_by_label("On this day img10.jpg");
-    // img10 is only on screen in the strip (the grid starts at the newest photos).
-    assert!(h.query_by_label("Select img10.jpg").is_none());
-    assert!(h.query_by_label("Select On this day img10.jpg").is_none());
+    assert!(h.query_by_label("On this day").is_none());
+    assert!(h.query_by_label_contains("See ").is_none());
+}
+
+#[test]
+fn the_on_this_day_banner_names_one_year_when_all_photos_are_from_it() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    let mut items = spread_items();
+    // Only 2019 has a photo on 15 March; the rest are moved off that day.
+    for it in &mut items {
+        if it.taken_at < titem(0, 2019, 1, 1).taken_at {
+            it.taken_at += 86_400;
+        }
+    }
+    app.borrow_mut().inject_timeline(items);
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("15 March, 7 years ago");
+    h.get_by_label("See 1 photo").click();
+    h.run_steps(3);
+    h.get_by_label_contains("1 of 1");
+}
+
+#[test]
+fn the_on_this_day_count_is_what_the_viewer_opens() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    // More photos of one day than the old limit of 30, all in one year.
+    let items: Vec<_> = (0..45)
+        .map(|n| {
+            let mut it = titem(n + 1, 2019, 3, 15);
+            it.taken_at += n;
+            it
+        })
+        .collect();
+    app.borrow_mut().inject_timeline(items);
+    app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+    let mut h = album_harness(&app);
+    h.get_by_label("15 March, 7 years ago");
+    h.get_by_label("See 45 photos").click();
+    h.run_steps(3);
+    h.get_by_label_contains("1 of 45");
+}
+
+#[test]
+fn photos_shows_that_it_is_loading_while_a_load_is_pending() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), true);
+    {
+        let mut a = app.borrow_mut();
+        a.tl.view = View::Favorites;
+        a.inject_timeline(Vec::new());
+        // A load is on its way (the answer never comes in this test).
+        let filter = a.tl.filter();
+        a.tl.awaiting = Some((u64::MAX, filter));
+    }
+    // The spinner never rests, so the frames are stepped by hand.
+    let shown = Rc::clone(&app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    h.run_steps(3);
+    h.get_by_label("Loading…");
+    // Once the load is over, it gives way to the empty state.
+    app.borrow_mut().tl.awaiting = None;
+    h.run_steps(3);
+    assert!(h.query_by_label("Loading…").is_none());
 }

@@ -1,11 +1,9 @@
-//! Dates as the album shows them: section keys and headings, the year and month index,
+//! Dates as the album shows them: section keys and headings,
 //! and how a capture time is written out.
 
-use super::Group;
 use crate::media::metadata::DateSource;
 use crate::store::db::TimelineItem;
 use chrono::{Datelike, NaiveDate};
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub(super) fn date_of(taken_at: i64) -> NaiveDate {
@@ -14,15 +12,24 @@ pub(super) fn date_of(taken_at: i64) -> NaiveDate {
         .unwrap_or_default()
 }
 
-/// Section key of a capture time (local wall-clock seconds stored as if UTC). Keys of
+/// Section key of a capture time (local wall-clock seconds stored as if UTC): the day. Keys of
 /// neighbouring sections are not necessarily adjacent integers; they only identify a section.
-pub fn group_key(taken_at: i64, group: Group) -> i64 {
-    let d = date_of(taken_at);
-    match group {
-        Group::Day => i64::from(d.num_days_from_ce()),
-        Group::Month => i64::from(d.year()) * 12 + i64::from(d.month0()),
-        Group::Year => i64::from(d.year()),
-    }
+pub fn day_key(taken_at: i64) -> i64 {
+    i64::from(date_of(taken_at).num_days_from_ce())
+}
+
+/// The first and last year in which the items were taken. Items dated only by their file's own
+/// time are left out (that is when the file was saved, not when it was taken); `None` when no
+/// item has a known date.
+pub fn year_range(items: &[TimelineItem]) -> Option<(i32, i32)> {
+    items
+        .iter()
+        .filter(|it| it.date_source != DateSource::File)
+        .map(|it| date_of(it.taken_at).year())
+        .fold(None, |range, y| match range {
+            None => Some((y, y)),
+            Some((lo, hi)) => Some((lo.min(y), hi.max(y))),
+        })
 }
 
 /// `1204` becomes `1,204`.
@@ -38,71 +45,25 @@ pub fn thousands(n: usize) -> String {
     out
 }
 
-/// Section title such as "Saturday 4 July 2019 · 12", "July 2019 · 132" or "2019 · 1,204".
-pub fn header_text(group: Group, key: i64, count: usize) -> String {
-    let name = match group {
-        Group::Day => i32::try_from(key)
-            .ok()
-            .and_then(NaiveDate::from_num_days_from_ce_opt)
-            .map(|d| d.format("%A %-d %B %Y").to_string()),
-        Group::Month => i32::try_from(key.div_euclid(12))
-            .ok()
-            .zip(u32::try_from(key.rem_euclid(12) + 1).ok())
-            .and_then(|(year, month)| NaiveDate::from_ymd_opt(year, month, 1))
-            .map(|d| d.format("%B %Y").to_string()),
-        Group::Year => Some(key.to_string()),
+/// Heading of the section of the day `key` (see [`day_key`]) as seen on `today`: "Today",
+/// "Yesterday", or the weekday and date such as "Sunday 15 November", with the year added when it
+/// is not this year ("Saturday 4 July 2019").
+pub fn day_header_text(key: i64, today: NaiveDate) -> String {
+    let Some(day) = i32::try_from(key)
+        .ok()
+        .and_then(NaiveDate::from_num_days_from_ce_opt)
+    else {
+        return String::new();
+    };
+    if day == today {
+        "Today".to_string()
+    } else if today.pred_opt() == Some(day) {
+        "Yesterday".to_string()
+    } else if day.year() == today.year() {
+        day.format("%A %-d %B").to_string()
+    } else {
+        day.format("%A %-d %B %Y").to_string()
     }
-    .unwrap_or_default();
-    format!("{name} · {}", thousands(count))
-}
-
-/// Years (newest first) with their months, for the date navigator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct YearEntry {
-    pub year: i32,
-    pub count: usize,
-    /// Index of the year's first item in display order.
-    pub first: usize,
-    pub months: Vec<MonthEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonthEntry {
-    pub month: u32,
-    pub count: usize,
-    pub first: usize,
-}
-
-pub fn date_index(items: &[TimelineItem]) -> Vec<YearEntry> {
-    let mut by_month: BTreeMap<(i32, u32), (usize, usize)> = BTreeMap::new();
-    for (i, it) in items.iter().enumerate() {
-        let d = date_of(it.taken_at);
-        let e = by_month.entry((d.year(), d.month())).or_insert((0, i));
-        e.0 += 1;
-        e.1 = e.1.min(i);
-    }
-    let mut years: Vec<YearEntry> = Vec::new();
-    for (&(year, month), &(count, first)) in by_month.iter().rev() {
-        let m = MonthEntry {
-            month,
-            count,
-            first,
-        };
-        match years.last_mut() {
-            Some(y) if y.year == year => {
-                y.count += count;
-                y.first = y.first.min(first);
-                y.months.push(m);
-            }
-            _ => years.push(YearEntry {
-                year,
-                count,
-                first,
-                months: vec![m],
-            }),
-        }
-    }
-    years
 }
 
 pub(super) fn fmt_taken(item: &TimelineItem) -> String {
@@ -113,6 +74,20 @@ pub(super) fn fmt_taken(item: &TimelineItem) -> String {
 pub fn fmt_date(taken_at: i64) -> String {
     chrono::DateTime::from_timestamp(taken_at, 0)
         .map(|d| d.naive_utc().format("%A %-d %B %Y, %H:%M").to_string())
+        .unwrap_or_default()
+}
+
+/// "Saturday 4 July 2019": the day alone.
+pub fn fmt_day(taken_at: i64) -> String {
+    chrono::DateTime::from_timestamp(taken_at, 0)
+        .map(|d| d.naive_utc().format("%A %-d %B %Y").to_string())
+        .unwrap_or_default()
+}
+
+/// "12:30": the time of day alone, as [`fmt_date`] shows it.
+pub fn fmt_clock(taken_at: i64) -> String {
+    chrono::DateTime::from_timestamp(taken_at, 0)
+        .map(|d| d.naive_utc().format("%-H:%M").to_string())
         .unwrap_or_default()
 }
 

@@ -4,7 +4,12 @@
 
 mod albums;
 mod favorites;
+mod features;
 mod guide;
+mod photo_grid;
+mod pill;
+mod results;
+mod ruler;
 mod search;
 mod settings;
 mod timeline;
@@ -12,7 +17,7 @@ mod viewer;
 mod welcome;
 
 use super::App;
-use super::timeline::{Group, View};
+use super::timeline::View;
 use crate::Library;
 use crate::config::Paths;
 use crate::media::MediaKind;
@@ -53,15 +58,13 @@ fn library(dir: &std::path::Path) -> Arc<Library> {
     Library::open(Paths::under(dir), Some(registry::CLIP_B32.id)).unwrap()
 }
 
-/// Creates sparse placeholder model files so the app believes the model is installed.
+/// Creates empty placeholder model files so the app believes the model is installed.
 fn fake_install(lib: &Library) {
+    download::PLACEHOLDERS_COUNT.store(true, std::sync::atomic::Ordering::Relaxed);
     let dir = download::model_dir(&lib.paths().models_dir(), lib.model());
     std::fs::create_dir_all(&dir).unwrap();
     for f in lib.model().files {
-        std::fs::File::create(dir.join(f.local))
-            .unwrap()
-            .set_len(f.size)
-            .unwrap();
+        std::fs::File::create(dir.join(f.local)).unwrap();
     }
     assert!(lib.model_installed());
 }
@@ -337,7 +340,7 @@ fn files_app(d: &std::path::Path, n: usize) -> (Arc<Library>, Rc<RefCell<App>>) 
                 (
                     r.id,
                     Capture {
-                        taken_at: 1_500_000_000 + i * 86_400,
+                        taken_at: 1_500_000_000 + i / 40 * 86_400 + i * 60,
                         source: DateSource::Exif,
                         camera: None,
                         duration: None,
@@ -363,11 +366,16 @@ fn type_name(h: &mut Harness<'_>, name: &str) {
     h.run_steps(2);
 }
 
-/// The album grouped by year with small tiles, so the first twelve photos are all on screen.
+/// `spread_items` with the first 24 photos taken on one day (under one heading) and small
+/// tiles, so the first twelve photos are all on screen.
 fn small_tiles_harness(app: &Rc<RefCell<App>>) -> Harness<'static> {
     {
         let mut a = app.borrow_mut();
-        a.tl.group = super::timeline::Group::Year;
+        let mut items = spread_items();
+        for it in items.iter_mut().take(24) {
+            it.taken_at = titem(0, 2019, 12, 15).taken_at;
+        }
+        a.inject_timeline(items);
         a.tl.tile_size = 96.0;
     }
     album_harness(app)

@@ -1,0 +1,263 @@
+//! Chips, switches, the floating pill and the look of menu contents.
+
+use super::{CHIP_HEIGHT, CONTROL_RADIUS, Palette};
+use egui::{Color32, CornerRadius, Frame, Margin, Response, Sense, Stroke, TextStyle, Vec2};
+
+/// Height of the floating pill (selection bar and confirmations).
+pub const PILL_HEIGHT: f32 = 44.0;
+/// Height of a row in a menu or popover.
+const MENU_ROW: f32 = 32.0;
+/// Width and height of a switch, and the diameter of its knob.
+const SWITCH_SIZE: Vec2 = Vec2::new(40.0, 24.0);
+const SWITCH_KNOB: f32 = 18.0;
+
+fn chip_radius() -> CornerRadius {
+    CornerRadius::same((CHIP_HEIGHT / 2.0) as u8)
+}
+
+/// Sets up the contents of a menu or popover: 32 point rows with a rounded hover fill.
+pub fn menu_body(ui: &mut egui::Ui) {
+    let pal = Palette::of(ui.ctx());
+    let radius = CornerRadius::same(CONTROL_RADIUS);
+    let spacing = ui.spacing_mut();
+    spacing.interact_size.y = MENU_ROW;
+    spacing.item_spacing.y = 2.0;
+    spacing.button_padding = Vec2::new(10.0, 0.0);
+    ui.visuals_mut().override_text_color = None;
+    let w = &mut ui.visuals_mut().widgets;
+    for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+        state.corner_radius = radius;
+        state.fg_stroke.color = pal.text;
+        state.bg_stroke = Stroke::NONE;
+    }
+    w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    w.hovered.weak_bg_fill = pal.hover;
+    w.active.weak_bg_fill = pal.sel;
+    w.open.weak_bg_fill = pal.hover;
+}
+
+/// A drop-down chip: `text` with a caret that opens a menu; named `accessible` for assistive
+/// technology. An `on` chip (something other than the default is chosen) uses the pill
+/// colours, an off one the field colours.
+pub fn chip<R>(
+    ui: &mut egui::Ui,
+    accessible: &str,
+    text: &str,
+    on: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Response {
+    let pal = Palette::of(ui.ctx());
+    let (fill, fg) = if on {
+        (pal.pill, pal.pilltext)
+    } else {
+        (pal.field, pal.text)
+    };
+    let r = ui
+        .scope(|ui| {
+            let spacing = ui.spacing_mut();
+            spacing.interact_size.y = CHIP_HEIGHT;
+            spacing.button_padding = Vec2::new(12.0, 0.0);
+            let hover = if on { fill } else { pal.hover };
+            let w = &mut ui.visuals_mut().widgets;
+            for (state, bg) in [
+                (&mut w.inactive, fill),
+                (&mut w.hovered, hover),
+                (&mut w.active, hover),
+                (&mut w.open, hover),
+            ] {
+                state.weak_bg_fill = bg;
+                state.bg_stroke = Stroke::NONE;
+                state.corner_radius = chip_radius();
+                state.fg_stroke.color = fg;
+            }
+            let job = super::dropdown_job(ui, text);
+            ui.menu_button(job, |ui| {
+                menu_body(ui);
+                add_contents(ui)
+            })
+            .response
+        })
+        .inner
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), accessible));
+    r
+}
+
+/// A filter chip: fully rounded, the pill colours while `active`, the field colour otherwise.
+/// Named `accessible` for assistive technology; true when clicked.
+pub fn filter_chip(ui: &mut egui::Ui, text: &str, accessible: &str, active: bool) -> bool {
+    let pal = Palette::of(ui.ctx());
+    let font = TextStyle::Body.resolve(ui.style());
+    let fg = if active { pal.pilltext } else { pal.text };
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, fg);
+    let size = Vec2::new(galley.size().x + 24.0, CHIP_HEIGHT);
+    let (rect, r) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if active {
+            pal.pill
+        } else if r.hovered() {
+            pal.hover
+        } else {
+            pal.field
+        };
+        ui.painter().rect_filled(rect, chip_radius(), fill);
+        let pos = rect.center() - galley.size() / 2.0;
+        ui.painter().galley(pos, galley, fg);
+    }
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, active, accessible));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Paints a switch track and knob in `rect` (40 by 24 points).
+fn paint_switch(ui: &egui::Ui, rect: egui::Rect, on: bool) {
+    let pal = Palette::of(ui.ctx());
+    let track = if on { super::SWITCH_ON } else { pal.sel };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(12), track);
+    let inset = (SWITCH_SIZE.y - SWITCH_KNOB) / 2.0;
+    let x = if on {
+        rect.right() - inset - SWITCH_KNOB / 2.0
+    } else {
+        rect.left() + inset + SWITCH_KNOB / 2.0
+    };
+    ui.painter().circle_filled(
+        egui::pos2(x, rect.center().y),
+        SWITCH_KNOB / 2.0,
+        Color32::WHITE,
+    );
+}
+
+/// A switch without text beside it, for rows that draw their own title and description.
+/// `label` is what assistive technology reads.
+pub fn switch_bare(ui: &mut egui::Ui, on: &mut bool, label: &str) -> Response {
+    let (rect, mut r) = ui.allocate_exact_size(SWITCH_SIZE, Sense::click());
+    if r.clicked() {
+        *on = !*on;
+        r.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        paint_switch(ui, rect, *on);
+    }
+    let value = *on;
+    r.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), value, label)
+    });
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Side of a checkbox's square.
+const CHECKBOX_SIZE: f32 = 18.0;
+/// Space between a checkbox's square and its text.
+const CHECKBOX_GAP: f32 = 8.0;
+
+/// A checkbox with `text` beside it: a ring-coloured outline when off, an accent fill with a
+/// tick when on. The whole line is clickable; assistive technology reads it as a checkbox
+/// named after `text`.
+pub fn checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    text: impl Into<egui::WidgetText>,
+) -> Response {
+    let pal = Palette::of(ui.ctx());
+    let galley = text.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        TextStyle::Body,
+    );
+    let height = CHECKBOX_SIZE
+        .max(galley.size().y)
+        .max(ui.spacing().interact_size.y);
+    let size = Vec2::new(CHECKBOX_SIZE + CHECKBOX_GAP + galley.size().x, height);
+    let (rect, mut r) = ui.allocate_exact_size(size, Sense::click());
+    if r.clicked() {
+        *checked = !*checked;
+        r.mark_changed();
+    }
+    let label = galley.text().to_string();
+    if ui.is_rect_visible(rect) {
+        let square = egui::Rect::from_min_size(
+            egui::pos2(rect.min.x, rect.center().y - CHECKBOX_SIZE / 2.0),
+            Vec2::splat(CHECKBOX_SIZE),
+        );
+        paint_checkbox(ui, square, *checked, &pal);
+        let at = egui::pos2(
+            square.max.x + CHECKBOX_GAP,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(at, galley, pal.text);
+    }
+    let value = *checked;
+    r.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), value, &label)
+    });
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Paints the square of a checkbox in `square`.
+fn paint_checkbox(ui: &egui::Ui, square: egui::Rect, checked: bool, pal: &Palette) {
+    let radius = CornerRadius::same(5);
+    let painter = ui.painter();
+    if checked {
+        painter.rect_filled(square, radius, pal.accent);
+        let tick = [(0.24, 0.52), (0.43, 0.70), (0.76, 0.32)]
+            .map(|(x, y)| square.min + Vec2::new(x, y) * square.size());
+        painter.add(egui::Shape::line(
+            tick.to_vec(),
+            Stroke::new(2.0, pal.onaccent),
+        ));
+    } else {
+        painter.rect_stroke(
+            square.shrink(0.75),
+            radius,
+            Stroke::new(1.5, pal.ring),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// A bordered group of rows: the frame the Settings sections and the first-run folder list
+/// share. `rows` draws the rows one under the other, without space between them.
+pub fn row_group(ui: &mut egui::Ui, rows: impl FnOnce(&mut egui::Ui)) {
+    let pal = Palette::of(ui.ctx());
+    Frame::new()
+        .stroke(Stroke::new(1.0, pal.line))
+        .corner_radius(CornerRadius::same(super::CARD_RADIUS))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            rows(ui);
+        });
+}
+
+/// The frame of the floating pill: the pill colours, fully rounded, 44 points high.
+pub fn pill_frame(ctx: &egui::Context) -> Frame {
+    let pal = Palette::of(ctx);
+    Frame::new()
+        .fill(pal.pill)
+        .stroke(Stroke::new(1.0, pal.line))
+        .corner_radius(CornerRadius::same((PILL_HEIGHT / 2.0) as u8))
+        .inner_margin(Margin::symmetric(18, 0))
+        .shadow(ctx.global_style().visuals.popup_shadow)
+}
+
+/// Buttons on the pill: pill text on a faint veil that grows on hover.
+pub fn pill_buttons(ui: &mut egui::Ui) {
+    let pal = Palette::of(ui.ctx());
+    let v = ui.visuals_mut();
+    for w in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.fg_stroke.color = pal.pilltext;
+        w.bg_stroke = Stroke::NONE;
+        w.corner_radius = CornerRadius::same((CHIP_HEIGHT / 2.0) as u8);
+        w.weak_bg_fill = Color32::TRANSPARENT;
+    }
+    v.widgets.hovered.weak_bg_fill = pal.pilltext.gamma_multiply(0.16);
+    v.widgets.open.weak_bg_fill = pal.pilltext.gamma_multiply(0.16);
+    v.widgets.active.weak_bg_fill = pal.pilltext.gamma_multiply(0.26);
+    v.override_text_color = Some(pal.pilltext);
+}

@@ -13,48 +13,77 @@ computer.
 
 ## Features
 
-- **A calm, modern look:** square thumbnails with small gaps, large date headings, light and dark
+- **A calm, modern look:** square thumbnails edge to edge with small gaps, date headings, light and dark
   colors that follow your system (or pick one in **Settings**), a **Large** text size option, and
   plain wording throughout. Notices appear as small toasts at the bottom instead of a status bar.
-- **Photos** (the timeline): all your photos and videos grouped by day, month or year (the
-  **Months** menu above the grid), from the capture date in the file (falling back to the file
-  date), newest or oldest first (the **Newest first** menu), with a thumbnail size slider. Browsing works
-  before smart search is turned on.
-- **Jump to date** in the sidebar: jump to any year or month.
+- **Photos** (the timeline): all your photos and videos grouped by day ("Today", "Yesterday",
+  "Sunday 15 November"; the heading of the day at the top stays in view while you scroll), from the
+  capture date in the file (falling back to the file date), newest first. Hover a photo and click
+  the circle in its corner to select it; hover a day's heading to select the whole day. Pinch, or
+  hold Ctrl/Cmd and scroll, or press Ctrl/Cmd with `=`, `-` and `0`, to change the photo size
+  (also in **Settings** as Small, Medium or Large). Browsing works before smart search is turned
+  on.
+- **Timeline ruler** at the right edge instead of a scroll bar: a column of small dashes with the
+  years written beside them. Press or drag anywhere on it to scroll; in Photos the position on it
+  is a point in time, so you can scrub to any month. A small label names the date while you point
+  at it or scroll. In albums, Recently added and search results it follows the scroll position.
+  Press `Tab` to reach the years and `Enter` to jump to one. It is not shown when everything fits
+  in the window.
+- **Albums** show a plain grid without day headings (Favorites and folders keep them).
 - **Folders** (click one in the sidebar; **+** opens *Add a folder* with your Pictures, Videos,
   Desktop and Downloads folders as suggestions; hover a folder and click **×** to stop showing
   it, your files are never touched) and **Recently added**.
-- **Viewer:** click any photo or video (or press `Enter` on the one you are on) to see it as large
-  as the window allows, with an info panel (`I`: date, camera, size, folder), `←`/`→` to step through the
-  list you came from, `Home`/`End`, `Z` or a double-click for 100 % zoom (drag to pan; up to 4096 px
-  per side, so very large photos are scaled down to that) and `Esc` to go back to the grid. The
-  top bar has icon buttons (each with a tooltip) for **Back**, **Favorite**, **Add to album…**,
-  **Info**, **Open with default app**, **Show in folder** and **Zoom**, the position ("7 of 689")
-  in the middle, and, on a video, a **Play at 1:23** button.
-- **Search results** say "Results for “beach”" (or "Photos similar to …") with the number of
-  photos and videos found, and three menus on the right: **When**, **Type** (Everything, Photos or
-  Videos, the same choice as the filter in the top bar) and **Sort** (Best match, Newest, Oldest);
-  **×** clears the search.
-- **Settings** (the gear in the top bar) opens a sheet with a list of sections. Changes apply at
-  once; only switching smart search asks first, because it makes Recollect look at your photos
-  again.
-  - **Appearance:** colors (match my computer, light, dark) and text size (normal, large).
-  - **Smart search:** whether it is on, off or downloading; a choice between *Best quality* and
-    *Faster* with their download sizes; whether to use the graphics card; a folded **Details**
+- **Viewer:** click any photo or video (or press `Enter` on the one you are on) to see it filling
+  the window below a bar, with `←`/`→` (or the round buttons at the edges) to step through the
+  list you came from, `Home`/`End`, `Z`, a double-click or a pinch for 100 % zoom (drag to pan; up to
+  4096 px per side, so very large photos are scaled down to that) and `Esc` to go back. The bar
+  says where you came from (Photos, an album, Results, …) next to the back arrow, shows the date,
+  time and position ("7 of 689") in the middle, and has four icon buttons (each with a tooltip):
+  **Favorite** (`F`), **Add to album…**, **Info** (`I`, a panel with date, camera, size, folder,
+  albums and Find similar) and **⋯** (Open with default app, Show in folder, Zoom, Find similar).
+  A filmstrip of the neighbouring items floats at the bottom and fades when the pointer rests;
+  on a video it shows the matching moments as chips and a **Play at 1:23** button instead.
+- **Search results** are headed by the number found ("12 results for “beach”", or "Photos similar
+  to …"). Below it are the filters: **All**, **Photos** and **Videos** (the same choice as in the
+  top bar), **When** (a year or a range of years) and **Sort** (Best match, Newest, Oldest). When
+  the filters leave nothing, **Clear filters** brings the results back; while photos are still
+  being prepared for search, a note says how many are left, since more results may appear. Every
+  result offers **Find similar** (the button in its top right corner while hovered), shows the
+  year it was taken in its bottom right corner, and a video's tile shows the matching moment,
+  which plays from that point when clicked. **×** in the search box clears the search.
+- **Settings** (the gear in the top bar, or Ctrl/Cmd+,) opens in its own window, with a list of
+  sections on the left; opening it again brings the open window forward, and Esc or the window's
+  close button closes only Settings. (Where the system can't open a second window, it shows as a
+  sheet over the main one.) Changes apply at once; only changing the search style asks first,
+  because it makes Recollect look at your photos again.
+  - **Appearance:** color (System, Light, Dark), text size and photo size (Small, Medium,
+    Large).
+  - **Features:** switches, all on by default, for **On this day**, **Tips**, **Remember recent
+    searches**, **Example searches** and **Progress in the sidebar**. Turning recent searches off
+    stops recording new ones and keeps the old ones until **Clear now**. **Show again** brings
+    back the tips you closed.
+  - **Smart search:** whether it is on, off or downloading; a **Search style** of *Best quality* or
+    *Faster* (changing it asks first; the download size is shown); whether to use the graphics card; a folded **Details**
     part with the name, license and source of what it downloads.
-  - **Library:** your folders (**Stop showing…** asks first and never touches your files),
-    **Add a folder…**, how many photos and videos are ready for search and how many couldn't be
+  - **Library:** what Recollect is working on right now, with **Pause**/**Resume** and **Stop**
+    (shown whenever something runs, even with the sidebar progress turned off), your folders
+    (**Stop showing…** asks in the row and never touches your files), **Add a folder…**, how many photos and videos are ready for search and how many couldn't be
     opened (**Show** lists them, **Try again** retries), and **Check for new photos**. A folded
     **Advanced** part has the technical options.
-  - **Storage:** how much room previews may take, and where Recollect keeps its data, with an
+  - **Storage:** how much room photo previews take (with **Clear previews**), how much they may
+    take, and where Recollect keeps its data, with an
     **Open folder** button for each.
   - **About:** the version, the privacy promise (nothing leaves your computer; the only use of
     the internet is the smart-search download) and the licenses of what Recollect is built on.
 - **Favorites:** click the star that appears in the corner of a tile when you point at it (or
   press `F` on the item you are on) to mark it; the **Favorites** view in the sidebar lists them.
 - **Albums:** make your own albums (**New album…** in the sidebar, or from any **Add to album…**
-  menu). An album opens like the timeline, grouped and sorted the same way; it has **Rename…** and
-  **Delete album…** (deleting an album never deletes photos or videos). Albums only hold references:
+  menu). An album opens as a plain grid; its heading says how many photos and videos it holds and
+  the years they span, with **Add photos** (Photos in selection mode, a bar above the grid says
+  "Choose photos to add to …"; **Add to …** adds them with Undo, **Cancel** or Esc goes back
+  unchanged) and a **⋯** menu with **Rename…** and **Delete album…** (asks first; deleting an album
+  never deletes photos or videos). An empty album says so and offers **Add photos**; in the sidebar
+  it shows a neutral cover. Albums only hold references:
   files stay where they are, and an album forgets files that leave the library.
 - **Multi-select** in every grid (timeline views, albums and search results): click the circle in
   a tile's corner, or `Ctrl+click` (`Cmd+click` on macOS) to toggle an item, `Shift+click` to
@@ -65,8 +94,9 @@ computer.
 - **Activity card** at the bottom of the sidebar, only while something is happening ("Looking for
   new photos…", "Reading photo dates… 1,234 of 5,000", "Getting your photos ready for search…
   45 %", "Downloading smart search… 120 of 485 MB"), with pause and cancel.
-- **Help** (the **?** button): how search works and the keyboard shortcuts.
-- **On this day:** photos taken on today's date in earlier years, in a strip above the timeline
+- **Help** (the **?** button or F1, on every browsing screen): how search works and the keyboard
+  shortcuts in sections (browsing, photo size, selecting, viewing).
+- **On this day:** photos taken on today's date in earlier years, in a banner at the top of Photos (the ✕ hides it until tomorrow)
   (photos dated only by their file time are left out; 29 February shows on 28 February in years
   without one).
 - Text search over images and video moments ("a dog in the snow").
@@ -134,20 +164,19 @@ screen if you would rather not):
 1. **Welcome**: what Recollect does ("Find any photo by describing it") and that everything stays
    on your computer. Button: **Get started**.
 2. **Where are your photos?** The standard folders that exist (Pictures and Videos are ticked;
-   Desktop and Downloads are offered by name), **Add another folder…** (a folder picker; under
+   Desktop and Downloads are offered by name), **Add a folder…** (a folder picker; under
    **More options** you can type a path instead). **Continue** adds exactly the folders that are
-   ticked or added; with none chosen it reads **Continue without folders** and you add them
-   later from the sidebar.
+   ticked or added; it stays off until at least one folder is chosen.
 3. **Turn on smart search**: the **Best quality** and **Faster** choices with their download
-   sizes (the one that suits your computer is marked), and a privacy note. **Download and turn
-   on** starts the one-time download; **Not now** leaves it off. Nothing is downloaded
+   sizes (the one that suits your computer is marked), and a privacy note. **Turn on**
+   starts the one-time download; **Not now** leaves it off. Nothing is downloaded
    without this choice, and without smart search you can still browse your library by date.
 4. **You're all set**: **Start** adds the folders, looks through them, then starts the download
    if you chose it, and shows Photos. Progress shows at the bottom left and you can browse right
    away; search works once the download finishes.
 
 People who already have folders never see the welcome. Afterwards, short one-time tips appear at
-useful moments (turn them back on in Settings, Appearance, **Show tips again**), the search field
+useful moments (turn them off or bring them back in Settings, Features), the search field
 shows example and recent searches when you click it (stored on your computer only; **Clear recent
 searches** removes them), and the **?** button opens a Help sheet (getting started, searching,
 organizing, keyboard shortcuts, privacy).
@@ -262,6 +291,8 @@ Your numbers will vary with hardware, photo size and codecs.
   `assets/fonts/Inter-OFL.txt`).
 - Icons are [Material Symbols](https://fonts.google.com/icons) (Apache License 2.0), via the
   `egui_material_icons` crate.
+- The photos on the first-run screen are 32 CC0 (public domain) photographs from Unsplash; see
+  `assets/welcome/README.md` for the list and sources.
 
 ## License
 

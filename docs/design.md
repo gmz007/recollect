@@ -89,6 +89,13 @@ keeps about eight textures in memory and prefetches the neighbouring items. Noth
 disk; the thumbnail is shown scaled up until the preview is ready. Videos show a frame at the
 matching moment (or at 10 % of the length, at most 5 s).
 
+**Viewer layout.** A 52 point bar (back with the name of where the viewer was opened from, the day and
+time with the position, four icon buttons), the picture filling the rest on the stage colour, an
+optional 300 point details panel docked on the right, previous/next buttons at the edges while the
+pointer is over the picture, and a filmstrip (`viewer/filmstrip.rs`) at the bottom that fades two
+seconds after the pointer last moved. The panel's albums come with the file details, which are
+read again when albums change.
+
 **Index cache.** Decoding every vector from SQLite at startup takes seconds at a million
 vectors, so the i8 index is also written to `data/index-<model>.bin`. Each change to stored items
 increments an epoch in the database; the cache carries that epoch, the model id and a random
@@ -111,7 +118,15 @@ library folder never touches files and never deletes an album.
 
 Grids keep a **selection by file id** plus a *primary* item (by list index) that drives the
 viewer; ids that vanish in a reload are dropped. Range selection runs in
-list order from an anchor, so it follows the grouping and sort order on screen.
+list order from an anchor, so it follows the order on screen. After an action from the
+selection bar finishes (an album change, a favorite), the selection is cleared; Undo still works.
+
+"Add photos" on an album switches to Photos and keeps its grid in selection mode even with nothing
+selected (`GridState::choosing_for` holds the album id). A slim bar replaces the floating pill: it
+names the album, counts the choice and offers Cancel and "Add to …", which queues an ordinary add
+(so the confirmation and Undo are the usual ones) and returns to the album. Esc and Cancel return
+without changes; going to another view or starting a search ends the mode. An album's year range
+comes from items whose date is known (not the file's own time); it is left out when none is.
 
 ## Code layout
 
@@ -127,7 +142,7 @@ more than a few hundred lines of code.
 | `media/` | `scan`, `image`, `metadata` (capture dates), `video/` (`stream`, `convert`, `sample`, `still`) |
 | `model/` | `registry`, `download`, `embedder` |
 | `search.rs` | turning index candidates into hits |
-| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/`, `viewer/`, `settings/`, and one file per remaining screen or widget |
+| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `ruler/` (the timeline ruler that replaces the scroll bar), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/` (the Settings window: one file per section, `rows` for the shared row layout), `welcome/` (the first-run screens: `steps` for what each says, `mosaic` for the photo grid), and one file per remaining screen or widget |
 | `cli.rs`, `bench.rs`, `eval.rs` | command-line entry points |
 
 Functions are kept to 50 lines of code (a clippy threshold); longer scenario tests are the
@@ -137,12 +152,45 @@ exception.
 
 `ui/style.rs` holds the palettes, fonts (Inter and Material Symbols, with egui's fonts as
 fallbacks), text styles and spacing; it is applied once per egui context and again when the theme
-or text size setting changes. `ui/tiles.rs` draws a grid tile (center-cropped thumbnail, hover
-controls, duration pill) and decides what a click means: a plain click opens the viewer unless the
+or text size setting changes. `ui/tiles.rs` draws a grid tile (center-cropped thumbnail edge to edge; the selection circle
+on hover; a selected photo shrinks onto a tinted cell; a white heart for favorites; duration pill) and decides what a click means: a plain click opens the viewer unless the
 user is already picking items, in which case it toggles; the selection circle, Ctrl/Cmd and Shift
 select. `ui/sidebar.rs` and `ui/chrome.rs` hold the sidebar, the top bar, the view headers, the
 toasts and the help window. Notices queue as before (an error outlives later plain messages) and
 are drawn as toasts rather than in a status bar.
+
+The timeline groups by capture day when the list loads (not per frame); layout finds the rows in
+view by binary search, and the heading of the section at the top of the view is drawn pinned over
+the photos, pushed up by the next one. The tile size (96 to 320 points, default 168) is one
+setting for every grid; a pinch or Ctrl/Cmd and scroll changes it smoothly and it is saved once
+it stops changing. Whether library folders can still be read is checked on a background thread
+when the folder list changes and then every 30 seconds, so a slow network drive never holds up a
+frame or the library facts the screens read.
+
+The scroll bar of every grid is hidden; the ruler (`ui/ruler/`) is a column beside it that reads
+and sets its scroll offset. Views grouped by day (Photos, Favorites, folders) give it a time scale:
+one slot per calendar month between the newest and the oldest photo, empty months included, built
+from the layout's section offsets when the layout changes. A point of the ruler maps to the
+offset by binary search over those offsets (the position within a month maps to the position
+within that month's rows; an empty month lands where the next older one starts), and the top of
+the ruler is the top of the page, the bottom the end. Albums, Recently added and search results
+have no day sections, so there the ruler is the plain scroll fraction and its date label is the
+date of the photo at that fraction of the list. Dash positions are cached per layout and ruler
+height; per frame only the dashes are drawn and one binary search finds the marker. With nothing
+to scroll the ruler is left out. The dashes at years (or months, with three years or fewer) are
+keyboard stops. The "On this day" banner asks for a large preview through the viewer's preview
+cache and shows the grid thumbnail until it arrives.
+
+The first-run screens (`ui/welcome/`) split the window in two when it is at least 900 points
+wide: a static 4 by 4 mosaic of 16 photographs on one half and the step's content, centred
+vertically, on the other. Narrower windows show the content alone. The photos are bundled
+(`assets/welcome/`: a light and a dark set of 16 JPEGs, 720 px wide, about 1.6 MB, CC0 from
+Unsplash; the folder's README lists them) and compiled in with `include_bytes!`. The set that
+matches the theme is decoded once on a background thread, shrunk to at most 480 px, and
+uploaded as textures on the first frame after it finishes; the textures are dropped with the
+mosaic, which exists only while the window is wide enough and the welcome is showing, and
+cells are cropped to fill. The step body has a fixed height (it scrolls when longer) so Back and
+the main button never move between steps.
 
 ## Incremental scanning and robustness
 
@@ -162,3 +210,17 @@ crash reporting, no remote APIs. Library folders are only ever read.
   (caption queries → Recall@K, category queries → precision@10, video queries → Hit@K).
 - `recollect --home <scratch> bench search|rescan` measures startup, memory, search latency and
   rescan time on a synthetic library of configurable size.
+
+## Settings window
+
+Settings is an egui immediate viewport (`show_viewport_immediate`), so it reads and changes the
+app's state directly, with no channels. Where the backend embeds viewports (`Context::embed_viewports`, as in
+headless tests) the same content is shown as a centred sheet over the main window. The window
+is about 820 by 600 points (minimum 640 by 480); the sheet keeps the same proportions. Esc and the
+close button close only Settings; a pending search-style question is answered first.
+
+The Features switches are fields of `Settings` (`show_on_this_day`, `show_tips`,
+`remember_searches`, `show_example_searches`, `show_sidebar_progress`), all `true` by default so
+older files load unchanged. Each one is checked where its feature is drawn: the banner, the tip
+card, the recording and offering of recent searches, the example searches in the search menu and
+the ring in the sidebar's foot.

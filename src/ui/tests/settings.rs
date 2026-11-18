@@ -76,7 +76,7 @@ fn clicking_the_disabled_search_field_opens_settings() {
         app.borrow().dialogs.settings_section,
         crate::ui::settings::Section::SmartSearch
     );
-    h.get_by_label("Smart search");
+    h.get_all_by_label("Smart search").next().unwrap();
     h.get_by_label("Download and turn on (608 MB)");
 }
 
@@ -105,12 +105,36 @@ fn settings_sheet_lists_its_sections() {
     h.run();
     // Appearance is first; every section can be reached from the list on the left.
     h.get_by_label("Appearance");
-    for section in ["Appearance", "Smart search", "Library", "Storage", "About"] {
+    for section in [
+        "Appearance",
+        "Features",
+        "Smart search",
+        "Library",
+        "Storage",
+        "About",
+    ] {
         h.get_by_label(&format!("{section} settings"));
     }
+    // The list switches the section on the right.
+    h.get_by_label("Features settings").click();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Progress in the sidebar");
+    h.get_by_label("Library settings").click();
+    h.run();
+    h.get_by_label("Add a folder…");
     h.get_by_label("Close settings").click();
     h.run();
     assert!(h.query_by_label("Close settings").is_none());
+}
+
+#[test]
+fn the_settings_shortcut_opens_settings() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = harness(library(d.path()));
+    assert!(h.query_by_label("Close settings").is_none());
+    h.key_combination_modifiers(egui::Modifiers::COMMAND, &[egui::Key::Comma]);
+    h.run_steps(3);
+    h.get_by_label("Close settings");
 }
 
 #[test]
@@ -120,7 +144,7 @@ fn appearance_changes_apply_at_once() {
     let lib = library(d.path());
     let mut h = harness(Arc::clone(&lib));
     open_section(&mut h, "Appearance");
-    h.get_by_label("Match my computer");
+    h.get_by_label("System");
     h.get_by_label("Dark").click();
     h.run();
     assert_eq!(lib.settings().theme, Theme::Dark);
@@ -128,18 +152,19 @@ fn appearance_changes_apply_at_once() {
     h.get_by_label("Light").click();
     h.run();
     assert_eq!(lib.settings().theme, Theme::Light);
-    h.get_by_label("Large").click();
+    // Photo size has Small, Medium and Large too; the text size row comes first.
+    h.get_all_by_label("Large").next().unwrap().click();
     h.run();
     assert_eq!(lib.settings().text_size, TextSize::Large);
-    assert!((h.ctx.zoom_factor() - 1.15).abs() < 1e-6);
-    h.get_by_label("Normal").click();
+    assert!((h.ctx.zoom_factor() - 15.0 / 13.0).abs() < 1e-6);
+    h.get_all_by_label("Medium").next().unwrap().click();
     h.run();
     assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
     // The choices are saved to disk, not only kept in memory.
     let saved = crate::config::Settings::load(&lib.paths().settings_path()).unwrap();
     assert_eq!(
         (saved.theme, saved.text_size),
-        (Theme::Light, TextSize::Normal)
+        (Theme::Light, TextSize::Medium)
     );
 }
 
@@ -153,26 +178,20 @@ fn smart_search_settings_show_status_and_confirm_a_switch() {
     open_section(&mut h, "Smart search");
     h.get_by_label("On — faster");
     h.get_by_label("Best quality");
-    let described = |h: &Harness<'_>, title: &str| {
-        h.get_by_label(title)
-            .accesskit_node()
-            .description()
-            .unwrap_or_default()
-    };
-    assert_eq!(
-        described(&h, "Best quality"),
-        "Finds photos most reliably. Works best on computers with a graphics card. 486 MB."
+    h.get_by_label("Faster");
+    h.get_by_label_contains("Quicker on older computers. 608 MB.");
+    h.get_by_role_and_label(
+        egui::accesskit::Role::CheckBox,
+        "Use the graphics card when available",
     );
-    assert_eq!(
-        described(&h, "Faster"),
-        "Quicker on older computers. 608 MB."
-    );
-    h.get_by_label("Use the graphics card when available");
     h.get_by_label("Details");
     assert!(h.query_by_label_contains("huggingface").is_none());
     // The graphics card option is saved at once.
-    h.get_by_label("Use the graphics card when available")
-        .click();
+    h.get_by_role_and_label(
+        egui::accesskit::Role::CheckBox,
+        "Use the graphics card when available",
+    )
+    .click();
     h.run();
     assert!(!lib.settings().use_gpu);
     // Status in words while things happen.
@@ -193,16 +212,20 @@ fn smart_search_settings_show_status_and_confirm_a_switch() {
     // Choosing the other option asks first and explains what happens.
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch to Best quality?");
-    h.get_by_label_contains("look at all your photos again");
+    h.get_by_label_contains("Change to Best quality?");
+    h.get_by_label_contains("look through your photos again");
     h.get_by_label_contains("one-time download of 486 MB");
+    assert_eq!(lib.model().id, registry::CLIP_B32.id, "asks first");
     h.get_by_label("Cancel").click();
     h.run_steps(3);
-    assert!(h.query_by_label("Switch to Best quality?").is_none());
+    assert!(
+        h.query_by_label_contains("Change to Best quality?")
+            .is_none()
+    );
     assert_eq!(lib.model().id, registry::CLIP_B32.id, "nothing changed yet");
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch").click();
+    h.get_by_label("Change").click();
     settle(&mut h, || lib.model().id == registry::SIGLIP_B16.id);
     assert_eq!(
         lib.settings().model.as_deref(),
@@ -269,13 +292,20 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
             .collect::<Vec<_>>()
             .is_empty()
     );
-    // Stopping a folder asks the same question as in the sidebar.
+    // Stopping a folder asks in its own row, inside Settings. The retry's background work
+    // shows above the folders while it runs: wait until it is gone and the page is still, so
+    // the click lands on the button where it now is.
+    settle(&mut h, || !lib.is_busy());
+    h.run();
     h.get_by_label("Stop showing “nowhere”…").click();
-    h.run_steps(3);
-    h.get_by_label("Stop showing “nowhere”?");
+    settle_until_shown(&mut h, "Stop showing “nowhere”?");
     h.get_by_label("Your files stay where they are.");
     assert_eq!(lib.folders().unwrap().len(), 1);
-    h.get_all_by_label("Cancel").last().unwrap().click();
+    assert!(
+        app.borrow().dialogs.stop_folder.is_none(),
+        "no window over the main one"
+    );
+    h.get_by_label("Cancel").click();
     h.run_steps(3);
     assert!(
         h.query_by_label("Your files stay where they are.")
@@ -283,6 +313,57 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
     );
     assert_eq!(lib.folders().unwrap().len(), 1);
     assert!(app.borrow().dialogs.settings_open, "the sheet stays open");
+    // The question ends when another section is chosen.
+    h.get_by_label("Stop showing “nowhere”…").click();
+    h.run_steps(3);
+    h.get_by_label("Appearance settings").click();
+    h.run_steps(3);
+    h.get_by_label("Library settings").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Your files stay where they are.")
+            .is_none()
+    );
+    // Confirming takes the folder out.
+    h.get_by_label("Stop showing “nowhere”…").click();
+    h.run_steps(3);
+    h.get_by_label("Stop showing").click();
+    settle(&mut h, || lib.folders().unwrap().is_empty());
+}
+
+#[test]
+fn settings_stay_open_while_the_viewer_is_open() {
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    open_tile(&mut h, "Item img1.jpg");
+    app.borrow_mut().open_settings();
+    h.run_steps(3);
+    h.get_by_label("Close settings");
+    h.run_steps(5);
+    h.get_by_label("Close settings");
+    assert!(app.borrow().dialogs.settings_open);
+}
+
+#[test]
+fn background_work_can_be_paused_from_settings_with_the_sidebar_ring_off() {
+    use crate::library::Activity;
+    let d = tempfile::tempdir().unwrap();
+    let lib = library(d.path());
+    lib.update_settings(|s| s.show_sidebar_progress = false)
+        .unwrap();
+    let mut h = harness(Arc::clone(&lib));
+    open_section(&mut h, "Library");
+    assert!(h.query_by_label("Working in the background").is_none());
+    lib.update_status(|s| s.activity = Activity::ReadingDates { done: 1, total: 4 });
+    h.run_steps(3);
+    h.get_by_label("Working in the background");
+    h.get_by_label_contains("Reading photo dates");
+    h.get_by_label("Pause").click();
+    settle(&mut h, || lib.status().paused);
+    h.get_by_label("Resume").click();
+    settle(&mut h, || !lib.status().paused);
+    h.get_by_label("Stop");
 }
 
 #[test]
@@ -293,7 +374,10 @@ fn storage_settings_set_the_preview_space_and_show_where_data_lives() {
     let mut h = harness(Arc::clone(&lib));
     open_section(&mut h, "Storage");
     assert!(h.get_all_by_label("Space for previews").count() >= 1);
-    h.get_by_label("Where Recollect keeps its data");
+    // The folders' paths are technical, so they wait behind a collapsed heading.
+    assert!(h.query_by_label("Open folder for library").is_none());
+    h.get_by_label("Where Recollect keeps its data").click();
+    h.run_steps(3);
     h.get_by_label("Open folder for library");
     h.get_by_label("Open folder for previews");
     h.get_by_label("Open folder for settings");
@@ -314,12 +398,14 @@ fn about_states_the_privacy_promise_and_the_version() {
     open_section(&mut h, "About");
     h.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
     h.get_by_label("Your photos stay private");
-    h.get_by_label_contains("never leave it");
+    h.get_by_label_contains("Your photos never leave this computer.");
+    h.get_by_label_contains("never changes or deletes your files");
     h.get_by_label_contains("one-time download for smart search");
     h.get_by_label("Open-source licenses").click();
     h.run_steps(3);
     h.get_by_label("Inter typeface: SIL Open Font License 1.1");
     h.get_by_label("Material Symbols icons: Apache License 2.0");
+    h.get_by_label("Photos on the first screen: Unsplash, public domain (CC0)");
     h.get_by_label("ONNX Runtime: MIT License");
     h.get_by_label("FFmpeg: GNU LGPL");
 }
@@ -333,10 +419,13 @@ fn escape_closes_the_sheet_and_the_topmost_question_first() {
     open_section(&mut h, "Smart search");
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch to Best quality?");
+    h.get_by_label_contains("Change to Best quality?");
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
-    assert!(h.query_by_label("Switch to Best quality?").is_none());
+    assert!(
+        h.query_by_label_contains("Change to Best quality?")
+            .is_none()
+    );
     h.get_by_label("Close settings");
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
@@ -364,19 +453,31 @@ fn the_theme_and_text_size_settings_apply() {
         h.ctx.global_style().visuals.panel_fill,
         egui::Color32::WHITE
     );
-    assert!((h.ctx.zoom_factor() - 1.15).abs() < 1e-6);
-    set(Theme::Dark, TextSize::Normal);
+    assert!((h.ctx.zoom_factor() - 15.0 / 13.0).abs() < 1e-6);
+    set(Theme::Dark, TextSize::Medium);
     h.run();
     assert!(h.ctx.global_style().visuals.dark_mode);
     assert_eq!(
         h.ctx.global_style().visuals.panel_fill,
-        egui::Color32::from_rgb(0x12, 0x12, 0x14)
+        egui::Color32::from_rgb(0x16, 0x16, 0x16)
     );
     assert!((h.ctx.zoom_factor() - 1.0).abs() < 1e-6);
     // The text styles follow the spec.
     let style = h.ctx.global_style();
-    assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 14.5);
-    assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 22.0);
-    assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 12.5);
-    assert_eq!(style.text_styles[&crate::ui::style::section()].size, 17.0);
+    assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 13.0);
+    assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 20.0);
+    assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 12.0);
+    assert_eq!(style.text_styles[&crate::ui::style::section()].size, 14.0);
+}
+
+/// Runs frames until `label` is on screen (a slow machine may need more than a few).
+fn settle_until_shown(h: &mut Harness<'_>, label: &str) {
+    for _ in 0..500 {
+        h.run_steps(1);
+        if h.query_by_label(label).is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("{label:?} not shown in time");
 }

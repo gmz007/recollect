@@ -1,12 +1,14 @@
 //! Search: starting one when typing pauses, taking in the answer, and the results grid.
 
+use super::platform;
+use super::ruler::{Mapping, Month, RulerState, month_at_fraction};
 use super::selection::ClickMods;
-use super::style::{GAP, TILE};
+use super::style::GAP;
 use super::tiles::{Tile, TileMark};
 use super::workers::Query;
 use super::{
     App, ClickOutcome, GridEvents, GridState, fmt_time, grid::grid_scroll_area, guide, marked,
-    scroll_offset_for_row, selection, step, style, tiles, to_millis,
+    scroll_offset_for_row, selection, step, tiles, to_millis,
 };
 use crate::media::MediaKind;
 use crate::search::{SearchHit, SearchOptions};
@@ -33,11 +35,11 @@ struct ResultsMetrics {
 }
 
 impl ResultsMetrics {
-    /// For `width` points of space and `len` results.
-    fn new(width: f32, len: usize) -> Self {
-        let avail = width - style::SCROLLBAR_ALLOWANCE;
-        let cols = (((avail + GAP) / (TILE + GAP)).floor() as usize).max(1);
-        let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(TILE * 0.6);
+    /// For `width` points of space, `len` results and tiles of about `tile_size` points.
+    fn new(width: f32, len: usize, tile_size: f32) -> Self {
+        let avail = width;
+        let cols = (((avail + GAP) / (tile_size + GAP)).floor() as usize).max(1);
+        let tile = ((avail - GAP * (cols - 1) as f32) / cols as f32).max(tile_size * 0.6);
         Self {
             avail,
             cols,
@@ -64,6 +66,9 @@ pub(super) struct ResultsState {
     pub(super) selected_t: Option<f64>,
     /// Columns in the results grid as of the last layout (for up/down navigation).
     pub(super) cols: usize,
+    /// Videos the results asked to play (tests only: no player is started).
+    #[cfg(test)]
+    pub(super) played: Vec<(std::path::PathBuf, f64)>,
 }
 
 impl Default for ResultsState {
@@ -78,7 +83,23 @@ impl Default for ResultsState {
             last_answer_at: None,
             selected_t: None,
             cols: 1,
+            #[cfg(test)]
+            played: Vec::new(),
         }
+    }
+}
+
+impl ResultsState {
+    /// Runs `f` with the ruler's state and a way to find the date of the result at a point of
+    /// the ruler (the first result at the top, the last at the bottom).
+    pub(super) fn with_ruler<R>(
+        &mut self,
+        f: impl FnOnce(&mut RulerState, &dyn Fn(f32) -> Option<Month>) -> R,
+    ) -> R {
+        let hits = &self.hits;
+        let date_at =
+            |frac: f32| month_at_fraction(hits.len(), frac, |i| hits.get(i).map(|h| h.taken_at));
+        f(&mut self.grid.ruler, &date_at)
     }
 }
 
@@ -116,6 +137,7 @@ impl App {
             // Starting a search leaves the timeline's selection behind.
             self.tl.grid.sel.clear();
             self.tl.grid.selected = None;
+            self.tl.grid.choosing_for = None;
             self.tl.grid.picking = false;
         }
         self.res.awaiting = Some(self.search.submit(q.clone(), opts));
@@ -188,15 +210,17 @@ impl App {
     }
 
     pub(super) fn results_grid(&mut self, ui: &mut egui::Ui) {
-        if !self.selection_bar_ui(ui) {
-            self.results_header(ui);
-        }
+        self.selection_bar_ui(ui);
+        self.results_header(ui);
         if self.res.hits.is_empty() {
             self.results_empty_state(ui);
             return;
         }
-        let m = ResultsMetrics::new(ui.available_width(), self.res.hits.len());
+        let m = ResultsMetrics::new(ui.available_width(), self.res.hits.len(), self.tl.tile_size);
         self.res.cols = m.cols;
+        if self.res.grid.ruler.needs_mapping(0) {
+            self.res.grid.ruler.set_mapping(0, Mapping::Flat);
+        }
         self.res.grid.shown = true;
         let area = grid_scroll_area("results", &mut self.res.grid.scroll_to);
         let results = Arc::clone(&self.res.hits);
@@ -204,11 +228,64 @@ impl App {
         let out = area.show_viewport(ui, |ui, viewport| {
             self.result_rows(ui, viewport, &m, &results, &mut events);
         });
+        self.res.grid.ruler.observe(
+            out.state.clamped_offset().y,
+            out.content_size.y - out.inner_rect.height(),
+        );
         self.follow_result_selection(ui, &out, &m);
         self.apply_menu_events(&mut events);
         if let Some((i, ev, mods)) = events.clicked {
             self.click_result(&results, i, ev, mods);
         }
+        if let Some((i, action)) = events.action {
+            self.result_action(&results[i], action);
+        }
+    }
+
+    /// What a click on a result's extra button does.
+    fn result_action(&mut self, hit: &SearchHit, action: tiles::TileAction) {
+        match action {
+            tiles::TileAction::FindSimilar => {
+                let label = hit
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.find_similar(hit.item_id, label);
+            }
+            tiles::TileAction::PlayAtBadge => {
+                self.play_video(&hit.path, hit.t_start.unwrap_or(0.0));
+            }
+        }
+    }
+
+    /// Plays the video at `path` from second `t`, in the system's player.
+    pub(super) fn play_video(&mut self, path: &std::path::Path, t: f64) {
+        if cfg!(test) {
+            // Tests record the request instead of starting a player.
+            #[cfg(test)]
+            self.res.played.push((path.to_path_buf(), t));
+            return;
+        }
+        self.report(
+            platform::open_video_at(path, t),
+            "Couldn't play that video. Install a video player such as VLC, or open the file \
+             from its folder.",
+        );
+    }
+
+    /// Replaces the view with photos like item `item_id` (`label` names the photo they are
+    /// like). The field is emptied, since nothing was typed, and the viewer, if open, is left.
+    pub(super) fn find_similar(&mut self, item_id: i64, label: String) {
+        self.end_viewer();
+        self.query.clear();
+        self.query_changed_at = None;
+        self.tl.grid.selected = None;
+        self.res.grid.clear();
+        self.res.grid.scroll_to = None;
+        self.res.grid.keyboard_moved = false;
+        self.res.selected_t = None;
+        self.submit(Query::Similar { item_id, label });
     }
 
     /// Draws the rows of results that intersect `viewport`.
@@ -282,18 +359,20 @@ impl App {
                 .unwrap_or_default()
         };
         let grid = &self.res.grid;
+        let selecting = grid.picking || grid.sel.is_multi();
         let mark = TileMark::of(
             grid.sel.contains(hit.file_id),
             grid.selected == Some(i),
-            grid.picking || grid.sel.is_multi(),
+            selecting,
         );
         let tile = Tile::new(&key, "Result", &name)
-            .badge(
-                (hit.kind == MediaKind::Video)
-                    .then(|| format!("at {}", fmt_time(hit.t_start.unwrap_or(0.0)))),
-            )
+            .find_similar()
+            .badge((hit.kind == MediaKind::Video).then(|| fmt_time(hit.t_start.unwrap_or(0.0))))
+            .plays_at_badge()
+            .year(Month::of_timestamp(hit.taken_at).map(|m| m.year))
+            .selecting(selecting)
             .favorite(marked(&self.fav_marks, hit.file_id, hit.favorite))
-            .selectable(mark, grid.picking);
+            .selectable(mark);
         let id = ui.make_persistent_id(("result", i));
         let out = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
         events.record(i, &out, |ui| {

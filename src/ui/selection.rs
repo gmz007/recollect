@@ -90,6 +90,24 @@ impl Selection {
         }
     }
 
+    /// Selects all of `ids`, or deselects them all if every one is selected already. Returns
+    /// true when they are selected afterwards.
+    pub fn toggle_all(&mut self, ids: &[i64]) -> bool {
+        if ids.iter().all(|id| self.ids.contains(id)) {
+            for id in ids {
+                self.ids.remove(id);
+            }
+            if self.anchor.is_some_and(|a| !self.ids.contains(&a)) {
+                self.anchor = None;
+            }
+            false
+        } else {
+            self.ids.extend(ids.iter().copied());
+            self.anchor = ids.first().copied();
+            true
+        }
+    }
+
     /// Selects just `id`.
     pub fn only(&mut self, id: i64) {
         self.ids.clear();

@@ -18,12 +18,17 @@ pub(super) struct GridState {
     /// Selection mode: the user picked items with a circle or a modifier key, so plain clicks
     /// toggle items instead of opening them and the selection bar is shown.
     pub(super) picking: bool,
+    /// The album the user is choosing photos for ("Add photos"): selection mode stays on, even
+    /// with nothing selected yet.
+    pub(super) choosing_for: Option<i64>,
     /// Whether the keyboard moved the selection since the last frame.
     pub(super) keyboard_moved: bool,
     /// Scroll offset to apply on the next frame so the keyboard selection stays visible.
     pub(super) scroll_to: Option<f32>,
     /// Set when the grid was drawn; read (and cleared) at the start of the next frame.
     pub(super) shown: bool,
+    /// The timeline ruler beside the grid, which is its scroll bar.
+    pub(super) ruler: super::ruler::RulerState,
 }
 
 impl GridState {
@@ -34,13 +39,20 @@ impl GridState {
         if self.sel.is_multi() {
             self.picking = true;
         } else if self.sel.is_empty() {
-            self.picking = false;
+            self.picking = self.choosing_for.is_some();
         }
     }
 
-    /// Drops the selection and leaves selection mode.
+    /// Whether selection mode applies with the current selection: something is selected, or
+    /// photos are being chosen for an album.
+    fn picking_now(&self) -> bool {
+        !self.sel.is_empty() || self.choosing_for.is_some()
+    }
+
+    /// Drops the selection and leaves selection mode (unless photos are being chosen for an
+    /// album, which stays in selection mode).
     pub(super) fn clear(&mut self) {
-        self.picking = false;
+        self.picking = self.choosing_for.is_some();
         self.selected = None;
         self.sel.clear();
     }
@@ -50,8 +62,12 @@ impl GridState {
 #[derive(Default)]
 pub(super) struct GridEvents {
     pub(super) clicked: Option<(usize, tiles::TileEvent, ClickMods)>,
+    /// A click on an extra button of tile `i` ("Find similar", the playable pill).
+    pub(super) action: Option<(usize, tiles::TileAction)>,
     pub(super) right_clicked: Option<usize>,
     pub(super) menu: Option<(usize, TileMenu)>,
+    /// The circle of a day heading was clicked: the index of the day.
+    pub(super) day_toggled: Option<usize>,
     /// The first item of the first visible row.
     pub(super) top_item: Option<usize>,
 }
@@ -67,6 +83,9 @@ impl GridEvents {
     ) {
         if let Some((ev, mods)) = out.event {
             self.clicked = Some((i, ev, mods));
+        }
+        if let Some(a) = out.action {
+            self.action = Some((i, a));
         }
         if out.resp.secondary_clicked() {
             self.right_clicked = Some(i);
@@ -91,14 +110,39 @@ impl App {
     }
 }
 
+impl GridState {
+    /// Selects the items `range` of a list of `len` items (a day), or deselects them if they
+    /// are all selected already.
+    pub(super) fn toggle_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        len: usize,
+        id_at: &dyn Fn(usize) -> i64,
+    ) {
+        let ids: Vec<i64> = range.clone().filter(|&k| k < len).map(id_at).collect();
+        if self.sel.toggle_all(&ids) {
+            self.selected = Some(range.start);
+        } else if !self
+            .selected
+            .is_some_and(|p| p < len && self.sel.contains(id_at(p)))
+        {
+            // The primary item was in the day: another selected item takes over.
+            self.selected = (0..len).find(|&k| self.sel.contains(id_at(k)));
+        }
+        self.picking = self.picking_now();
+    }
+}
+
 /// A vertical scroll area for a grid that fills its panel; it starts at `scroll_to` if one
 /// is waiting (which is used up).
 pub(super) fn grid_scroll_area(
     id_salt: &'static str,
     scroll_to: &mut Option<f32>,
 ) -> egui::ScrollArea {
+    // The ruler beside the grid is its scroll bar.
     let mut area = egui::ScrollArea::vertical()
         .id_salt(id_salt)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .auto_shrink([false, false]);
     if let Some(y) = scroll_to.take() {
         area = area.vertical_scroll_offset(y);
@@ -132,7 +176,7 @@ impl GridState {
                     self.selected = None;
                 }
                 self.selected = self.sel.click(self.selected, len, id_at, i, mods);
-                self.picking = !self.sel.is_empty();
+                self.picking = self.picking_now();
                 ClickOutcome::Selected
             }
             tiles::ClickPlan::Open => {
@@ -300,7 +344,32 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Nav, scroll_offset_for_row, step};
+    use super::{Nav, grid_scroll_area, scroll_offset_for_row, step};
+
+    #[test]
+    fn the_grid_scroll_area_hides_its_scroll_bar() {
+        // With a solid (always visible) bar style, a visible bar would take width from the
+        // content; the ruler is the scroll bar, so the content gets all of it.
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        let mut inner_width = 0.0;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(input, |ui| {
+            let out = grid_scroll_area("t", &mut None)
+                .show(ui, |ui| ui.allocate_space(egui::vec2(10.0, 5000.0)));
+            inner_width = out.inner_rect.width();
+            assert!(out.content_size.y > out.inner_rect.height());
+            assert!((inner_width - ui.max_rect().width()).abs() < 0.5);
+        });
+        full.textures_delta.clear();
+        assert!(inner_width > 0.0);
+    }
 
     #[test]
     fn scroll_offset_keeps_rows_visible() {

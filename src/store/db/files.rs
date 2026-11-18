@@ -37,6 +37,8 @@ pub struct FileDetails {
     pub favorite: bool,
     /// Size on disk; the database does not know it, `Library::file_details` fills it in.
     pub size: Option<u64>,
+    /// The albums the file is in (ids, in no particular order).
+    pub album_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -341,9 +343,9 @@ impl Db {
         Ok(())
     }
 
-    /// Date source, camera and favorite flag of one file.
+    /// Date source, camera, favorite flag and albums of one file.
     pub fn file_details(&self, file_id: i64) -> Result<Option<FileDetails>> {
-        Ok(self
+        let found = self
             .conn
             .query_row(
                 "SELECT taken_at, mtime, date_source, camera, favorite, path FROM files WHERE id = ?1",
@@ -358,10 +360,21 @@ impl Db {
                         camera: r.get(3)?,
                         favorite: r.get::<_, i64>(4)? != 0,
                         size: None,
+                        album_ids: Vec::new(),
                     })
                 },
             )
-            .optional()?)
+            .optional()?;
+        let Some(mut details) = found else {
+            return Ok(None);
+        };
+        let mut st = self
+            .conn
+            .prepare("SELECT album_id FROM album_items WHERE file_id = ?1")?;
+        details.album_ids = st
+            .query_map([file_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(details))
     }
 
     /// Library counts; `indexed`/`pending` are relative to `model`.

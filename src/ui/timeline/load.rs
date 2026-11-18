@@ -80,7 +80,7 @@ impl App {
     /// Starts a load when the view or the library changed (or files keep arriving), and asks
     /// for the repaints that the retry and live reload timers need.
     fn reload_if_due(&mut self) {
-        let filter = self.tl.filter(self.kind);
+        let filter = self.tl.filter();
         let jobs = self.lib.jobs_finished();
         // Files are being added: reload now and then. Embedding adds no files, so it does not
         // trigger reloads; the reload when the job finishes picks up its results.
@@ -117,7 +117,7 @@ impl App {
 
     #[cfg(test)]
     pub(in crate::ui) fn inject_timeline(&mut self, items: Vec<TimelineItem>) {
-        let filter = self.tl.filter(self.kind);
+        let filter = self.tl.filter();
         self.tl.requested = Some((filter.clone(), self.lib.jobs_finished()));
         self.tl.loaded_filter = Some(filter);
         self.tl.set_items(items);

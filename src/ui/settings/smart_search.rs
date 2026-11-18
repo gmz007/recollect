@@ -1,14 +1,14 @@
 //! Settings › Smart search: the quality choice, its download, and switching between choices.
 
-use super::widgets::choice_card;
-use super::{heading, hint};
+use super::hint;
+use super::rows::{group, intro};
+use super::widgets::segmented;
 use crate::library::Activity;
 use crate::model::registry::{self, ModelSpec, megabytes};
 use crate::ui::App;
-use crate::ui::dialogs::{Confirmation, confirm_dialog};
-use crate::ui::style::{self, Palette, icons};
+use crate::ui::sidebar::activity_text;
+use crate::ui::style::{self, Palette};
 use crate::ui::timeline::thousands;
-use egui::RichText;
 
 /// "Best quality" or "Faster": how a smart-search choice is called in the interface.
 pub(in crate::ui) fn quality_name(spec: &ModelSpec) -> &'static str {
@@ -61,145 +61,166 @@ fn smart_search_details(ui: &mut egui::Ui, current: &ModelSpec) {
         });
 }
 
+/// What the user did in the section this frame.
+#[derive(Default)]
+struct SmartSearchActions {
+    download: bool,
+    cancel: bool,
+    style: Option<&'static str>,
+    gpu: Option<bool>,
+}
+
+const CONTROL_WIDTH: f32 = 260.0;
+
 impl App {
     pub(super) fn settings_smart_search(&mut self, ui: &mut egui::Ui) {
-        let installed = self.snapshot.model_installed;
-        let downloading = matches!(self.status.activity, Activity::Downloading { .. });
-        self.smart_search_status_card(ui);
-        ui.add_space(8.0);
-        ui.label(
+        intro(
+            ui,
             "Smart search finds photos and videos when you describe them, like “birthday \
              cake”. It runs on this computer.",
         );
-        heading(ui, "Choose one");
-        self.smart_search_choices(ui);
-        hint(
-            ui,
-            "Switching makes Recollect look at your photos again, which can take a while.",
-        );
-        if !installed && !downloading {
-            self.download_button(ui);
+        if let Activity::Downloading { done, total, .. } = &self.status.activity {
+            ui.add(
+                egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32)
+                    .desired_height(6.0)
+                    .corner_radius(3.0),
+            );
+            ui.add_space(8.0);
         }
+        let mut act = SmartSearchActions::default();
+        self.smart_search_rows(ui, &mut act);
+        self.confirm_style_change(ui);
+        hint_after_rows(ui, self.snapshot.model_installed);
         ui.add_space(10.0);
-        let mut gpu = self.settings.use_gpu;
-        if ui
-            .checkbox(&mut gpu, "Use the graphics card when available")
-            .changed()
-        {
-            self.change_settings(|s| s.use_gpu = gpu);
-        }
-        ui.add_space(6.0);
         smart_search_details(ui, self.lib.model());
+        if act.download {
+            self.turn_on_search();
+        }
+        if act.cancel {
+            self.lib.cancel();
+            self.set_search_prompt_dismissed(true);
+        }
+        if let Some(id) = act.style {
+            self.dialogs.model_confirm = Some(id);
+        }
+        if let Some(on) = act.gpu {
+            self.change_settings(|s| s.use_gpu = on);
+        }
     }
 
-    /// The card at the top: whether smart search is on, with the download progress.
-    fn smart_search_status_card(&self, ui: &mut egui::Ui) {
-        let pal = Palette::of(ui.ctx());
+    /// The group of rows: on or off with the download, the search style and the graphics card.
+    fn smart_search_rows(&self, ui: &mut egui::Ui, act: &mut SmartSearchActions) {
         let installed = self.snapshot.model_installed;
-        let status = smart_search_status(&self.status.activity, installed, self.lib.model());
         let downloading = matches!(self.status.activity, Activity::Downloading { .. });
-        style::card(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let on = installed && !downloading;
-                let (icon, color) = if on {
-                    (icons::ICON_CHECK_CIRCLE, pal.accent)
-                } else {
-                    (icons::ICON_AUTO_AWESOME, pal.text_secondary)
-                };
-                ui.label(style::icon_text(icon, 22.0).color(color));
-                ui.label(style::semibold(status).size(15.0));
+        let current = self.lib.model();
+        let status = smart_search_status(&self.status.activity, installed, current);
+        let download_label = format!("Download and turn on ({} MB)", current.size_mb());
+        group(ui, |ui, rows| {
+            rows.row(ui, "Smart search", Some(&status), CONTROL_WIDTH, |ui| {
+                if downloading {
+                    act.cancel = ui.button("Cancel").clicked();
+                } else if !installed {
+                    act.download = style::primary_button(ui, &download_label).clicked();
+                }
             });
-            if let Activity::Downloading { done, total, .. } = &self.status.activity {
-                ui.add_space(4.0);
-                ui.add(
-                    egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32)
-                        .desired_height(6.0)
-                        .corner_radius(3.0),
-                );
-            }
+            rows.row(
+                ui,
+                "Search style",
+                Some(&quality_blurb(current)),
+                CONTROL_WIDTH,
+                |ui| {
+                    let items: Vec<_> = registry::MODELS
+                        .iter()
+                        .map(|m| (m.id, quality_name(m)))
+                        .collect();
+                    act.style = segmented(ui, &items, current.id);
+                },
+            );
+            act.gpu = rows.switch_row(
+                ui,
+                "Use the graphics card when available",
+                "Makes getting photos ready quicker, when your computer has one.",
+                self.settings.use_gpu,
+            );
         });
     }
 
-    /// One card per smart-search choice; picking another asks for confirmation.
-    fn smart_search_choices(&mut self, ui: &mut egui::Ui) {
-        let current = self.lib.model();
-        for m in registry::MODELS {
-            let here = self.snapshot.installed_models.contains(&m.id);
-            let note = if here { "Already on this computer" } else { "" };
-            if choice_card(
-                ui,
-                m.id == current.id,
-                quality_name(m),
-                &quality_blurb(m),
-                note,
-            ) && m.id != current.id
-            {
-                self.dialogs.model_confirm = Some(m.id);
-            }
-            ui.add_space(4.0);
-        }
-    }
-
-    /// The accent button that downloads the current choice and turns smart search on.
-    fn download_button(&mut self, ui: &mut egui::Ui) {
-        let pal = Palette::of(ui.ctx());
-        ui.add_space(8.0);
-        let label = format!("Download and turn on ({} MB)", self.lib.model().size_mb());
-        let b = egui::Button::new(RichText::new(&label).color(pal.on_accent)).fill(pal.accent);
-        let r = ui.add(b);
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        if r.clicked() {
-            self.turn_on_search();
-        }
-        hint(
-            ui,
-            "A one-time download. After that, search works without the internet.",
-        );
-    }
-
-    /// The question before switching smart search: it makes every photo get looked at again.
-    pub(in crate::ui) fn model_confirm_dialog(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.dialogs.model_confirm else {
-            return;
-        };
-        let Some(spec) = registry::get(id) else {
+    /// The question before changing the search style: it makes every photo get looked at again.
+    fn confirm_style_change(&mut self, ui: &mut egui::Ui) {
+        let Some(spec) = self.dialogs.model_confirm.and_then(registry::get) else {
             self.dialogs.model_confirm = None;
             return;
         };
-        let here = self.snapshot.installed_models.contains(&spec.id);
-        let title = format!("Switch to {}?", quality_name(spec));
-        let choice = confirm_dialog(ctx, &title, "Switch", "Cancel", true, |ui| {
-            ui.set_max_width(420.0);
-            ui.label(
-                "Recollect will look at all your photos again so search works with this \
-                 choice. That can take a while, and you can keep using Recollect meanwhile.",
-            );
-            if !here {
-                ui.add_space(4.0);
-                ui.label(format!(
-                    "It needs a one-time download of {} MB.",
-                    spec.size_mb()
-                ));
-            }
-            ui.add_space(8.0);
-        });
-        match choice {
-            Some(Confirmation::Confirmed) => {
+        if spec.id == self.lib.model().id {
+            self.dialogs.model_confirm = None;
+            return;
+        }
+        let pal = Palette::of(ui.ctx());
+        let mut answer = None;
+        ui.add_space(10.0);
+        egui::Frame::new()
+            .fill(pal.tint)
+            .corner_radius(egui::CornerRadius::same(style::CARD_RADIUS))
+            .inner_margin(egui::Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                answer = self.style_change_body(ui, spec);
+            });
+        match answer {
+            Some(true) => {
                 self.dialogs.model_confirm = None;
                 self.switch_model(spec);
             }
-            Some(Confirmation::Cancelled) => self.dialogs.model_confirm = None,
+            Some(false) => self.dialogs.model_confirm = None,
             None => {}
         }
+    }
+
+    /// The text and buttons of the question; the answer once one was clicked. While Recollect
+    /// is busy the work is shown with its Stop button and "Change" waits.
+    fn style_change_body(&mut self, ui: &mut egui::Ui, spec: &'static ModelSpec) -> Option<bool> {
+        let busy = self.lib.is_busy();
+        ui.label(format!(
+            "Change to {}? Recollect will look through your photos again, which can \
+             take a while. You can keep using it meanwhile.",
+            quality_name(spec)
+        ));
+        if !self.snapshot.installed_models.contains(&spec.id) {
+            ui.label(format!(
+                "It needs a one-time download of {} MB.",
+                spec.size_mb()
+            ));
+        }
+        if busy {
+            ui.add_space(6.0);
+            ui.label(
+                "Recollect is busy right now. Wait for it to finish, or stop it here, \
+                 then change.",
+            );
+            if let Some((text, fraction)) = activity_text(&self.status.activity) {
+                self.activity_details(ui, &text, fraction);
+            }
+        }
+        ui.add_space(6.0);
+        let mut answer = None;
+        ui.horizontal(|ui| {
+            let change = ui.add_enabled_ui(!busy, |ui| style::primary_button(ui, "Change"));
+            if change.inner.clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+        answer
     }
 
     /// Makes `spec` the smart-search choice (waits if a long task is running).
     pub(super) fn switch_model(&mut self, spec: &'static ModelSpec) {
         if self.lib.is_busy() {
             self.notify(
-                "Recollect is busy right now. Wait for it to finish, or press Stop in the left \
-                 panel, then try again.",
+                "Recollect is busy right now. Wait for it to finish, or stop it in Settings › \
+                 Library, then try again.",
             );
             return;
         }
@@ -216,5 +237,16 @@ impl App {
             self.clear_search();
             self.refresh_snapshot(true);
         }
+    }
+}
+
+/// The note under the rows: the download is a one-time thing.
+fn hint_after_rows(ui: &mut egui::Ui, installed: bool) {
+    if !installed {
+        ui.add_space(8.0);
+        hint(
+            ui,
+            "A one-time download. After that, search works without the internet.",
+        );
     }
 }

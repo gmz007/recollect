@@ -45,14 +45,15 @@ fn seed(lib: &Library) -> i64 {
     .unwrap()[0][0]
 }
 
-/// Writes every file of the current model with its expected size (sparse), so the download
+/// Writes an empty placeholder for every file of the current model and lets them count as
+/// installed (see `PLACEHOLDERS_COUNT`), so the download
 /// finds nothing to fetch.
 fn fake_install(lib: &Library) {
+    crate::model::download::PLACEHOLDERS_COUNT.store(true, std::sync::atomic::Ordering::Relaxed);
     let dir = lib.model_dir();
     std::fs::create_dir_all(&dir).unwrap();
     for f in lib.model().files {
-        let file = std::fs::File::create(dir.join(f.local)).unwrap();
-        file.set_len(f.size).unwrap();
+        std::fs::File::create(dir.join(f.local)).unwrap();
     }
     assert!(lib.model_installed());
 }

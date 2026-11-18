@@ -79,9 +79,19 @@ fn the_activity_card_describes_what_is_happening() {
             folder: "/x".into(),
         },
     );
+    // The foot of the sidebar shows a ring; its details open on a click.
+    assert!(h.query_by_label("Pause").is_none());
+    h.get_by_label("Progress: Looking for new photos…").click();
+    h.run_steps(2);
     h.get_by_label("Looking for new photos…");
     h.get_by_label("Pause");
     h.get_by_label("Stop");
+    // Paused work says so in the foot, not only in the details.
+    lib.update_status(|s| s.paused = true);
+    h.run_steps(2);
+    h.get_by_label("Progress: Paused — Looking for new photos…");
+    lib.update_status(|s| s.paused = false);
+    h.run_steps(2);
     show(
         &mut h,
         Activity::ReadingDates {
@@ -161,7 +171,7 @@ fn help_has_a_section_for_each_question() {
         ),
         ("Searching", "Narrow the results", "When"),
         ("Searching", "Moments in videos", "at 1:23"),
-        ("Organizing", "Favorites", "star"),
+        ("Organizing", "Favorites", "heart"),
         ("Organizing", "Albums", "Add to album"),
         ("Organizing", "Selecting several photos", "circle"),
         ("Keyboard shortcuts", "Arrow keys", "Move between photos"),
@@ -206,7 +216,8 @@ fn check_main_window(check: &mut dyn FnMut(&str, &Harness<'_>), dir: &std::path:
     let app = album_app(dir, true);
     let mut h = album_harness(&app);
     check("timeline", &h);
-    // Activity card in each state.
+    // Activity in each state.
+    let mut details_open = false;
     let lib = Arc::clone(&app.borrow().lib);
     for a in [
         Activity::Scanning {
@@ -228,6 +239,13 @@ fn check_main_window(check: &mut dyn FnMut(&str, &Harness<'_>), dir: &std::path:
         lib.update_status(|s| s.activity = a);
         h.run_steps(2);
         check("activity", &h);
+        if !details_open {
+            // The details (with Pause and Stop) open from the ring at the foot.
+            h.get_by_label_contains("Progress:").click();
+            h.run_steps(2);
+            check("activity details", &h);
+            details_open = true;
+        }
     }
     lib.update_status(|s| s.activity = Activity::Idle);
     h.run_steps(2);
@@ -252,14 +270,21 @@ fn check_main_window(check: &mut dyn FnMut(&str, &Harness<'_>), dir: &std::path:
         a.snapshot.errors = vec![("/nowhere/x.jpg".into(), "unreadable".into())];
         a.failed_open = true;
     }
-    for section in ["Appearance", "Smart search", "Library", "Storage", "About"] {
+    for section in [
+        "Appearance",
+        "Features",
+        "Smart search",
+        "Library",
+        "Storage",
+        "About",
+    ] {
         open_section(&mut h, section);
         check(&format!("settings: {section}"), &h);
     }
     open_section(&mut h, "Smart search");
     h.get_by_label("Best quality").click();
     h.run_steps(3);
-    h.get_by_label("Switch to Best quality?");
+    h.get_by_label_contains("Change to Best quality?");
     check("settings: switching", &h);
     h.get_by_label("Cancel").click();
     h.run_steps(3);
@@ -323,12 +348,17 @@ fn the_main_screens_use_no_technical_words() {
     {
         let d = tempfile::tempdir().unwrap();
         let app = fresh_app(d.path());
+        app.borrow_mut()
+            .welcome
+            .as_mut()
+            .unwrap()
+            .add_folder_for_test(d.path().to_path_buf());
         let mut h = album_harness(&app);
         check("welcome: first screen", &h);
         h.get_by_label("Get started").click();
         h.run_steps(3);
         check("welcome: folders", &h);
-        h.get_by_label("Continue without folders").click();
+        h.get_by_label("Continue").click();
         h.run_steps(3);
         check("welcome: smart search", &h);
         h.get_by_label("Not now").click();
@@ -369,13 +399,56 @@ fn the_main_screens_use_no_technical_words() {
         let app = Rc::new(RefCell::new(app));
         let mut h = album_harness(&app);
         check("search results", &h);
+        let lib = Arc::clone(&app.borrow().lib);
+        lib.update_status(|s| {
+            s.activity = crate::library::Activity::Indexing(crate::library::IndexProgress {
+                done: 1,
+                total: 20,
+                ..Default::default()
+            });
+        });
+        h.run_steps(2);
+        h.get_by_label_contains("Still getting");
+        check("search results while preparing", &h);
+        lib.update_status(|s| s.activity = crate::library::Activity::Idle);
         let mut a = app.borrow_mut();
         a.res.hits = Arc::default();
         drop(a);
         h.run_steps(2);
         check("no results", &h);
+        app.borrow_mut().kind = Some(MediaKind::Video);
+        h.run_steps(2);
+        h.get_by_label("Clear filters");
+        check("no results with a filter", &h);
     }
-    // The viewer, with its labelled toolbar and the details panel.
+    // An album: its header, the "⋯" menu, both dialogs and the Add photos bar.
+    {
+        let d4 = tempfile::tempdir().unwrap();
+        let (_lib, app, mut h) = album_view(d4.path(), 3, album_harness);
+        check("album", &h);
+        h.get_by_label("More actions").click();
+        h.run_steps(3);
+        check("album menu", &h);
+        h.get_by_label("Rename…").click();
+        h.run_steps(3);
+        check("rename dialog", &h);
+        h.get_by_label("Cancel").click();
+        h.run_steps(3);
+        h.get_by_label("More actions").click();
+        h.run_steps(3);
+        h.get_by_label("Delete album…").click();
+        h.run_steps(3);
+        check("delete dialog", &h);
+        h.get_by_label("Cancel").click();
+        h.run_steps(3);
+        app.borrow_mut().start_adding(1);
+        h.run_steps(3);
+        check("add photos bar", &h);
+        h.get_by_label("Help").click();
+        h.run_steps(3);
+        check("help sheet", &h);
+    }
+    // The viewer, with its bar and the details panel, then its "More" menu.
     {
         let d5 = tempfile::tempdir().unwrap();
         let app = album_app(d5.path(), true);
@@ -383,6 +456,26 @@ fn the_main_screens_use_no_technical_words() {
         open_tile(&mut h, "Item img1.jpg");
         h.run_steps(3);
         check("viewer", &h);
+        h.get_by_label("More").click();
+        h.run_steps(3);
+        h.get_by_label("Open with default app");
+        check("viewer menu", &h);
+    }
+    // The "On this day" banner, the size chip and Settings > Appearance with the photo size.
+    {
+        let d6 = tempfile::tempdir().unwrap();
+        let app = album_app(d6.path(), true);
+        app.borrow_mut().today_override = chrono::NaiveDate::from_ymd_opt(2026, 3, 15);
+        let mut h = album_harness(&app);
+        h.get_by_label("On this day");
+        check("on this day banner", &h);
+        h.key_combination_modifiers(egui::Modifiers::COMMAND, &[egui::Key::Equals]);
+        h.run_steps(3);
+        h.get_by_label("Photo size");
+        check("photo size chip", &h);
+        open_section(&mut h, "Appearance");
+        h.get_all_by_label("Photo size").next().unwrap();
+        check("settings: appearance", &h);
     }
     // An album view.
     {
@@ -394,7 +487,7 @@ fn the_main_screens_use_no_technical_words() {
     assert!(seen.iter().any(|t| t == "Recently added"));
     assert!(
         seen.iter()
-            .any(|t| t.starts_with("Getting your photos ready for search"))
+            .any(|t| t.contains("Getting your photos ready for search"))
     );
 }
 
@@ -506,7 +599,7 @@ fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
         ),
         (
             EmptyView::Favorites,
-            "Click the star on any photo to add it here.",
+            "Click the heart on any photo to add it here.",
             "Go to Photos",
         ),
         (
@@ -514,20 +607,17 @@ fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
             "There are no photos or videos in this folder.",
             "Check for new photos",
         ),
-        (
-            EmptyView::Album,
-            "This album is empty. Select photos and choose Add to album.",
-            "Go to Photos",
-        ),
+        (EmptyView::Album, "This album is empty", "Add photos"),
         (
             EmptyView::NoResults,
-            "No photos match “snow”. Try different words.",
-            "Start over",
+            "No photos match “snow”. Try describing the moment in other words.",
+            "",
         ),
         (
             EmptyView::NoResultsDated,
-            "No photos match “snow”. Try different words, or check the When filter.",
-            "Clear the date filter",
+            "Nothing matched those filters. Try a different time or type, or describe the \
+             moment in other words.",
+            "Clear filters",
         ),
         (
             EmptyView::SearchOff,
@@ -539,7 +629,10 @@ fn every_view_has_an_empty_state_with_a_sentence_and_a_button() {
         let d = tempfile::tempdir().unwrap();
         let (_app, h) = empty_view(d.path(), which);
         h.get_by_label(sentence);
-        h.get_all_by_label(button).last().unwrap();
+        // A search with nothing found and no filter on has a hint instead of a button.
+        if !button.is_empty() {
+            h.get_all_by_label(button).last().unwrap();
+        }
     }
 }
 
@@ -551,18 +644,13 @@ fn the_buttons_of_the_empty_states_work() {
     h.get_by_label("Go to Photos").click();
     h.run_steps(3);
     assert_eq!(app.borrow().tl.view, View::Timeline);
-    // No results: clearing the date filter keeps the words; clearing the search drops them.
+    // No results: clearing the filters keeps the words.
     let d = tempfile::tempdir().unwrap();
     let (app, mut h) = empty_view(d.path(), EmptyView::NoResultsDated);
-    h.get_by_label("Clear the date filter").click();
+    h.get_by_label("Clear filters").click();
     h.run_steps(3);
     assert_eq!(app.borrow().date, crate::ui::when::DateFilter::default());
     assert!(app.borrow().res.current.is_some());
-    let d = tempfile::tempdir().unwrap();
-    let (app, mut h) = empty_view(d.path(), EmptyView::NoResults);
-    h.get_by_label("Start over").click();
-    h.run_steps(3);
-    assert!(app.borrow().res.current.is_none() && app.borrow().query.is_empty());
     // Search off: opens Settings on smart search.
     let d = tempfile::tempdir().unwrap();
     let (app, mut h) = empty_view(d.path(), EmptyView::SearchOff);
@@ -608,8 +696,8 @@ fn tips_show_one_at_a_time_once_each() {
     let mut h = album_harness(&restarted);
     assert!(h.query_by_label("Got it").is_none());
     // Settings can bring them back.
-    open_section(&mut h, "Appearance");
-    h.get_by_label("Show tips again").click();
+    open_section(&mut h, "Features");
+    h.get_by_label("Show again").click();
     h.run_steps(3);
     assert!(lib.settings().tips_dismissed.is_empty());
     h.get_by_label("Close settings").click();
@@ -622,9 +710,33 @@ fn without_smart_search_the_first_tip_is_about_selecting() {
     use crate::ui::guide::Tip;
     let d = tempfile::tempdir().unwrap();
     let app = album_app(d.path(), false);
-    let h = album_harness(&app);
+    let mut h = album_harness(&app);
+    // The offer to turn on smart search comes first; no tip stacks on it.
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
     h.get_by_label(Tip::Select.text());
     assert!(h.query_by_label(Tip::Search.text()).is_none());
+}
+
+#[test]
+fn only_one_banner_shows_above_the_grid_at_a_time() {
+    use crate::ui::guide::Tip;
+    let d = tempfile::tempdir().unwrap();
+    let app = album_app(d.path(), false);
+    let mut h = album_harness(&app);
+    // The smart search offer is showing: no tip next to it.
+    h.get_by_label("Turn on smart search to find photos by describing them");
+    for tip in [Tip::Select, Tip::Search, Tip::Album] {
+        assert!(h.query_by_label(tip.text()).is_none(), "{tip:?}");
+    }
+    // Once it is dealt with, the tip takes its place.
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Turn on smart search to find photos by describing them")
+            .is_none()
+    );
+    h.get_by_label(Tip::Select.text());
 }
 
 #[test]
@@ -632,6 +744,10 @@ fn the_first_album_view_explains_how_to_fill_it() {
     use crate::ui::guide::Tip;
     let d = tempfile::tempdir().unwrap();
     let (lib, _app, mut h) = album_view(d.path(), 3, album_harness);
+    // The smart search offer has been dealt with, so it does not hold the tip back.
+    lib.update_settings(|s| s.search_prompt_dismissed = true)
+        .unwrap();
+    h.run_steps(3);
     h.get_by_label(Tip::Album.text());
     assert!(
         h.query_by_label(Tip::Select.text()).is_none(),

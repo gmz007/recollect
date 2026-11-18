@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Chooses `dir` on the welcome's folder screen, as if it had been added with the picker.
+fn choose_a_folder(app: &Rc<RefCell<App>>, dir: &std::path::Path) {
+    app.borrow_mut()
+        .welcome
+        .as_mut()
+        .unwrap()
+        .add_folder_for_test(dir.to_path_buf());
+}
+
 #[test]
 fn the_welcome_leads_to_photos_in_four_clicks() {
     let d = tempfile::tempdir().unwrap();
@@ -11,7 +20,7 @@ fn the_welcome_leads_to_photos_in_four_clicks() {
     let mut h = album_harness(&app);
     // First screen: the promise, the benefits, one button. No top bar or sidebar yet.
     h.get_by_label("Find any photo by describing it");
-    h.get_by_label("Everything stays on this computer");
+    h.get_by_label_contains("Everything stays on this computer");
     assert!(h.query_by_label("Settings").is_none());
     assert!(app.borrow().welcome_active());
     h.get_by_label("Step 1 of 4");
@@ -19,16 +28,12 @@ fn the_welcome_leads_to_photos_in_four_clicks() {
     h.get_by_label("Get started").click();
     clicks += 1;
     h.run_steps(3);
-    // Second: with nothing chosen the button says so; typing a path (under More options)
-    // adds one (not a "primary" click).
+    // Second: with nothing chosen Continue is off and says why; typing a path (under More
+    // options) adds one (not a "primary" click).
     h.get_by_label("Where are your photos?");
     h.get_by_label("Step 2 of 4");
-    assert!(
-        !h.get_by_label("Continue without folders")
-            .accesskit_node()
-            .is_disabled()
-    );
-    h.get_by_label("You can add folders later from the sidebar.");
+    assert!(h.get_by_label("Continue").accesskit_node().is_disabled());
+    h.get_by_label("Pick at least one folder to continue.");
     assert!(
         h.query_by_label_contains("/home/").is_none(),
         "no raw paths"
@@ -51,7 +56,6 @@ fn the_welcome_leads_to_photos_in_four_clicks() {
     h.get_by_label("Add this folder").click();
     h.run_steps(3);
     assert!(!h.get_by_label("Continue").accesskit_node().is_disabled());
-    assert!(h.query_by_label("Continue without folders").is_none());
     assert_eq!(
         app.borrow().welcome.as_ref().unwrap().chosen_folders(),
         [photos.path().to_path_buf()]
@@ -64,7 +68,7 @@ fn the_welcome_leads_to_photos_in_four_clicks() {
     h.get_by_label("Best quality");
     h.get_by_label("Faster");
     h.get_by_label_contains("never leave this computer");
-    h.get_by_label("Download and turn on");
+    h.get_by_label("Turn on");
     assert!(h.query_by_label("Skip for now").is_none() && h.query_by_label("Skip setup").is_none());
     h.get_by_label("Not now").click();
     clicks += 1;
@@ -156,15 +160,16 @@ fn continuing_without_ticks_adds_nothing_and_ticked_folders_are_added_exactly() 
             .chosen_folders()
             .is_empty()
     );
-    h.get_by_label("Continue without folders");
-    h.get_by_label("You can add folders later from the sidebar.");
-    h.get_by_label("Continue without folders").click();
+    assert!(h.get_by_label("Continue").accesskit_node().is_disabled());
+    h.get_by_label("Pick at least one folder to continue.");
+    // Clicking the disabled button goes nowhere.
+    h.get_by_label("Continue").click();
     h.run_steps(3);
-    h.get_by_label("Not now").click();
+    h.get_by_label("Where are your photos?");
+    h.get_by_label("Back").click();
     h.run_steps(3);
-    h.get_by_label("Start").click();
+    h.get_by_label("I'll set it up myself").click();
     settle(&mut h, || lib.settings().welcome_done);
-    settle(&mut h, || lib.jobs_finished() > 0);
     lib.wait();
     assert!(lib.folders().unwrap().is_empty());
     drop(h);
@@ -203,7 +208,7 @@ fn the_folders_screen_explains_a_missing_pictures_folder_and_names_added_folders
     h.get_by_label("Get started").click();
     h.run_steps(3);
     h.get_by_label("We didn't find a Pictures folder. Choose where your photos are.");
-    h.get_by_label("Add another folder…");
+    h.get_by_label("Add a folder…");
     // With a Pictures folder the sentence is not shown.
     let d2 = tempfile::tempdir().unwrap();
     let pics = tempfile::tempdir().unwrap();
@@ -261,6 +266,7 @@ fn the_computers_hardware_is_asked_once_not_every_frame() {
     use std::sync::atomic::Ordering;
     let d = tempfile::tempdir().unwrap();
     let app = fresh_app(d.path());
+    choose_a_folder(&app, d.path());
     let mut h = album_harness(&app);
     h.get_by_label("Get started").click();
     h.run_steps(3);
@@ -279,6 +285,7 @@ fn the_computers_hardware_is_asked_once_not_every_frame() {
 fn every_step_after_the_first_has_back_and_the_first_can_be_skipped_in_one_way() {
     let d = tempfile::tempdir().unwrap();
     let app = fresh_app(d.path());
+    choose_a_folder(&app, d.path());
     let mut h = album_harness(&app);
     assert!(h.query_by_label("Back").is_none());
     h.get_by_label("I'll set it up myself");
@@ -299,7 +306,7 @@ fn every_step_after_the_first_has_back_and_the_first_can_be_skipped_in_one_way()
     // After choosing the download the same screen adds one sentence.
     h.get_by_label("Back").click();
     h.run_steps(3);
-    h.get_by_label("Download and turn on").click();
+    h.get_by_label("Turn on").click();
     h.run_steps(3);
     h.get_by_label_contains("Search works once the download finishes.");
 }
@@ -308,6 +315,7 @@ fn every_step_after_the_first_has_back_and_the_first_can_be_skipped_in_one_way()
 fn a_failed_model_switch_at_start_keeps_the_welcome_and_says_so() {
     let d = tempfile::tempdir().unwrap();
     let app = fresh_app(d.path());
+    choose_a_folder(&app, d.path());
     let lib = Arc::clone(&app.borrow().lib);
     // A choice the library does not know makes the switch fail at once.
     app.borrow_mut()
@@ -320,11 +328,105 @@ fn a_failed_model_switch_at_start_keeps_the_welcome_and_says_so() {
     h.run_steps(3);
     h.get_by_label_contains("Continue").click();
     h.run_steps(3);
-    h.get_by_label("Download and turn on").click();
+    h.get_by_label("Turn on").click();
     h.run_steps(3);
     h.get_by_label("Start").click();
     h.run_steps(3);
     h.get_by_label("Couldn't set up smart search. Please try again in a moment.");
     assert!(app.borrow().welcome_active(), "still on the last screen");
     assert!(!lib.settings().welcome_done);
+}
+
+#[test]
+fn the_buttons_stay_where_they_are_on_every_step() {
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    // A long path (as temporary folders have on macOS) must not widen the column.
+    let deep = d
+        .path()
+        .join("a-folder-with-a-rather-long-name")
+        .join("and-another-one-inside-it-that-is-long-too");
+    std::fs::create_dir_all(&deep).unwrap();
+    choose_a_folder(&app, &deep);
+    let mut h = album_harness(&app);
+    let primary = ["Get started", "Continue", "Turn on", "Start"];
+    let mut rects = Vec::new();
+    for (i, label) in primary.iter().enumerate() {
+        h.get_by_label(&format!("Step {} of 4", i + 1));
+        let back = (i > 0).then(|| h.get_by_label("Back").rect());
+        rects.push((back, h.get_by_label(label).rect()));
+        h.get_by_label(label).click();
+        h.run_steps(3);
+    }
+    // The first step has no Back; on the others it is always in one place.
+    assert!(rects[0].0.is_none());
+    assert!(rects[1..].windows(2).all(|p| p[0].0 == p[1].0));
+    assert!(rects.windows(2).all(|p| p[0].1 == p[1].1), "{rects:?}");
+}
+
+#[test]
+fn not_now_finishes_setup_without_smart_search() {
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let lib = Arc::clone(&app.borrow().lib);
+    choose_a_folder(&app, d.path());
+    let mut h = album_harness(&app);
+    h.get_by_label("Get started").click();
+    h.run_steps(3);
+    h.get_by_label("Continue").click();
+    h.run_steps(3);
+    h.get_by_label("Not now").click();
+    h.run_steps(3);
+    h.get_by_label("Off for now");
+    h.get_by_label("Start").click();
+    settle(&mut h, || lib.settings().welcome_done);
+    assert!(!lib.model_installed());
+}
+
+#[test]
+fn the_mosaic_shows_in_wide_windows_only_and_follows_the_theme() {
+    use crate::config::Theme;
+    use crate::ui::welcome::mosaic::PhotoSet;
+    let set = |app: &Rc<RefCell<App>>| app.borrow().welcome.as_ref().unwrap().mosaic_set_for_test();
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    app.borrow_mut().change_settings(|s| s.theme = Theme::Light);
+    let mut h = album_harness(&app);
+    h.run_steps(3);
+    assert_eq!(set(&app), Some(PhotoSet::Light));
+    app.borrow_mut().change_settings(|s| s.theme = Theme::Dark);
+    h.run_steps(5);
+    assert_eq!(set(&app), Some(PhotoSet::Dark));
+    drop(h);
+
+    // A narrow window shows the content alone.
+    let d2 = tempfile::tempdir().unwrap();
+    let app = fresh_app(d2.path());
+    let shown = Rc::clone(&app);
+    let mut narrow = Harness::builder()
+        .with_size(egui::vec2(700.0, 800.0))
+        .with_max_steps(MAX_STEPS)
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    narrow.run_steps(5);
+    narrow.get_by_label("Find any photo by describing it");
+}
+
+#[test]
+fn resizing_across_the_mosaic_width_does_not_decode_the_photos_again() {
+    use crate::ui::welcome::mosaic::DECODE_RUNS;
+    use std::sync::atomic::Ordering;
+    let d = tempfile::tempdir().unwrap();
+    let app = fresh_app(d.path());
+    let shown = Rc::clone(&app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_max_steps(MAX_STEPS)
+        .build_ui(move |ui| shown.borrow_mut().show(ui));
+    h.run_steps(3);
+    assert_eq!(DECODE_RUNS.load(Ordering::Relaxed), 1);
+    for width in [700.0, 1200.0, 800.0, 1000.0] {
+        h.set_size(egui::vec2(width, 800.0));
+        h.run_steps(3);
+    }
+    assert_eq!(DECODE_RUNS.load(Ordering::Relaxed), 1, "decoded once, kept");
 }

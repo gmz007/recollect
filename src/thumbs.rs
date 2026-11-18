@@ -72,26 +72,30 @@ fn save_jpeg(file: &Path, rgb: &Rgb) -> Result<()> {
     })
 }
 
+/// Every thumbnail file in `cache_dir` (one folder level down) with its metadata.
+fn cached_files(cache_dir: &Path) -> impl Iterator<Item = (PathBuf, std::fs::Metadata)> {
+    std::fs::read_dir(cache_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok().map(|m| (e.path(), m)))
+}
+
+/// The bytes the thumbnails in `cache_dir` take.
+pub fn used_bytes(cache_dir: &Path) -> u64 {
+    cached_files(cache_dir).map(|(_, m)| m.len()).sum()
+}
+
 /// Deletes the least recently used thumbnails until the cache is below `max_bytes`.
 /// Returns the number of files removed.
 pub fn prune(cache_dir: &Path, max_bytes: u64) -> usize {
-    let mut files = Vec::new();
-    let mut total = 0u64;
-    let Ok(dirs) = std::fs::read_dir(cache_dir) else {
-        return 0;
-    };
-    for d in dirs.flatten() {
-        let Ok(entries) = std::fs::read_dir(d.path()) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            if let Ok(m) = e.metadata() {
-                total += m.len();
-                let t = m.modified().ok();
-                files.push((t, m.len(), e.path()));
-            }
-        }
-    }
+    let mut files: Vec<_> = cached_files(cache_dir)
+        .map(|(p, m)| (m.modified().ok(), m.len(), p))
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
     if total <= max_bytes {
         return 0;
     }

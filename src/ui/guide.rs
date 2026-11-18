@@ -119,12 +119,12 @@ pub(super) fn album_problem(kind: Option<&AlbumError>, reason: &str) -> (String,
 /// A piece of the sentence of an empty state.
 pub(super) enum Part<'a> {
     Text(&'a str),
-    /// The star icon (the symbol itself may be missing from the text font).
-    Star,
+    /// The heart icon (the symbol itself may be missing from the text font).
+    Heart,
 }
 
 /// The sentence of an empty-state screen laid out for display, and the same sentence in
-/// plain text for assistive technology (the star named).
+/// plain text for assistive technology (the heart named).
 fn sentence_job(
     ui: &egui::Ui,
     sentence: &[Part<'_>],
@@ -151,18 +151,18 @@ fn sentence_job(
                 );
                 plain.push_str(t);
             }
-            Part::Star => {
+            Part::Heart => {
                 job.append(
-                    icons::ICON_STAR.codepoint,
+                    icons::ICON_FAVORITE.codepoint,
                     0.0,
                     egui::TextFormat {
-                        font_id: style::icon_font_id(icons::ICON_STAR, 20.0),
-                        color: pal.favorite,
+                        font_id: style::icon_font_id(icons::ICON_FAVORITE, 20.0),
+                        color: pal.text,
                         valign: egui::Align::Center,
                         ..Default::default()
                     },
                 );
-                plain.push_str("star");
+                plain.push_str("heart");
             }
         }
     }
@@ -174,6 +174,31 @@ fn empty_text(ui: &mut egui::Ui, icon: MaterialIcon, text: &str, button: &str) -
     empty_state(ui, icon, &[Part::Text(text)], button)
 }
 
+/// The screen of an album with nothing in it: what to do, a button that starts it and the
+/// reassurance that files are never touched. Returns true when the button was clicked.
+fn empty_album_state(ui: &mut egui::Ui) -> bool {
+    let pal = Palette::of(ui.ctx());
+    let mut clicked = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.22).min(140.0));
+        ui.label(style::icon_text(icons::ICON_PHOTO_ALBUM, 56.0).color(pal.text2));
+        ui.add_space(12.0);
+        ui.label(style::semibold("This album is empty").size(17.0));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Add photos from Photos, or select photos anywhere and choose Add to album.",
+            )
+            .color(pal.text2),
+        );
+        ui.add_space(16.0);
+        clicked = style::primary_button(ui, "Add photos").clicked();
+        ui.add_space(12.0);
+        ui.label(RichText::new("Albums never change or delete your files.").color(pal.muted));
+    });
+    clicked
+}
+
 /// The screen for a view with nothing in it: an icon, one sentence and one main button.
 /// Returns true when the button was clicked.
 fn empty_state(ui: &mut egui::Ui, icon: MaterialIcon, sentence: &[Part<'_>], button: &str) -> bool {
@@ -182,10 +207,10 @@ fn empty_state(ui: &mut egui::Ui, icon: MaterialIcon, sentence: &[Part<'_>], but
     let mut clicked = false;
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.22).min(140.0));
-        ui.label(style::icon_text(icon, 56.0).color(pal.text_secondary));
+        ui.label(style::icon_text(icon, 56.0).color(pal.text2));
         ui.add_space(12.0);
         let r = ui.add(egui::Label::new(job));
-        // Assistive technology reads the whole sentence, with the star named.
+        // Assistive technology reads the whole sentence, with the heart named.
         ui.ctx().accesskit_node_builder(r.id, |b| {
             b.set_value(plain.clone());
             b.set_label(plain.clone());
@@ -214,18 +239,18 @@ impl App {
     /// What the album grids show when the current view has no items.
     pub(super) fn timeline_empty_state(&mut self, ui: &mut egui::Ui) {
         let go_photos = match self.tl.view {
-            View::Album(_) => empty_text(
-                ui,
-                icons::ICON_PHOTO_ALBUM,
-                "This album is empty. Select photos and choose Add to album.",
-                "Go to Photos",
-            ),
+            View::Album(id) => {
+                if empty_album_state(ui) {
+                    self.start_adding(id);
+                }
+                false
+            }
             View::Favorites => empty_state(
                 ui,
-                icons::ICON_STAR,
+                icons::ICON_FAVORITE,
                 &[
                     Part::Text("Click the "),
-                    Part::Star,
+                    Part::Heart,
                     Part::Text(" on any photo to add it here."),
                 ],
                 "Go to Photos",
@@ -289,32 +314,55 @@ impl App {
         }
     }
 
-    /// The search ran and found nothing.
+    /// The search ran and found nothing. With a filter on, the way out is clearing it;
+    /// otherwise the hint is to describe the moment in other words.
     fn no_match_state(&mut self, ui: &mut egui::Ui) {
-        let date_set = self.date != super::when::DateFilter::default();
-        let sentence = format!(
-            "No photos match “{}”. Try different words{}.",
-            super::albums::short_name(&self.res.label, 40),
-            if date_set {
-                ", or check the When filter"
-            } else {
-                ""
+        let filtered = self.kind.is_some() || self.date != super::when::DateFilter::default();
+        let sentence = match (&self.res.current, filtered) {
+            (Some(super::Query::Similar { .. }), _) => {
+                "No similar photos were found. Try another photo.".to_string()
             }
-        );
-        let button = if date_set {
-            "Clear the date filter"
-        } else {
-            "Start over"
+            (_, true) => "Nothing matched those filters. Try a different time or type, or \
+                          describe the moment in other words."
+                .to_string(),
+            (_, false) => format!(
+                "No photos match \u{201c}{}\u{201d}. Try describing the moment in other words.",
+                super::albums::short_name(&self.res.label, 40)
+            ),
         };
-        if empty_text(ui, icons::ICON_IMAGE_SEARCH, &sentence, button) {
-            if date_set {
-                self.date = super::when::DateFilter::default();
-                self.rerun();
-            } else {
-                self.clear_search();
-            }
+        if no_match_view(ui, &sentence, filtered.then_some("Clear filters")) {
+            self.clear_filters();
         }
     }
+
+    /// Back to all types, any time and best match first, and search again.
+    pub(super) fn clear_filters(&mut self) {
+        self.kind = None;
+        self.date = super::when::DateFilter::default();
+        self.sort = crate::search::SearchSort::default();
+        self.rerun();
+    }
+}
+
+/// The screen for a search that found nothing: an icon, one sentence and, when there is a way
+/// out, a quiet button. Returns true when the button was clicked.
+fn no_match_view(ui: &mut egui::Ui, sentence: &str, button: Option<&str>) -> bool {
+    let pal = Palette::of(ui.ctx());
+    let mut clicked = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.22).min(140.0));
+        ui.label(style::icon_text(icons::ICON_IMAGE_SEARCH, 56.0).color(pal.muted));
+        ui.add_space(12.0);
+        ui.scope(|ui| {
+            ui.set_max_width(360.0);
+            ui.label(RichText::new(sentence).color(pal.text2));
+        });
+        if let Some(button) = button {
+            ui.add_space(12.0);
+            clicked = ui.button(button).clicked();
+        }
+    });
+    clicked
 }
 
 // --- Search help -----------------------------------------------------------------------
@@ -337,46 +385,54 @@ pub(super) struct SearchHelp {
     pub suppressed: bool,
 }
 
-/// One small clickable suggestion.
-fn suggestion_chip(
+/// Height of a row of the suggestions.
+const SUGGESTION_ROW: f32 = 32.0;
+
+/// One row of the suggestions: a muted icon and the text, with a hover fill. `name` is what
+/// assistive technology reads.
+fn suggestion_row(
     ui: &mut egui::Ui,
-    icon: Option<MaterialIcon>,
+    icon: MaterialIcon,
     text: &str,
     name: &str,
     ids: &mut Vec<egui::Id>,
 ) -> bool {
     let pal = Palette::of(ui.ctx());
-    let mut job = egui::text::LayoutJob::default();
-    if let Some(icon) = icon {
-        job.append(
-            icon.codepoint,
-            0.0,
-            egui::TextFormat {
-                font_id: style::icon_font_id(icon, 16.0),
-                color: pal.text_secondary,
-                valign: egui::Align::Center,
-                ..Default::default()
-            },
-        );
-    }
-    job.append(
-        text,
-        if icon.is_some() { 6.0 } else { 0.0 },
-        egui::TextFormat {
-            font_id: egui::TextStyle::Body.resolve(ui.style()),
-            color: pal.text,
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
+    let (rect, r) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), SUGGESTION_ROW),
+        egui::Sense::click(),
     );
-    let b = egui::Button::new(job)
-        .fill(pal.raised)
-        .corner_radius(CornerRadius::same(16))
-        .min_size(Vec2::new(0.0, 30.0));
-    let r = ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let fill = if r.is_pointer_button_down_on() {
+            pal.sel
+        } else if r.hovered() || r.has_focus() {
+            pal.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(style::CONTROL_RADIUS), fill);
+        painter.text(
+            Pos2::new(rect.min.x + 18.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            icon.codepoint,
+            style::icon_font_id(icon, 16.0),
+            pal.muted,
+        );
+        // A long search ends in "…" inside the row instead of running past its edge.
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            text.to_string(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            pal.text,
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 36.0 - 10.0);
+        let galley = painter.layout_job(job);
+        let at = Pos2::new(rect.min.x + 36.0, rect.center().y - galley.size().y / 2.0);
+        painter.galley(at, galley, pal.text);
+    }
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     ids.push(r.id);
-    r.clicked()
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 /// What the user picked in the search help.
@@ -388,64 +444,72 @@ struct HelpPicks {
     clear: bool,
 }
 
-/// The sections of the search help: examples, recent searches and the privacy note.
+/// The sections of the search help: recent searches, examples and the privacy note.
 /// `ids` collects the suggestions' ids for keyboard movement.
 fn help_sections(
     ui: &mut egui::Ui,
     pal: &Palette,
     recent: &[String],
+    examples: bool,
     ids: &mut Vec<egui::Id>,
 ) -> HelpPicks {
     let mut picks = HelpPicks::default();
-    help_heading(ui, pal, "Try searching for");
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+    style::menu_body(ui);
+    if !recent.is_empty() {
+        help_heading(ui, pal, "Recent", 4.0);
+        for q in recent {
+            let name = format!("Recent search: {q}");
+            if suggestion_row(ui, icons::ICON_HISTORY, q, &name, ids) {
+                picks.chosen = Some(q.clone());
+            }
+        }
+    }
+    if examples {
+        help_heading(ui, pal, "Try", if recent.is_empty() { 4.0 } else { 10.0 });
         for q in EXAMPLE_SEARCHES {
-            if suggestion_chip(ui, None, q, q, ids) {
+            if suggestion_row(ui, icons::ICON_SEARCH, q, q, ids) {
                 picks.chosen = Some(q.to_string());
             }
         }
-    });
-    if !recent.is_empty() {
-        ui.add_space(10.0);
-        help_heading(ui, pal, "Recent searches");
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-            for q in recent {
-                let name = format!("Recent search: {q}");
-                if suggestion_chip(ui, Some(icons::ICON_HISTORY), q, &name, ids) {
-                    picks.chosen = Some(q.clone());
-                }
-            }
-        });
-        ui.add_space(6.0);
-        picks.clear = ui
-            .add(egui::Button::new(
-                RichText::new("Clear recent searches").color(pal.accent),
-            ))
-            .clicked();
     }
-    ui.add_space(8.0);
-    ui.label(
-        RichText::new("Your searches stay on this computer.")
-            .small()
-            .color(pal.text_secondary),
-    );
+    ui.add_space(6.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Searches never leave this computer.")
+                .size(12.0)
+                .color(pal.muted),
+        );
+        if !recent.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                picks.clear = ui
+                    .add(egui::Button::new(
+                        RichText::new("Clear recent searches")
+                            .size(12.0)
+                            .color(pal.accent),
+                    ))
+                    .clicked();
+            });
+        }
+    });
     picks
 }
 
-/// A small heading of the search help.
-fn help_heading(ui: &mut egui::Ui, pal: &Palette, text: &str) {
-    ui.label(style::semibold(text).size(13.5).color(pal.text_secondary));
+/// A small heading of the search help, `above` points below the previous row.
+fn help_heading(ui: &mut egui::Ui, pal: &Palette, text: &str, above: f32) {
+    ui.add_space(above);
+    ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        ui.label(RichText::new(text).size(12.0).color(pal.muted));
+    });
 }
 
 impl App {
     /// Remembers a search the user ran (newest first, no repeats).
     pub(super) fn remember_search(&mut self, q: &str) {
         let q = q.trim();
-        if q.is_empty() {
+        if q.is_empty() || !self.settings.remember_searches {
             return;
         }
         let lower = q.to_lowercase();
@@ -507,16 +571,29 @@ impl App {
         self.search_help.inside = target.is_some() || current.is_some();
     }
 
-    /// Examples and recent searches under the search field while it is focused and empty.
+    /// The recent searches and whether examples are offered. Recent searches are offered only
+    /// while they are remembered; the list itself is kept until the user clears it.
+    fn offered_searches(&self) -> (Vec<String>, bool) {
+        let recent = if self.settings.remember_searches {
+            self.settings.recent_searches.clone()
+        } else {
+            Vec::new()
+        };
+        (recent, self.settings.show_example_searches)
+    }
+
+    /// Recent and example searches under the search field while it is focused and empty.
     pub(super) fn search_help_dropdown(&mut self, ctx: &egui::Context) {
         let pointer_inside = self
             .search_help
             .dropdown
             .zip(ctx.pointer_latest_pos())
             .is_some_and(|(r, p)| r.contains(p));
+        let (recent, examples) = self.offered_searches();
         let show = self.snapshot.model_installed
+            && (examples || !recent.is_empty())
             && self.query.is_empty()
-            && !self.dialogs.settings_open
+            && !self.settings_is_modal(ctx)
             && !self.dialog_open()
             && !self.search_help.suppressed
             && (self.search_help.focused
@@ -531,21 +608,20 @@ impl App {
         };
         let mut ids: Vec<egui::Id> = Vec::new();
         let pal = Palette::of(ctx);
-        let recent = self.settings.recent_searches.clone();
         let mut picks = HelpPicks::default();
         let out = egui::Area::new(egui::Id::unique("search-help"))
             .order(egui::Order::Foreground)
             .fixed_pos(Pos2::new(field.min.x, field.max.y + 6.0))
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(pal.surface)
-                    .stroke(Stroke::new(1.0, pal.border))
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(Margin::same(14))
+                    .fill(pal.pop)
+                    .stroke(Stroke::new(1.0, pal.line))
+                    .corner_radius(CornerRadius::same(style::CARD_RADIUS))
+                    .inner_margin(Margin::same(6))
                     .shadow(ctx.global_style().visuals.popup_shadow)
                     .show(ui, |ui| {
-                        ui.set_width(field.width().max(480.0) - 28.0);
-                        picks = help_sections(ui, &pal, &recent, &mut ids);
+                        ui.set_width(field.width() - 12.0);
+                        picks = help_sections(ui, &pal, &recent, examples, &mut ids);
                     });
             });
         self.search_help.dropdown = Some(out.response.rect);
@@ -581,9 +657,13 @@ impl Tip {
     pub(super) fn text(self) -> &'static str {
         match self {
             Tip::Search => "Try searching for something you remember, like “sunset at the beach”.",
-            Tip::Select => "Hover a photo and click the circle to select several.",
+            Tip::Select => {
+                "Hover a photo and click the circle in its corner to select it. Then click more \
+                 photos, or Shift-click to select everything in between."
+            }
             Tip::Album => {
-                "Add photos to this album from Photos: select them and choose Add to album."
+                "Click Add photos to pick photos for this album, or select photos anywhere and choose \
+                 Add to album."
             }
         }
     }
@@ -592,7 +672,12 @@ impl Tip {
 impl App {
     /// The tip to show now, if any. Only one at a time, and only on a grid with photos in it.
     fn pending_tip(&self) -> Option<Tip> {
-        if self.tl.grid.picking || !self.tl.loaded || self.tl.items.is_empty() {
+        if !self.settings.show_tips
+            || self.tl.grid.picking
+            || !self.tl.loaded
+            || self.tl.items.is_empty()
+            || self.search_offer_visible()
+        {
             return None;
         }
         let todo = |t: Tip| !self.settings.tips_dismissed.iter().any(|d| d == t.id());
@@ -625,7 +710,16 @@ impl App {
                     ui.label(style::icon_text(icons::ICON_LIGHTBULB, 22.0).color(pal.accent));
                     ui.label(tip.text());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        dismiss = ui.button("Got it").clicked();
+                        let got_it =
+                            egui::Label::new(RichText::new("Got it").color(pal.accent).strong())
+                                .sense(egui::Sense::click());
+                        let r = ui
+                            .add(got_it)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, "Got it")
+                        });
+                        dismiss = r.clicked();
                     });
                 });
             });

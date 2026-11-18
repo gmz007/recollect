@@ -7,7 +7,7 @@ use anyhow::Result;
 #[cfg(test)]
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Sender};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 /// Work for the library writer thread.
@@ -65,6 +65,9 @@ pub struct AlbumWrite {
     pub album: Option<i64>,
     /// How many items were added or removed (for `Create`: put into the new album).
     pub changed: usize,
+    /// The files an `Add` newly put into the album or a `Remove` took out of it (empty for
+    /// other changes); what undoing the change has to reverse.
+    pub changed_files: Vec<i64>,
     /// Why the write failed; `None` once it is committed.
     pub error: Option<String>,
     /// The reason when it is one the library refuses on purpose (a bad name, a removed
@@ -76,6 +79,7 @@ pub struct AlbumWrite {
 struct Applied {
     album: Option<i64>,
     changed: usize,
+    changed_files: Vec<i64>,
     /// Whether anything in the database is different now.
     modified: bool,
 }
@@ -175,17 +179,17 @@ fn write_album(lib: &Library, ticket: u64, op: AlbumOp) -> AlbumWrite {
     };
     #[cfg(not(test))]
     let outcome = lib.apply_album_op(&op);
-    let (album, changed, error, error_kind) = match outcome {
+    let (album, changed, changed_files, error, error_kind) = match outcome {
         Ok(done) => {
             if done.modified {
                 lib.albums_version.fetch_add(1, Ordering::AcqRel);
             }
-            (done.album, done.changed, None, None)
+            (done.album, done.changed, done.changed_files, None, None)
         }
         Err(e) => {
             tracing::warn!("could not save the album change: {e:#}");
             let kind = e.downcast_ref::<AlbumError>().cloned();
-            (None, 0, Some(format!("{e:#}")), kind)
+            (None, 0, Vec::new(), Some(format!("{e:#}")), kind)
         }
     };
     AlbumWrite {
@@ -193,6 +197,7 @@ fn write_album(lib: &Library, ticket: u64, op: AlbumOp) -> AlbumWrite {
         op,
         album,
         changed,
+        changed_files,
         error,
         error_kind,
     }
@@ -273,6 +278,7 @@ impl Library {
                 Applied {
                     album: Some(id),
                     changed: n,
+                    changed_files: Vec::new(),
                     modified: true,
                 }
             }
@@ -281,30 +287,41 @@ impl Library {
                 Applied {
                     album: Some(*id),
                     changed: 0,
+                    changed_files: Vec::new(),
                     modified: true,
                 }
             }
             AlbumOp::Delete { id } => Applied {
                 album: Some(*id),
                 changed: 0,
+                changed_files: Vec::new(),
                 modified: db.delete_album(*id)?,
             },
-            AlbumOp::Add { album, files } => {
-                let n = db.add_to_album(*album, files)?;
-                Applied {
-                    album: Some(*album),
-                    changed: n,
-                    modified: n > 0,
-                }
-            }
+            AlbumOp::Add { album, files } => Self::add_members(&mut db, *album, files)?,
             AlbumOp::Remove { album, files } => {
+                let changed_files = db.album_members_among(*album, files)?;
                 let n = db.remove_from_album(*album, files)?;
                 Applied {
                     album: Some(*album),
                     changed: n,
+                    changed_files,
                     modified: n > 0,
                 }
             }
+        })
+    }
+
+    /// Puts `files` into `album`; `changed_files` are those that were not in it yet.
+    fn add_members(db: &mut crate::store::db::Db, album: i64, files: &[i64]) -> Result<Applied> {
+        let before: HashSet<i64> = db.album_members_among(album, files)?.into_iter().collect();
+        let n = db.add_to_album(album, files)?;
+        let mut changed_files = db.album_members_among(album, files)?;
+        changed_files.retain(|f| !before.contains(f));
+        Ok(Applied {
+            album: Some(album),
+            changed: n,
+            changed_files,
+            modified: n > 0,
         })
     }
 

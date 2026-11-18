@@ -44,7 +44,7 @@ fn a_pending_mark_wins_over_a_reload_with_stale_values() {
                 it
             })
             .collect();
-    let filter = a.tl.filter(a.kind);
+    let filter = a.tl.filter();
     a.tl.awaiting = Some((u64::MAX, filter.clone()));
     a.tl.worker.inject(crate::ui::timeline::Loaded {
         id: u64::MAX,
@@ -80,7 +80,7 @@ fn a_stale_favorites_list_does_not_bring_back_an_unfavorited_item() {
     let stale = a.tl.items.to_vec();
     a.set_favorite(b, false);
     assert!(a.tl.items.is_empty());
-    let filter = a.tl.filter(a.kind);
+    let filter = a.tl.filter();
     a.tl.awaiting = Some((u64::MAX, filter.clone()));
     a.tl.worker.inject(crate::ui::timeline::Loaded {
         id: u64::MAX,

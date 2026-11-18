@@ -1,18 +1,11 @@
 //! "On this day": photos taken on today's date in earlier years.
 
-use super::dates::{date_of, fmt_taken};
-use super::{file_name, thumb_key};
-use crate::media::MediaKind;
+use super::banner::{Banner, BannerEvent};
+use super::dates::date_of;
 use crate::media::metadata::DateSource;
 use crate::store::db::TimelineItem;
-use crate::ui::style::{self, GAP};
-use crate::ui::tiles::{self, Tile, TileEvent};
-use crate::ui::{App, fmt_time, marked};
+use crate::ui::App;
 use chrono::{Datelike, NaiveDate};
-use egui::{RichText, Sense, Vec2};
-
-/// Side of the square tiles in the "On this day" strip.
-const STRIP_TILE: f32 = 96.0;
 
 /// One "On this day" entry: an item of the album and how many years ago it was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,8 +14,8 @@ pub struct OnThisDay {
     pub years_ago: i32,
 }
 
-/// Most entries the "On this day" strip shows.
-pub(super) const ON_THIS_DAY_MAX: usize = 30;
+/// Most entries the "On this day" banner shows.
+pub(super) const ON_THIS_DAY_MAX: usize = 200;
 
 /// Items taken on the same month and day as `today` in earlier years, newest first (at most
 /// [`ON_THIS_DAY_MAX`]). `index` points into `items`, whatever order they are in. Items whose
@@ -78,67 +71,34 @@ impl App {
         chrono::Local::now().date_naive()
     }
 
-    /// A strip of photos taken on today's date in earlier years, above the timeline.
-    pub(super) fn on_this_day_strip(&mut self, ui: &mut egui::Ui) {
+    /// What the "On this day" banner shows, if it is to be shown: photos were taken on today's
+    /// date in earlier years and the user has not hidden it today.
+    pub(super) fn on_this_day_banner(&mut self) -> Option<Banner> {
         let today = self.today();
-        let entries: Vec<OnThisDay> = self.tl.on_this_day(today).to_vec();
-        if entries.is_empty() {
-            return;
+        if !self.settings.show_on_this_day {
+            return None;
         }
-        ui.label(RichText::new("On this day").text_style(style::section()));
-        ui.add_space(4.0);
-        let mut open = None;
-        let mut star = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("on-this-day")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = GAP;
-                    for (pos, e) in entries.iter().enumerate() {
-                        match self.on_this_day_entry(ui, pos, e) {
-                            Some(TileEvent::Star) => star = Some(e.index),
-                            Some(_) => open = Some(pos),
-                            None => {}
-                        }
-                    }
-                });
-            });
-        if let Some(i) = star {
-            let it = &self.tl.items[i];
-            self.toggle_favorite(it.file_id, it.favorite);
+        if self.settings.on_this_day_hidden_on.as_deref() == Some(today.to_string().as_str()) {
+            return None;
         }
-        ui.add_space(6.0);
-        if let Some(pos) = open {
-            let idx: Vec<usize> = entries.iter().map(|e| e.index).collect();
-            self.open_viewer_subset(&idx, pos);
-        }
+        let entries = self.tl.on_this_day(today);
+        let first = entries.first()?;
+        let one_year = entries.iter().all(|e| e.years_ago == first.years_ago);
+        Some(Banner {
+            years_ago: one_year.then_some(first.years_ago),
+            entries: entries.iter().map(|e| e.index).collect(),
+            date: today,
+        })
     }
 
-    /// One tile of the strip with its "N years ago" caption; says what was clicked on it.
-    fn on_this_day_entry(
-        &mut self,
-        ui: &mut egui::Ui,
-        pos: usize,
-        e: &OnThisDay,
-    ) -> Option<TileEvent> {
-        let item = &self.tl.items[e.index];
-        ui.vertical(|ui| {
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(STRIP_TILE), Sense::hover());
-            let key = thumb_key(item);
-            let name = || file_name(item);
-            let tip = || format!("{}\n{}", file_name(item), fmt_taken(item));
-            let tile = Tile::new(&key, "On this day", &name)
-                .tip(&tip)
-                .badge(
-                    (item.kind == MediaKind::Video).then(|| fmt_time(item.duration.unwrap_or(0.0))),
-                )
-                .favorite(marked(&self.fav_marks, item.file_id, item.favorite));
-            let id = ui.make_persistent_id(("otd", pos));
-            let o = tiles::show(ui, &mut self.thumbs, id, rect, &tile);
-            ui.label(RichText::new(years_ago_text(e.years_ago)).small());
-            o.event.map(|(ev, _)| ev)
-        })
-        .inner
+    /// Acts on a click on the banner: opens its photos, or hides it until tomorrow.
+    pub(super) fn banner_event(&mut self, banner: &Banner, event: BannerEvent) {
+        match event {
+            BannerEvent::See => self.open_viewer_subset(&banner.entries, 0),
+            BannerEvent::Hide => {
+                let today = banner.date.to_string();
+                self.change_settings(|s| s.on_this_day_hidden_on = Some(today));
+            }
+        }
     }
 }

@@ -17,9 +17,11 @@ mod grid;
 mod guide;
 mod help;
 mod notices;
+mod photo_size;
 mod platform;
 mod preview;
 mod results;
+mod ruler;
 mod selection;
 mod selection_bar;
 mod settings;
@@ -29,6 +31,7 @@ mod style;
 mod texture_loader;
 mod tiles;
 mod timeline;
+mod toast;
 mod viewer;
 mod welcome;
 mod when;
@@ -52,7 +55,7 @@ use notices::{NoticeAction, Notices};
 use preview::Previews;
 use results::ResultsState;
 use snapshot::Snapshot;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,6 +66,8 @@ use when::DateFilter;
 pub use workers::Query;
 use workers::{SearchWorker, ThumbCache};
 
+/// Height of the top bar.
+const TOP_BAR_HEIGHT: f32 = 52.0;
 /// How often to look at the library while it is busy.
 const BUSY_POLL: Duration = Duration::from_millis(500);
 /// How old the results may get while files are being indexed before they are refreshed.
@@ -76,7 +81,8 @@ pub fn run(lib: Arc<Library>) -> anyhow::Result<()> {
             .with_title("Recollect")
             .with_app_id("recollect")
             .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([720.0, 480.0]),
+            .with_min_inner_size([720.0, 480.0])
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -85,6 +91,22 @@ pub fn run(lib: Arc<Library>) -> anyhow::Result<()> {
         Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, lib)))),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+}
+
+/// The window icon (the app mark on a rounded square).
+fn window_icon() -> egui::IconData {
+    let png = include_bytes!("../../assets/icon/recollect-256.png");
+    match image::load_from_memory(png) {
+        Ok(img) => {
+            let rgba = img.into_rgba8();
+            egui::IconData {
+                width: rgba.width(),
+                height: rgba.height(),
+                rgba: rgba.into_raw(),
+            }
+        }
+        Err(_) => egui::IconData::default(),
+    }
 }
 
 pub struct App {
@@ -131,8 +153,22 @@ pub struct App {
     /// The last finished run that was reported (see `Status::run_seq`).
     run_seq_seen: u64,
     notices: Notices,
+    /// Tickets of album writes that undo something: they are not confirmed again.
+    silent_album_writes: HashSet<u64>,
+    /// Bottom centre of the grid area, where the selection bar and confirmations float
+    /// (set while a grid is drawn, used once per frame).
+    pill_anchor: Option<egui::Pos2>,
+    /// Where the selection bar was drawn this frame, if it was (a toast then floats above it).
+    bar_anchor: Option<egui::Pos2>,
     snapshot: Snapshot,
     snapshot_read: BgRead<Snapshot>,
+    /// Folders that cannot be read now (an unplugged drive), found by a background check that
+    /// runs when the folders change and then every half minute (less often while nothing changes).
+    missing_folders: Vec<i64>,
+    folder_check: BgRead<Vec<i64>>,
+    folder_watch: snapshot::FolderWatch,
+    /// When the photo size last changed and whether it is saved.
+    size_change: photo_size::SizeChange,
     ctx: egui::Context,
     status: Status,
     was_busy: bool,
@@ -165,6 +201,7 @@ struct Workers {
     years_read: BgRead<Vec<i32>>,
     albums_read: BgRead<anyhow::Result<Vec<AlbumInfo>>>,
     snapshot_read: BgRead<Snapshot>,
+    folder_check: BgRead<Vec<i64>>,
 }
 
 impl Workers {
@@ -189,6 +226,10 @@ impl Workers {
             let lib = Arc::clone(lib);
             move || Some(Snapshot::fetch(&lib))
         });
+        let folder_check = BgRead::new(ctx, "folder-check", {
+            let lib = Arc::clone(lib);
+            snapshot::folder_check_job(lib)
+        });
         Self {
             search,
             thumbs,
@@ -197,6 +238,7 @@ impl Workers {
             years_read,
             albums_read,
             snapshot_read,
+            folder_check,
         }
     }
 }
@@ -217,7 +259,8 @@ impl App {
             thumbs: w.thumbs,
             tl: w.tl,
             viewer: None,
-            viewer_info: true,
+            // The photo opens edge to edge; Info shows the details beside it.
+            viewer_info: false,
             previews: w.previews,
             query: String::new(),
             query_changed_at: None,
@@ -240,8 +283,15 @@ impl App {
             error_seq_seen: 0,
             run_seq_seen: 0,
             notices: Notices::default(),
+            silent_album_writes: HashSet::new(),
+            pill_anchor: None,
+            bar_anchor: None,
             snapshot: Snapshot::default(),
             snapshot_read: w.snapshot_read,
+            missing_folders: Vec::new(),
+            folder_check: w.folder_check,
+            folder_watch: snapshot::FolderWatch::default(),
+            size_change: photo_size::SizeChange::default(),
             ctx: ctx.clone(),
             status: Status::default(),
             was_busy: false,
@@ -260,6 +310,7 @@ impl App {
     fn load_initial_state(&mut self, ctx: &egui::Context) {
         self.settings = self.lib.settings();
         self.settings_seen = self.lib.settings_version();
+        self.tl.tile_size = crate::config::clamp_photo_size(self.settings.photo_size);
         style::apply(ctx, self.settings.theme, self.settings.text_size);
         self.snapshot = Snapshot::fetch(&self.lib);
         if !self.settings.welcome_done {
@@ -304,6 +355,7 @@ impl App {
         self.thumbs.begin_frame(ctx);
         self.previews.begin_frame(ctx);
         self.poll_snapshot();
+        self.poll_folder_check(ctx);
         self.status = self.lib.status();
         self.poll_search();
         self.poll_debounce(ctx);
@@ -315,6 +367,7 @@ impl App {
         self.poll_years(jobs);
         self.settle_favorites();
         self.sync_selection();
+        self.end_adding_when_left();
     }
 
     /// Follows what the library is doing: live refreshes while it works, and a full reload
@@ -392,6 +445,11 @@ impl App {
             self.res.grid.shown = false;
             self.tl.grid.shown = false;
             self.show_viewer(ui);
+            // Settings stays open (and drawn) over the viewer: skipping a frame would close
+            // its window.
+            if self.dialogs.settings_open {
+                self.settings_window(&ctx);
+            }
             self.album_dialogs(&ctx);
             self.toasts(&ctx);
             return;
@@ -405,10 +463,15 @@ impl App {
         let timeline_was_shown = std::mem::take(&mut self.tl.grid.shown);
         self.handle_navigation_keys(&ctx, grid_was_shown);
         self.handle_timeline_keys(&ctx, timeline_was_shown);
+        self.handle_photo_size(&ctx, grid_was_shown || timeline_was_shown);
         self.show_panels(ui, &ctx);
         self.show_overlays(&ctx);
         if !self.keys_blocked(&ctx) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.clear_selection();
+            if self.adding_to().is_some() {
+                self.stop_adding();
+            } else {
+                self.clear_selection();
+            }
         }
     }
 
@@ -425,15 +488,16 @@ impl App {
         }
     }
 
-    /// Escape closes the topmost thing first: a question, otherwise the Settings sheet.
+    /// Escape closes the topmost thing first: a question, otherwise the Settings sheet (the
+    /// Settings window handles its own Escape).
     fn close_topmost_on_escape(&mut self, ctx: &egui::Context) {
-        if (self.dialog_open() || self.dialogs.settings_open)
+        if (self.dialog_open() || self.settings_is_modal(ctx))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             if self.dialog_open() {
                 self.dialogs.cancel();
-            } else {
-                self.dialogs.settings_open = false;
+            } else if !self.dialogs.take_settings_question() {
+                self.close_settings();
             }
         }
     }
@@ -441,21 +505,25 @@ impl App {
     /// The top bar, the sidebar and the central panel.
     fn show_panels(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let pal = style::Palette::of(ctx);
+        // The sidebar runs the full height; the top bar sits above the content only.
+        self.sidebar(ui);
         egui::Panel::top("top")
+            .exact_size(TOP_BAR_HEIGHT)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.surface)
-                    .inner_margin(egui::Margin::symmetric(16, 8)),
+                    .fill(pal.bg)
+                    .inner_margin(egui::Margin::symmetric(16, 0)),
             )
             .show(ui, |ui| self.top_bar(ui));
-        self.sidebar(ui);
+        self.ruler_panel(ui);
         let has_folders = !self.snapshot.folders.is_empty();
+        // Next to the ruler the rows run right up to it: the ruler brings its own space.
+        let mut margin = egui::Margin::symmetric(PANEL_MARGIN.0, PANEL_MARGIN.1);
+        if self.ruler_width().is_some() {
+            margin.right = 0;
+        }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.background)
-                    .inner_margin(egui::Margin::symmetric(PANEL_MARGIN.0, PANEL_MARGIN.1)),
-            )
+            .frame(egui::Frame::new().fill(pal.bg).inner_margin(margin))
             .show(ui, |ui| {
                 if has_folders {
                     self.search_banner(ui);
@@ -473,15 +541,15 @@ impl App {
     /// Sheets, dialogs, the search help and the toasts, drawn over the panels.
     fn show_overlays(&mut self, ctx: &egui::Context) {
         if self.dialogs.settings_open {
-            self.settings_sheet(ctx);
+            self.settings_window(ctx);
         }
-        self.model_confirm_dialog(ctx);
         if self.dialogs.help_open {
             self.help_sheet(ctx);
         }
         self.search_help_dropdown(ctx);
         self.album_dialogs(ctx);
         self.folder_dialogs(ctx);
+        self.photo_size_chip(ctx);
         self.toasts(ctx);
     }
 }
@@ -544,6 +612,11 @@ impl eframe::App for App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // A photo size changed a moment ago is kept.
+        if self.size_change.is_unsaved() {
+            let size = self.tl.tile_size;
+            let _ = self.lib.update_settings(|s| s.photo_size = size);
+        }
         // Closing the window stops background work cleanly (the database stays consistent
         // either way, but this avoids killing a write mid-transaction).
         // Writes still queued (favorites, album changes) would be lost with the library, so

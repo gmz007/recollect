@@ -108,28 +108,54 @@ pub enum Theme {
     Dark,
 }
 
-/// How large text is drawn.
+/// How large text is drawn: a base size of 12, 13 or 15 points.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextSize {
+    Small,
+    /// Called "Normal" in older settings files.
     #[default]
-    Normal,
-    /// 15 % larger.
+    #[serde(alias = "Normal")]
+    Medium,
     Large,
 }
 
 impl TextSize {
-    /// The interface zoom factor for this size.
-    pub fn zoom(self) -> f32 {
+    /// The base text size in points.
+    pub fn base(self) -> f32 {
         match self {
-            Self::Normal => 1.0,
-            Self::Large => 1.15,
+            Self::Small => 12.0,
+            Self::Medium => 13.0,
+            Self::Large => 15.0,
         }
+    }
+
+    /// The interface zoom factor for this size (13 points is 1.0).
+    pub fn zoom(self) -> f32 {
+        self.base() / Self::Medium.base()
+    }
+}
+
+/// Smallest, default and largest side of a photo tile in the grids, in points.
+pub const PHOTO_SIZE_MIN: f32 = 96.0;
+pub const PHOTO_SIZE_DEFAULT: f32 = 168.0;
+pub const PHOTO_SIZE_MAX: f32 = 320.0;
+
+/// A tile side within the allowed range; anything that is not a number gives the default.
+pub fn clamp_photo_size(size: f32) -> f32 {
+    if size.is_finite() {
+        size.clamp(PHOTO_SIZE_MIN, PHOTO_SIZE_MAX)
+    } else {
+        PHOTO_SIZE_DEFAULT
     }
 }
 
 /// User-adjustable settings, stored as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a flat settings file: each switch is independent"
+)]
 pub struct Settings {
     /// Embedding model id (see [`crate::model::registry`]). `None` = pick by hardware.
     pub model: Option<String>,
@@ -143,6 +169,11 @@ pub struct Settings {
     pub theme: Theme,
     /// Normal or large text.
     pub text_size: TextSize,
+    /// Side of a photo tile in the grids, in points (96 to 320).
+    pub photo_size: f32,
+    /// The day (`YYYY-MM-DD`) on which the user hid the "On this day" banner; it stays hidden
+    /// until the next day.
+    pub on_this_day_hidden_on: Option<String>,
     /// The user chose "Not now" on the invitation to turn on smart search.
     pub search_prompt_dismissed: bool,
     /// The first-run welcome flow was completed or skipped.
@@ -151,6 +182,16 @@ pub struct Settings {
     pub recent_searches: Vec<String>,
     /// Ids of the one-time tips the user has already seen or closed.
     pub tips_dismissed: Vec<String>,
+    /// Show the "On this day" banner at the top of Photos.
+    pub show_on_this_day: bool,
+    /// Show one-time tips.
+    pub show_tips: bool,
+    /// Remember searches and offer them in the search box.
+    pub remember_searches: bool,
+    /// Offer example searches in the search box.
+    pub show_example_searches: bool,
+    /// Show the progress ring at the foot of the sidebar.
+    pub show_sidebar_progress: bool,
 }
 
 impl Default for Settings {
@@ -161,11 +202,18 @@ impl Default for Settings {
             index_threads: None,
             thumb_cache_mb: 1024,
             theme: Theme::System,
-            text_size: TextSize::Normal,
+            text_size: TextSize::Medium,
+            photo_size: PHOTO_SIZE_DEFAULT,
+            on_this_day_hidden_on: None,
             search_prompt_dismissed: false,
             welcome_done: false,
             recent_searches: Vec::new(),
             tips_dismissed: Vec::new(),
+            show_on_this_day: true,
+            show_tips: true,
+            remember_searches: true,
+            show_example_searches: true,
+            show_sidebar_progress: true,
         }
     }
 }
@@ -174,7 +222,12 @@ impl Settings {
     /// Loads settings; a missing file gives defaults, a corrupt file is reported.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str(&s).with_context(|| format!("parsing {}", path.display())),
+            Ok(s) => toml::from_str::<Self>(&s)
+                .map(|mut settings| {
+                    settings.photo_size = clamp_photo_size(settings.photo_size);
+                    settings
+                })
+                .with_context(|| format!("parsing {}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -224,10 +277,17 @@ mod tests {
             thumb_cache_mb: 10,
             theme: Theme::Dark,
             text_size: TextSize::Large,
+            photo_size: 240.0,
+            on_this_day_hidden_on: Some("2026-11-17".into()),
             search_prompt_dismissed: true,
             welcome_done: true,
             recent_searches: vec!["snow".into(), "dog".into()],
             tips_dismissed: vec!["search".into()],
+            show_on_this_day: false,
+            show_tips: false,
+            remember_searches: false,
+            show_example_searches: false,
+            show_sidebar_progress: false,
         };
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap(), s);
@@ -238,10 +298,41 @@ mod tests {
         assert_eq!(l.thumb_cache_mb, 1024);
         // Settings files from before the appearance options still load.
         assert_eq!(l.theme, Theme::System);
-        assert_eq!(l.text_size, TextSize::Normal);
+        assert_eq!(l.text_size, TextSize::Medium);
         std::fs::write(&p, "theme = \"Light\"\ntext_size = \"Large\"\n").unwrap();
         let l = Settings::load(&p).unwrap();
         assert_eq!((l.theme, l.text_size), (Theme::Light, TextSize::Large));
+        // The old name of the default size still loads.
+        std::fs::write(&p, "text_size = \"Normal\"\n").unwrap();
+        assert_eq!(Settings::load(&p).unwrap().text_size, TextSize::Medium);
+        // Files from before the photo size setting load with the default size.
+        assert!((l.photo_size - PHOTO_SIZE_DEFAULT).abs() < f32::EPSILON);
+        assert_eq!(l.on_this_day_hidden_on, None);
+        // A size outside the range is brought back into it.
+        std::fs::write(&p, "photo_size = 1000.0\n").unwrap();
+        assert!((Settings::load(&p).unwrap().photo_size - PHOTO_SIZE_MAX).abs() < f32::EPSILON);
+        std::fs::write(&p, "photo_size = 5.0\n").unwrap();
+        assert!((Settings::load(&p).unwrap().photo_size - PHOTO_SIZE_MIN).abs() < f32::EPSILON);
+        // Settings of the older versions that grouped and ordered the timeline still load.
+        std::fs::write(&p, "group = \"Day\"\nnewest_first = false\n").unwrap();
+        assert_eq!(Settings::load(&p).unwrap(), Settings::default());
+        assert!((TextSize::Small.zoom() - 12.0 / 13.0).abs() < 1e-6);
+        assert!((TextSize::Large.zoom() - 15.0 / 13.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn files_from_before_the_features_switches_have_every_feature_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.toml");
+        std::fs::write(&p, "theme = \"Dark\"\nrecent_searches = [\"snow\"]\n").unwrap();
+        let l = Settings::load(&p).unwrap();
+        assert!(
+            l.show_on_this_day
+                && l.show_tips
+                && l.remember_searches
+                && l.show_example_searches
+                && l.show_sidebar_progress
+        );
     }
 
     #[test]

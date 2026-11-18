@@ -1,279 +1,267 @@
-//! The bar above the picture: back, position in the list, and the actions for the item.
+//! The bar above the picture: back (naming where the viewer was opened from), the date and
+//! position, and four icon buttons: Favorite, Add to album, Info and "⋯".
 
 use super::{Action, Viewer};
 use crate::media::MediaKind;
 use crate::store::db::AlbumInfo;
-use crate::ui::fmt_time;
-use crate::ui::style::{self, icons};
-use egui::{Pos2, Rect, RichText, Sense, Vec2};
+use crate::ui::albums::{AlbumChoice, album_menu_items};
+use crate::ui::preview::Previews;
+use crate::ui::style::{self, Palette, ToggleLook, icons};
+use crate::ui::timeline::{fmt_clock, fmt_day};
+use egui::{Rect, RichText, Sense, Vec2};
 
-/// Height of the viewer's toolbar row.
-const BAR_H: f32 = 34.0;
+/// Width of the "⋯" menu.
+const MENU_WIDTH: f32 = 220.0;
+/// Air between the bar's three groups.
+const GROUP_GAP: f32 = 12.0;
+/// Size of the back arrow.
+const BACK_ICON: f32 = 20.0;
 
-/// Whether the toolbar buttons carry a word next to their icon: only when the window is wide
-/// enough (narrower windows show the icons alone, with tooltips).
-pub(in crate::ui) fn toolbar_shows_text(window_width: f32) -> bool {
-    window_width >= 1000.0
+/// The width taken by the four buttons on the right of the bar.
+const fn buttons_width() -> f32 {
+    4.0 * style::ICON_BUTTON + 3.0 * style::GAP
 }
 
-/// Where the "3 of 40" label starts (its left edge), or `None` when there is no room for it
-/// between the buttons on the left (ending at `left_end`) and on the right (starting at
-/// `right_start`). It prefers the middle of the bar, else sits right beside the buttons.
-pub(super) fn position_slot(
-    centre: f32,
-    left_end: f32,
-    right_start: f32,
-    width: f32,
-) -> Option<f32> {
-    const AIR: f32 = 12.0;
-    let centred = centre - width / 2.0;
-    let beside = right_start - AIR - width;
-    if centred >= left_end + AIR && centred + width <= right_start - AIR {
-        Some(centred)
-    } else if beside >= left_end + AIR {
-        Some(beside)
-    } else {
-        None
-    }
+/// The three parts of the bar: the back button's room, the centre and the buttons' room.
+fn bar_parts(row: Rect) -> (Rect, Rect, Rect) {
+    let side = buttons_width() + GROUP_GAP;
+    let centre_w = (row.width() - 2.0 * side).max(0.0);
+    let centre = Rect::from_center_size(row.center(), Vec2::new(centre_w, row.height()));
+    let left = Rect::from_min_max(row.min, egui::pos2(centre.left(), row.max.y));
+    let right = Rect::from_min_max(egui::pos2(row.max.x - buttons_width(), row.min.y), row.max);
+    (left, centre, right)
 }
 
 impl Viewer {
+    /// Draws the bar's contents into `ui` (its panel is exactly as high as the bar).
     pub(super) fn top_bar(
         &mut self,
         ui: &mut egui::Ui,
-        albums: &[AlbumInfo],
+        previews: &mut Previews,
+        env: &super::ViewerEnv<'_>,
         actions: &mut Vec<Action>,
     ) {
-        let pal = style::Palette::of(ui.ctx());
-        let text = toolbar_shows_text(ui.ctx().content_rect().width());
-        let width = ui.available_width();
-        let (row, _) = ui.allocate_exact_size(Vec2::new(width, BAR_H), Sense::hover());
-        // Keep clear of the window's edges.
-        let row = Rect::from_min_max(row.min + Vec2::new(8.0, 0.0), row.max - Vec2::new(8.0, 0.0));
-        // The right-hand buttons first, so the left side knows how much room is left.
-        let right = ui.scope_builder(
+        let (left, centre, right) = bar_parts(ui.max_rect());
+        self.back_button(ui, left, actions);
+        self.date_and_position(ui, centre, previews);
+        ui.scope_builder(
             egui::UiBuilder::new()
-                .max_rect(row)
+                .max_rect(right)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
-                ui.spacing_mut().item_spacing.x = if text { 10.0 } else { 4.0 };
-                self.right_buttons(ui, albums, actions, text);
+                ui.spacing_mut().item_spacing.x = style::GAP;
+                self.more_button(ui, env.can_find_similar, actions);
+                self.info_button(ui);
+                self.album_button(ui, env.albums, actions);
+                self.favorite_button(ui, actions);
             },
         );
-        let right_start = right.response.rect.min.x;
-        let pos = format!("{} of {}", self.index + 1, self.len());
-        let pos_w = ui
-            .painter()
-            .layout_no_wrap(
-                pos.clone(),
-                egui::TextStyle::Body.resolve(ui.style()),
-                pal.text_secondary,
-            )
-            .size()
-            .x;
-        // Room for the name: what is left of the bar, minus the position and some air.
-        let left_max = (right_start - 8.0 - row.min.x).max(0.0);
-        let left_rect = Rect::from_min_size(row.min, Vec2::new(left_max, BAR_H));
-        let left = ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(left_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                self.left_buttons(ui, row.width(), pos_w, text, actions);
-            },
-        );
-        let left_end = left.response.rect.max.x;
-        // The position sits in the middle of the bar when there is room there, else right
-        // beside the buttons, else it is left out. It is plain text: never a click target.
-        if let Some(x) = position_slot(row.center().x, left_end, right_start, pos_w) {
-            let rect = Rect::from_min_size(
-                Pos2::new(x, row.center().y - 11.0),
-                Vec2::new(pos_w + 2.0, 22.0),
-            );
-            ui.put(
-                rect,
-                egui::Label::new(RichText::new(pos).color(pal.text_secondary)).selectable(false),
-            );
-        }
     }
 
-    /// The left of the toolbar: Back and, while the info panel is closed, the item's name.
-    /// `row_width` is the bar's width and `pos_w` the position label's.
-    fn left_buttons(
-        &mut self,
-        ui: &mut egui::Ui,
-        row_width: f32,
-        pos_w: f32,
-        text: bool,
-        actions: &mut Vec<Action>,
-    ) {
-        if style::toolbar_button(
-            ui,
-            icons::ICON_ARROW_BACK,
-            text.then_some("Back"),
-            "Back",
-            "Back",
-            None,
-            false,
-        )
-        .clicked()
+    /// The arrow and the name of where the viewer was opened from, in the bar's left room.
+    fn back_button(&self, ui: &mut egui::Ui, room: Rect, actions: &mut Vec<Action>) {
+        let pal = Palette::of(ui.ctx());
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let max_text = (room.width() - BACK_ICON - 24.0).max(0.0);
+        let mut job = egui::text::LayoutJob::simple_singleline(self.origin.clone(), font, pal.text);
+        job.wrap = egui::text::TextWrapping {
+            max_width: max_text,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = ui.painter().layout_job(job);
+        let size = Vec2::new(
+            (BACK_ICON + 20.0 + galley.size().x).min(room.width()),
+            style::ICON_BUTTON,
+        );
+        let rect =
+            Rect::from_min_size(egui::pos2(room.min.x, room.center().y - size.y / 2.0), size);
+        let id = ui.make_persistent_id("viewer-back");
+        let r = ui.interact(rect, id, Sense::click());
+        if r.hovered() || r.has_focus() {
+            ui.painter()
+                .rect_filled(rect, style::CONTROL_RADIUS, pal.hover);
+        }
+        ui.painter().text(
+            egui::pos2(rect.min.x + 8.0 + BACK_ICON / 2.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            icons::ICON_ARROW_BACK.codepoint,
+            style::icon_font_id(icons::ICON_ARROW_BACK, BACK_ICON),
+            pal.text,
+        );
+        let text_pos = egui::pos2(
+            rect.min.x + 8.0 + BACK_ICON + 4.0,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(text_pos, galley, pal.text);
+        let name = format!("Back to {}", self.origin);
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+        if r.on_hover_text("Back (Esc)")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
         {
             actions.push(Action::Close);
         }
-        // The name is shown once: here while the info panel is closed, there while open.
-        if self.info {
-            return;
-        }
-        ui.add_space(8.0);
-        let room = (ui.available_width() - pos_w - 24.0)
-            .min(row_width * 0.3)
-            .max(0.0);
-        if room > 40.0 {
-            ui.scope(|ui| {
-                ui.set_max_width(room);
-                ui.add(egui::Label::new(style::semibold(self.current().name())).truncate());
-            });
+    }
+
+    /// The day (semibold) and under it the time and "2 of 4"; just the position when the
+    /// item has no date.
+    fn date_and_position(&self, ui: &mut egui::Ui, room: Rect, previews: &mut Previews) {
+        let pal = Palette::of(ui.ctx());
+        let e = self.current();
+        let taken = previews
+            .details(e.file_id)
+            .map_or(e.taken_at, |d| d.taken_at);
+        let position = format!("{} of {}", self.index + 1, self.len());
+        let dated = taken > 0;
+        let second = if dated {
+            format!("{} · {position}", fmt_clock(taken))
+        } else {
+            position
+        };
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(room)
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+            |ui| {
+                ui.set_max_width(room.width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let used = if dated { 36.0 } else { 18.0 };
+                ui.add_space(((room.height() - used) / 2.0).max(0.0));
+                if dated {
+                    let day = style::semibold(fmt_day(taken)).size(14.0).color(pal.text);
+                    ui.add(egui::Label::new(day).truncate().selectable(false));
+                }
+                let line = RichText::new(second).size(12.0).color(pal.muted);
+                ui.add(egui::Label::new(line).truncate().selectable(false));
+            },
+        );
+    }
+
+    fn favorite_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let e = self.current();
+        let (icon, label, tip, on) = if e.favorite {
+            (
+                icons::ICON_FAVORITE,
+                "Unfavorite",
+                "Remove from favorites (F)",
+                Some(ToggleLook::Strong),
+            )
+        } else {
+            (
+                icons::ICON_FAVORITE.outlined(),
+                "Favorite",
+                "Add to favorites (F)",
+                None,
+            )
+        };
+        if style::top_bar_toggle(ui, icon, label, tip, on).clicked() {
+            actions.push(Action::Favorite(e.file_id, !e.favorite));
         }
     }
 
-    /// The buttons on the right of the toolbar, laid out right to left. With `text`, each has a
-    /// short word next to its icon.
-    fn right_buttons(
-        &mut self,
-        ui: &mut egui::Ui,
-        albums: &[AlbumInfo],
-        actions: &mut Vec<Action>,
-        text: bool,
-    ) {
-        let word = |w: &'static str| text.then_some(w);
-        if self.current().kind == MediaKind::Image {
-            self.zoom_button(ui, word);
-        }
-        self.file_buttons(ui, actions, text);
-        if style::toolbar_button(
+    fn album_button(&self, ui: &mut egui::Ui, albums: &[AlbumInfo], actions: &mut Vec<Action>) {
+        let r = style::top_bar_button(
             ui,
-            icons::ICON_INFO,
-            word("Info"),
-            "Info",
-            "Photo details",
-            None,
-            self.info,
-        )
-        .clicked()
+            icons::ICON_PLAYLIST_ADD,
+            "Add to album…",
+            "Add to album",
+        );
+        let mut choice: Option<AlbumChoice> = None;
+        egui::Popup::menu(&r)
+            .align(egui::RectAlign::BOTTOM_END)
+            .width(MENU_WIDTH)
+            .show(|ui| album_menu_items(ui, albums, &mut choice));
+        if let Some(c) = choice {
+            actions.push(Action::AddToAlbum(self.current().file_id, c));
+        }
+    }
+
+    fn info_button(&mut self, ui: &mut egui::Ui) {
+        let on = self.info.then_some(ToggleLook::Pressed);
+        if style::top_bar_toggle(ui, icons::ICON_INFO.outlined(), "Info", "Info (I)", on).clicked()
         {
             self.info = !self.info;
         }
-        if let Some(c) = crate::ui::albums::album_menu_icon(ui, albums, word("Add to album")) {
-            actions.push(Action::AddToAlbum(self.current().file_id, c));
-        }
-        self.favorite_button(ui, actions, text);
-        if self.current().kind == MediaKind::Video {
-            self.play_button(ui, actions);
-        }
     }
 
-    /// The zoom toggle (images only): "Zoom" to 100 % or "Fit" back to the window.
-    fn zoom_button(
+    fn more_button(
         &mut self,
         ui: &mut egui::Ui,
-        word: impl Fn(&'static str) -> Option<&'static str>,
+        can_find_similar: bool,
+        actions: &mut Vec<Action>,
     ) {
-        let (icon, label) = if self.zoom {
-            (icons::ICON_ZOOM_OUT, "Fit to window")
-        } else {
-            (icons::ICON_ZOOM_IN, "Zoom to 100%")
-        };
-        let tip = if self.zoom {
-            label.to_string()
-        } else {
-            "Zoom to 100% (one image pixel per screen pixel; photos larger than \
-             4096 px on a side are scaled down to that first)"
-                .to_string()
-        };
-        let short = if self.zoom { "Fit" } else { "Zoom" };
-        if style::toolbar_button(ui, icon, word(short), label, &tip, None, self.zoom).clicked() {
-            self.toggle_zoom();
-        }
+        let r = style::top_bar_button(ui, icons::ICON_MORE_HORIZ, "More", "More");
+        egui::Popup::menu(&r)
+            .align(egui::RectAlign::BOTTOM_END)
+            .width(MENU_WIDTH)
+            .show(|ui| self.more_items(ui, can_find_similar, actions));
     }
 
-    /// "Show in folder" and "Open", which act on the file on disk.
-    fn file_buttons(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>, text: bool) {
-        let word = |w: &'static str| text.then_some(w);
-        let path = self.current().path.clone();
-        if style::toolbar_button(
-            ui,
-            icons::ICON_FOLDER_OPEN,
-            word("Show in folder"),
-            "Show in folder",
-            "Show in folder",
-            None,
-            false,
-        )
-        .clicked()
-        {
-            actions.push(Action::Reveal(path.clone()));
-        }
-        if style::toolbar_button(
-            ui,
-            icons::ICON_OPEN_IN_NEW,
-            word("Open"),
-            "Open with default app",
-            "Open with default app",
-            None,
-            false,
-        )
-        .clicked()
-        {
-            actions.push(Action::Open(path));
-        }
-    }
-
-    /// The accent button that plays the current video from the chosen moment.
-    fn play_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let pal = style::Palette::of(ui.ctx());
+    /// The rows of the "⋯" menu: zoom, the file, playing a video and Find similar.
+    fn more_items(&mut self, ui: &mut egui::Ui, can_find_similar: bool, actions: &mut Vec<Action>) {
+        style::menu_body(ui);
         let e = self.current().clone();
-        ui.add_space(8.0);
-        let t = e.t.unwrap_or(0.0);
-        let label = format!("Play at {}", fmt_time(t));
-        let job = style::icon_label_job(
-            ui,
-            icons::ICON_PLAY_ARROW,
-            20.0,
-            pal.on_accent,
-            Some((&label, pal.on_accent)),
-            4.0,
-        );
-        let b = egui::Button::new(job).fill(pal.accent);
-        let r = ui.add(b);
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        if r.on_hover_text("Play this video").clicked() {
-            actions.push(Action::PlayAt(e.path, t));
+        if e.kind == MediaKind::Image {
+            let label = if self.zoom {
+                "Fit to window"
+            } else {
+                "Zoom to 100%"
+            };
+            if ui
+                .add(egui::Button::new(label).shortcut_text("Z"))
+                .clicked()
+            {
+                self.toggle_zoom();
+                ui.close();
+            }
+            ui.separator();
+        }
+        if ui.button("Open with default app").clicked() {
+            actions.push(Action::Open(e.path.clone()));
+            ui.close();
+        }
+        if ui.button("Show in folder").clicked() {
+            actions.push(Action::Reveal(e.path.clone()));
+            ui.close();
+        }
+        if e.kind == MediaKind::Video && ui.button("Play video").clicked() {
+            actions.push(Action::PlayAt(e.path.clone(), e.t.unwrap_or(0.0)));
+            ui.close();
+        }
+        if can_find_similar
+            && let Some(item_id) = e.similar_item()
+            && ui.button("Find similar photos").clicked()
+        {
+            actions.push(Action::FindSimilar {
+                item_id,
+                label: e.name(),
+            });
+            ui.close();
         }
     }
+}
 
-    fn favorite_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>, text: bool) {
-        let e = self.current();
-        let pal = style::Palette::of(ui.ctx());
-        let (icon, label, short, color) = if e.favorite {
-            (
-                icons::ICON_STAR,
-                "Unfavorite",
-                "Favorited",
-                Some(pal.favorite),
-            )
-        } else {
-            (icons::ICON_STAR.outlined(), "Favorite", "Favorite", None)
-        };
-        let tip = if e.favorite {
-            "Remove from favorites"
-        } else {
-            "Add to favorites"
-        };
-        if style::toolbar_button(ui, icon, text.then_some(short), label, tip, color, false)
-            .clicked()
-        {
-            actions.push(Action::Favorite(e.file_id, !e.favorite));
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bar_splits_into_room_for_back_a_centred_middle_and_the_buttons() {
+        let row = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 52.0));
+        let (left, centre, right) = bar_parts(row);
+        assert_eq!(centre.center(), row.center());
+        assert_eq!(left.max.x, centre.min.x);
+        assert!(centre.max.x <= right.min.x);
+        assert_eq!(right.max.x, row.max.x);
+        assert_eq!(right.width(), buttons_width());
+    }
+
+    #[test]
+    fn a_narrow_bar_leaves_no_middle() {
+        let row = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 52.0));
+        let (_, centre, _) = bar_parts(row);
+        assert_eq!(centre.width(), 0.0);
     }
 }

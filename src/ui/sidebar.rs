@@ -1,18 +1,20 @@
-//! The left sidebar: views, albums, folders, the date jumper and, at the bottom, a card that
-//! says what Recollect is busy with.
+//! The left sidebar: the app mark, views, albums, folders and, at the bottom, a ring that
+//! shows what Recollect is busy with.
 
 use super::folders::StopFolder;
 use super::style::{self, Palette, icons};
 use super::timeline::{View, thousands};
+use super::workers::ThumbCache;
 use super::{App, folder_labels};
 use crate::library::Activity;
 use crate::model::registry::megabytes;
-use egui::{CornerRadius, Margin, Pos2, Rect, Response, RichText, Sense, Vec2};
+use crate::thumbs::ThumbKey;
+use egui::{Color32, CornerRadius, Margin, Pos2, Rect, Response, RichText, Sense, Vec2};
 use egui_material_icons::MaterialIcon;
 
 /// One line of the activity card: what is happening in plain words and, when it is known, how
 /// far along it is (0 to 1).
-fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
+pub(super) fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
     Some(match a {
         Activity::Idle => return None,
         Activity::Downloading { done, total, .. } => (
@@ -47,104 +49,199 @@ fn activity_text(a: &Activity) -> Option<(String, Option<f32>)> {
     })
 }
 
-/// A full-width sidebar row. Returns the row's rectangle and response.
-pub(super) fn nav_row(
+/// Width of the sidebar.
+const SIDEBAR_WIDTH: f32 = 216.0;
+/// Height of a sidebar row, and of one with a second line.
+const ROW_HEIGHT: f32 = 32.0;
+const TWO_LINE_ROW_HEIGHT: f32 = 44.0;
+/// Side of the album cover in a row.
+const COVER: f32 = 20.0;
+/// Left edge of a row's label, from the row's left edge.
+const LABEL_X: f32 = 38.0;
+
+/// What a sidebar row shows in front of its label.
+pub(super) enum Leading<'a> {
+    Icon(MaterialIcon),
+    /// An album cover; a neutral square while there is none or it is loading.
+    Cover(Option<&'a ThumbKey>),
+}
+
+/// A sidebar row.
+pub(super) struct Row<'a> {
+    pub leading: Leading<'a>,
+    pub text: &'a str,
+    /// Second line in small muted text (a disconnected drive).
+    pub note: Option<&'a str>,
+    /// What assistive technology reads.
+    pub accessible: &'a str,
+    pub selected: bool,
+    /// Space kept free at the right (for a button drawn over the row).
+    pub reserve_right: f32,
+    /// Small muted text at the right (the path of a suggested folder).
+    pub trailing: Option<&'a str>,
+    /// The label is drawn muted (a folder that is not connected).
+    pub dimmed: bool,
+}
+
+impl<'a> Row<'a> {
+    pub(super) fn new(leading: Leading<'a>, text: &'a str, selected: bool) -> Self {
+        Self {
+            leading,
+            text,
+            note: None,
+            accessible: text,
+            selected,
+            reserve_right: 0.0,
+            trailing: None,
+            dimmed: false,
+        }
+    }
+}
+
+/// A row with an icon and a label, for lists in sheets and dialogs. `trailing` is small muted
+/// text at the right.
+pub(super) fn plain_row(
     ui: &mut egui::Ui,
     icon: MaterialIcon,
     text: &str,
     accessible: &str,
     trailing: Option<&str>,
     selected: bool,
-    reserve_right: f32,
 ) -> (Rect, Response) {
+    let mut row = Row::new(Leading::Icon(icon), text, selected);
+    row.accessible = accessible;
+    row.trailing = trailing;
+    nav_row(ui, None, &row)
+}
+
+/// A full-width sidebar row. Returns the row's rectangle and response.
+pub(super) fn nav_row(
+    ui: &mut egui::Ui,
+    thumbs: Option<&mut ThumbCache>,
+    row: &Row<'_>,
+) -> (Rect, Response) {
+    let height = if row.note.is_some() {
+        TWO_LINE_ROW_HEIGHT
+    } else {
+        ROW_HEIGHT
+    };
     let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
     if ui.is_rect_visible(rect) {
-        paint_nav_row_icon(ui, rect, resp.hovered(), icon, selected);
-        paint_nav_row_text(ui, rect, text, trailing, selected, reserve_right);
+        paint_nav_row_background(ui, rect, resp.hovered(), row.selected);
+        paint_leading(ui, thumbs, rect, &row.leading);
+        paint_nav_row_text(ui, rect, row);
     }
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, accessible));
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, true, row.selected, row.accessible)
+    });
     (rect, resp.on_hover_cursor(egui::CursorIcon::PointingHand))
 }
 
-/// The row's background (selected or hovered) and its icon.
-fn paint_nav_row_icon(
-    ui: &egui::Ui,
-    rect: Rect,
-    hovered: bool,
-    icon: MaterialIcon,
-    selected: bool,
-) {
+/// The row's background: grey when selected (never the accent), lighter grey on hover.
+fn paint_nav_row_background(ui: &egui::Ui, rect: Rect, hovered: bool, selected: bool) {
     let pal = Palette::of(ui.ctx());
-    let painter = ui.painter();
     let radius = CornerRadius::same(style::CONTROL_RADIUS);
     if selected {
-        painter.rect_filled(rect, radius, pal.accent.gamma_multiply(0.22));
+        ui.painter().rect_filled(rect, radius, pal.sel);
     } else if hovered {
-        painter.rect_filled(rect, radius, pal.raised);
+        ui.painter().rect_filled(rect, radius, pal.hover);
     }
-    painter.text(
-        Pos2::new(rect.min.x + 20.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        icon.codepoint,
-        style::icon_font_id(icon, 20.0),
-        if selected {
-            pal.accent
-        } else {
-            pal.text_secondary
-        },
-    );
 }
 
-/// The row's trailing text, right-aligned, and its label, cut short with an ellipsis to fit
-/// what is left.
-fn paint_nav_row_text(
+/// The icon or the album cover at the row's left.
+fn paint_leading(
     ui: &egui::Ui,
+    thumbs: Option<&mut ThumbCache>,
     rect: Rect,
-    text: &str,
-    trailing: Option<&str>,
-    selected: bool,
-    reserve_right: f32,
+    leading: &Leading<'_>,
 ) {
     let pal = Palette::of(ui.ctx());
+    let centre = Pos2::new(rect.min.x + 20.0, rect.center().y);
+    match leading {
+        Leading::Icon(icon) => {
+            let icon = icon.outlined();
+            ui.painter().text(
+                centre,
+                egui::Align2::CENTER_CENTER,
+                icon.codepoint,
+                style::icon_font_id(icon, 18.0),
+                pal.text2,
+            );
+        }
+        Leading::Cover(key) => {
+            let cover = Rect::from_center_size(centre, Vec2::splat(COVER));
+            let radius = CornerRadius::same(4);
+            let texture = key.and_then(|k| thumbs?.get(k));
+            if key.is_none() {
+                // No cover: a neutral square with a small photo-library icon.
+                ui.painter().rect_filled(cover, radius, pal.field);
+                ui.painter().text(
+                    cover.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icons::ICON_PHOTO_LIBRARY.codepoint,
+                    style::icon_font_id(icons::ICON_PHOTO_LIBRARY, 12.0),
+                    pal.muted,
+                );
+            } else if let Some(tex) = texture {
+                let shape = egui::epaint::RectShape::filled(cover, radius, Color32::WHITE)
+                    .with_texture(tex.id(), super::tiles::square_uv(tex.size_vec2()));
+                ui.painter().add(shape);
+            } else {
+                ui.painter().rect_filled(cover, radius, pal.skel);
+            }
+        }
+    }
+}
+
+/// The row's label (and second line), cut short with an ellipsis to fit what is left.
+fn paint_nav_row_text(ui: &egui::Ui, rect: Rect, row: &Row<'_>) {
+    let pal = Palette::of(ui.ctx());
     let painter = ui.painter();
-    let fg = if selected { pal.accent } else { pal.text };
-    let mut right = rect.max.x - 10.0 - reserve_right;
-    if let Some(t) = trailing {
+    let fg = if row.dimmed { pal.muted } else { pal.text };
+    let mut right = rect.max.x - 8.0 - row.reserve_right;
+    if let Some(t) = row.trailing {
         let g = painter.layout_no_wrap(
             t.to_string(),
             egui::TextStyle::Small.resolve(ui.style()),
-            pal.text_secondary,
+            pal.muted,
         );
         right -= g.size().x;
         painter.galley(
             Pos2::new(right, rect.center().y - g.size().y / 2.0),
             g,
-            pal.text_secondary,
+            pal.muted,
         );
         right -= 8.0;
     }
-    let max_w = (right - (rect.min.x + 38.0)).max(20.0);
-    let mut job = egui::text::LayoutJob::simple_singleline(
-        text.to_string(),
-        egui::TextStyle::Body.resolve(ui.style()),
-        fg,
-    );
-    job.wrap = egui::text::TextWrapping {
-        max_width: max_w,
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
+    let max_w = (right - (rect.min.x + LABEL_X)).max(20.0);
+    let line = |text: &str, font: egui::FontId, color: Color32| {
+        let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+        job.wrap = egui::text::TextWrapping {
+            max_width: max_w,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        painter.layout_job(job)
     };
-    let g = painter.layout_job(job);
-    painter.galley(
-        Pos2::new(rect.min.x + 38.0, rect.center().y - g.size().y / 2.0),
-        g,
-        fg,
-    );
+    let main = line(row.text, egui::TextStyle::Body.resolve(ui.style()), fg);
+    let note = row
+        .note
+        .map(|n| line(n, egui::TextStyle::Small.resolve(ui.style()), pal.muted));
+    let total = main.size().y + note.as_ref().map_or(0.0, |n| n.size().y);
+    let x = rect.min.x + LABEL_X;
+    let mut y = rect.center().y - total / 2.0;
+    let main_height = main.size().y;
+    painter.galley(Pos2::new(x, y), main, fg);
+    y += main_height;
+    if let Some(n) = note {
+        painter.galley(Pos2::new(x, y), n, pal.muted);
+    }
 }
 
-/// A section title with an optional icon button on its right. Returns the button's response.
+/// A section title (12, muted) with an optional "+" style button on its right. Returns the
+/// buttons' responses.
 pub(super) fn section_header(
     ui: &mut egui::Ui,
     title: &str,
@@ -154,12 +251,16 @@ pub(super) fn section_header(
     let mut out = Vec::new();
     ui.add_space(14.0);
     ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        ui.label(style::semibold(title).size(13.5).color(pal.text_secondary));
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(title)
+                .text_style(egui::TextStyle::Small)
+                .color(pal.muted),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             for (icon, label, enabled) in buttons.iter().rev() {
                 ui.add_enabled_ui(*enabled, |ui| {
-                    out.push(style::icon_button(ui, *icon, label));
+                    out.push(style::small_icon_button(ui, *icon, label));
                 });
             }
         });
@@ -168,10 +269,25 @@ pub(super) fn section_header(
     out
 }
 
-/// A folder's row with the small "x" that stops showing it. Returns the row's response and
-/// whether the "x" was clicked.
-fn folder_row(ui: &mut egui::Ui, pal: Palette, name: &str, selected: bool) -> (Response, bool) {
-    let (rect, resp) = nav_row(ui, icons::ICON_FOLDER, name, name, None, selected, 28.0);
+/// A folder's row with the small "x" that stops showing it. A folder whose drive is not
+/// connected says so on a second line. Returns the row's response and whether the "x" was
+/// clicked.
+fn folder_row(
+    ui: &mut egui::Ui,
+    thumbs: &mut ThumbCache,
+    name: &str,
+    selected: bool,
+    connected: bool,
+) -> (Response, bool) {
+    let pal = Palette::of(ui.ctx());
+    let mut row = Row::new(Leading::Icon(icons::ICON_FOLDER), name, selected);
+    row.reserve_right = 28.0;
+    if !connected {
+        row.leading = Leading::Icon(icons::ICON_FOLDER_OFF);
+        row.note = Some("Not connected");
+        row.dimmed = true;
+    }
+    let (rect, resp) = nav_row(ui, Some(thumbs), &row);
     let x_rect = Rect::from_center_size(
         Pos2::new(rect.max.x - 18.0, rect.center().y),
         Vec2::splat(26.0),
@@ -186,42 +302,98 @@ fn folder_row(ui: &mut egui::Ui, pal: Palette, name: &str, selected: bool) -> (R
             egui::Align2::CENTER_CENTER,
             icons::ICON_CLOSE.codepoint,
             style::icon_font_id(icons::ICON_CLOSE, 16.0),
-            if x.hovered() {
-                pal.text
-            } else {
-                pal.text_secondary
-            },
+            if x.hovered() { pal.text } else { pal.muted },
         );
     }
     let x = x.on_hover_text(format!("Stop showing “{name}”"));
     (resp, x.clicked())
 }
 
-/// The thin progress bar of the activity card: filled to `fraction`, or animated when unknown.
-fn activity_progress(ui: &mut egui::Ui, fraction: Option<f32>) {
-    ui.add_space(4.0);
-    let bar = egui::ProgressBar::new(fraction.map_or(0.0, |f| f.clamp(0.0, 1.0)))
-        .desired_height(6.0)
-        .corner_radius(3.0);
-    ui.add(if fraction.is_some() {
-        bar
+/// A short name for what is going on, for the foot of the sidebar.
+fn short_label(a: &Activity) -> &'static str {
+    match a {
+        Activity::Idle => "",
+        Activity::Downloading { .. } => "Downloading",
+        Activity::Scanning { .. } => "Checking photos",
+        Activity::ReadingDates { .. } => "Reading dates",
+        Activity::LoadingModel | Activity::SwitchingModel => "Getting ready",
+        Activity::Indexing(_) => "Preparing search",
+    }
+}
+
+/// Whether the user can pause what the activity is doing.
+fn is_pausable(a: &Activity) -> bool {
+    matches!(
+        a,
+        Activity::Scanning { .. }
+            | Activity::ReadingDates { .. }
+            | Activity::LoadingModel
+            | Activity::Indexing(_)
+    )
+}
+
+/// The foot's label: "Paused" while the work is paused, else what is going on.
+fn row_label(a: &Activity, paused: bool) -> &'static str {
+    if paused && is_pausable(a) {
+        "Paused"
     } else {
-        bar.animate(true)
-    });
+        short_label(a)
+    }
+}
+
+/// A small ring: the `ring` track with an accent arc for `fraction`, or a turning arc when the
+/// progress is not known (and the work is not paused).
+fn paint_progress_ring(
+    ui: &egui::Ui,
+    centre: Pos2,
+    radius: f32,
+    fraction: Option<f32>,
+    paused: bool,
+) {
+    let pal = Palette::of(ui.ctx());
+    let width = 2.5;
+    ui.painter()
+        .circle_stroke(centre, radius, egui::Stroke::new(width, pal.ring));
+    let (start, sweep) = if let Some(f) = fraction {
+        (
+            -std::f32::consts::FRAC_PI_2,
+            f.clamp(0.0, 1.0) * std::f32::consts::TAU,
+        )
+    } else {
+        let t = if paused {
+            0.0
+        } else {
+            ui.ctx().request_repaint();
+            ui.input(|i| i.time) as f32
+        };
+        (t * std::f32::consts::TAU, std::f32::consts::PI * 0.75)
+    };
+    let steps = 32;
+    let points: Vec<Pos2> = (0..=steps)
+        .map(|i| {
+            let a = start + sweep * i as f32 / steps as f32;
+            centre + Vec2::new(a.cos(), a.sin()) * radius
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(width, pal.accent),
+    ));
 }
 
 impl App {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let frame = egui::Frame::new()
-            .fill(pal.surface)
-            .inner_margin(Margin::symmetric(10, 12));
+            .fill(pal.side)
+            .inner_margin(Margin::symmetric(8, 12));
         egui::Panel::left("library")
-            .resizable(true)
-            .default_size(250.0)
-            .min_size(210.0)
+            .resizable(false)
+            .exact_size(SIDEBAR_WIDTH)
+            .show_separator_line(false)
             .frame(frame)
             .show(ui, |ui| {
+                Self::sidebar_header(ui);
                 self.sidebar_bottom(ui);
                 egui::ScrollArea::vertical()
                     .id_salt("sidebar")
@@ -230,14 +402,28 @@ impl App {
             });
     }
 
+    /// The app mark and name.
+    fn sidebar_header(ui: &mut egui::Ui) {
+        let pal = Palette::of(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.set_height(ROW_HEIGHT);
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.add_space(10.0);
+            style::app_mark(ui, 20.0, pal.side);
+            ui.label(style::semibold("Recollect").size(14.0).color(pal.text));
+        });
+        ui.add_space(6.0);
+    }
+
     fn sidebar_body(&mut self, ui: &mut egui::Ui) {
         let mut pick = None;
         for (view, icon, label) in [
             (View::Timeline, icons::ICON_PHOTO_LIBRARY, "Photos"),
             (View::RecentlyAdded, icons::ICON_SCHEDULE, "Recently added"),
-            (View::Favorites, icons::ICON_STAR, "Favorites"),
+            (View::Favorites, icons::ICON_FAVORITE, "Favorites"),
         ] {
-            let (_, r) = nav_row(ui, icon, label, label, None, self.tl.view == view, 0.0);
+            let row = Row::new(Leading::Icon(icon), label, self.tl.view == view);
+            let (_, r) = nav_row(ui, Some(&mut self.thumbs), &row);
             if r.clicked() {
                 pick = Some(view);
             }
@@ -248,23 +434,38 @@ impl App {
 
         self.albums_section(ui);
         self.folders_section(ui);
-        ui.add_space(10.0);
-        self.date_navigator(ui);
         self.failed_files(ui);
     }
 
     fn folders_section(&mut self, ui: &mut egui::Ui) {
-        if !self.folders_header(ui) {
-            ui.label(RichText::new("No folders yet.").weak());
+        let buttons = section_header(
+            ui,
+            "Folders",
+            &mut [(icons::ICON_ADD, "Add a folder", true)],
+        );
+        if buttons[0].clicked() {
+            self.open_add_folder();
+        }
+        if self.snapshot.folders.is_empty() {
+            let pal = Palette::of(ui.ctx());
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(RichText::new("No folders yet.").color(pal.muted));
+            });
             return;
         }
-        let pal = Palette::of(ui.ctx());
         let labels = folder_labels(self.snapshot.folders.iter().map(|f| f.path.as_path()));
         let mut open = None;
         let mut stop = None;
         for (f, name) in self.snapshot.folders.iter().zip(labels) {
-            let (resp, stop_clicked) =
-                folder_row(ui, pal, &name, self.tl.view == View::Folder(f.id));
+            let connected = !self.missing_folders.contains(&f.id);
+            let (resp, stop_clicked) = folder_row(
+                ui,
+                &mut self.thumbs,
+                &name,
+                self.tl.view == View::Folder(f.id),
+                connected,
+            );
             if stop_clicked {
                 stop = Some(StopFolder {
                     id: f.id,
@@ -280,31 +481,6 @@ impl App {
         if stop.is_some() {
             self.dialogs.stop_folder = stop;
         }
-    }
-
-    /// The "Folders" title with its refresh and add buttons. Returns whether there are folders.
-    fn folders_header(&mut self, ui: &mut egui::Ui) -> bool {
-        let busy = self.lib.is_busy();
-        let has_folders = !self.snapshot.folders.is_empty();
-        let buttons = section_header(
-            ui,
-            "Folders",
-            &mut [
-                (
-                    icons::ICON_REFRESH,
-                    "Check for new photos",
-                    !busy && has_folders,
-                ),
-                (icons::ICON_ADD, "Add a folder", true),
-            ],
-        );
-        if buttons[0].clicked() {
-            self.start_indexing();
-        }
-        if buttons[1].clicked() {
-            self.open_add_folder();
-        }
-        has_folders
     }
 
     /// "N files couldn't be opened", with a way to try them again.
@@ -348,7 +524,8 @@ impl App {
         }
     }
 
-    /// The card at the bottom: what is happening now, or an invitation to turn smart search on.
+    /// The foot: what is happening now (a ring with a short label and the percentage; click
+    /// for details), or an invitation to turn smart search on, and the privacy line.
     fn sidebar_bottom(&mut self, ui: &mut egui::Ui) {
         let pal = Palette::of(ui.ctx());
         let activity = activity_text(&self.status.activity);
@@ -362,15 +539,17 @@ impl App {
             .show(ui, |ui| {
                 ui.add_space(8.0);
                 if let Some((text, fraction)) = activity {
-                    self.activity_card(ui, &text, fraction);
+                    if self.settings.show_sidebar_progress {
+                        self.activity_row(ui, &text, fraction);
+                    }
                 } else if offer {
                     let card = egui::Frame::new()
-                        .fill(pal.raised)
+                        .fill(pal.field)
                         .corner_radius(CornerRadius::same(style::CARD_RADIUS))
                         .inner_margin(Margin::same(12));
                     card.show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(style::semibold("Smart search is off").size(14.0));
+                        ui.label(style::semibold("Smart search is off").size(13.0));
                         ui.add_space(4.0);
                         if ui.button("Turn on").clicked() {
                             self.set_search_prompt_dismissed(false);
@@ -378,53 +557,104 @@ impl App {
                     });
                 }
                 ui.add_space(8.0);
-                ui.label(
-                    RichText::new("Your photos stay on this computer")
-                        .small()
-                        .color(pal.text_secondary),
-                );
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(10, 0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Your photos stay on this computer")
+                                .small()
+                                .color(pal.muted),
+                        );
+                    });
             });
     }
 
-    fn activity_card(&mut self, ui: &mut egui::Ui, text: &str, fraction: Option<f32>) {
+    /// The ring, a short label and the percentage; clicking opens the details.
+    fn activity_row(&mut self, ui: &mut egui::Ui, text: &str, fraction: Option<f32>) {
         let pal = Palette::of(ui.ctx());
-        let downloading = matches!(self.status.activity, Activity::Downloading { .. });
-        let pausable = matches!(
-            self.status.activity,
-            Activity::Scanning { .. }
-                | Activity::ReadingDates { .. }
-                | Activity::LoadingModel
-                | Activity::Indexing(_)
+        let (rect, resp) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(style::CONTROL_RADIUS), pal.hover);
+        }
+        let paused = self.status.paused && is_pausable(&self.status.activity);
+        paint_progress_ring(
+            ui,
+            Pos2::new(rect.min.x + 20.0, rect.center().y),
+            7.5,
+            fraction,
+            paused,
         );
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        ui.painter().text(
+            Pos2::new(rect.min.x + LABEL_X, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            row_label(&self.status.activity, paused),
+            font.clone(),
+            pal.text2,
+        );
+        if let Some(f) = fraction {
+            ui.painter().text(
+                Pos2::new(rect.max.x - 10.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                format!("{}%", (f * 100.0).floor() as u32),
+                font,
+                pal.muted,
+            );
+        }
+        let accessible = if paused {
+            format!("Progress: Paused — {text}")
+        } else {
+            format!("Progress: {text}")
+        };
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &accessible));
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        egui::Popup::from_toggle_button_response(&resp)
+            .align(egui::RectAlign::TOP_START)
+            .width(SIDEBAR_WIDTH - 16.0)
+            .show(|ui| self.activity_details(ui, text, fraction));
+    }
+
+    /// What is going on in words, with Pause and Stop.
+    pub(super) fn activity_details(
+        &mut self,
+        ui: &mut egui::Ui,
+        text: &str,
+        fraction: Option<f32>,
+    ) {
+        let downloading = matches!(self.status.activity, Activity::Downloading { .. });
+        let pausable = is_pausable(&self.status.activity);
         let paused = self.status.paused;
-        let card = egui::Frame::new()
-            .fill(pal.raised)
-            .corner_radius(CornerRadius::same(style::CARD_RADIUS))
-            .inner_margin(Margin::same(12));
-        card.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let shown = if paused && pausable {
-                format!("Paused — {text}")
-            } else {
-                text.to_string()
-            };
-            ui.label(shown);
-            activity_progress(ui, fraction);
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                if pausable {
-                    let label = if paused { "Resume" } else { "Pause" };
-                    if ui.button(label).clicked() {
-                        self.lib.pause(!paused);
-                    }
+        let shown = if paused && pausable {
+            format!("Paused — {text}")
+        } else {
+            text.to_string()
+        };
+        ui.label(shown);
+        ui.add_space(4.0);
+        let bar = egui::ProgressBar::new(fraction.map_or(0.0, |f| f.clamp(0.0, 1.0)))
+            .desired_height(6.0)
+            .corner_radius(3.0);
+        ui.add(if fraction.is_some() {
+            bar
+        } else {
+            bar.animate(true)
+        });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if pausable {
+                let label = if paused { "Resume" } else { "Pause" };
+                if ui.button(label).clicked() {
+                    self.lib.pause(!paused);
                 }
-                if ui.button("Stop").clicked() {
-                    self.lib.cancel();
-                    if downloading {
-                        self.set_search_prompt_dismissed(true);
-                    }
+            }
+            if ui.button("Stop").clicked() {
+                self.lib.cancel();
+                if downloading {
+                    self.set_search_prompt_dismissed(true);
                 }
-            });
+            }
         });
     }
 
@@ -445,6 +675,15 @@ mod tests {
     #[test]
     fn activity_is_described_in_plain_words() {
         assert_eq!(activity_text(&Activity::Idle), None);
+        assert_eq!(row_label(&Activity::LoadingModel, true), "Paused");
+        assert_eq!(row_label(&Activity::LoadingModel, false), "Getting ready");
+        // A download cannot be paused, so the flag does not change its label.
+        let dl = Activity::Downloading {
+            done: 0,
+            total: 1,
+            model: String::new(),
+        };
+        assert_eq!(row_label(&dl, true), "Downloading");
         let scanning = Activity::Scanning {
             folder: "/x".into(),
         };

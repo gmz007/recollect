@@ -1,27 +1,39 @@
-//! Photo and video tiles for the grids: a square centre-cropped thumbnail with a selection
-//! circle (top left) and a favorite star (bottom left) that appear on hover, and a duration pill
-//! on videos.
+//! Photo and video tiles for the grids: a square centre-cropped thumbnail, edge to edge. A
+//! selection circle (top left) appears on hover; a selected tile shrinks onto a tinted cell. A
+//! favorite shows a small white heart (bottom left), and hovering any other tile offers an
+//! outlined one. Videos carry a duration pill (bottom right; bottom left on search results).
+
+mod extras;
 
 use super::selection::ClickMods;
 use super::style::{self, Palette, icons};
 use super::workers::ThumbCache;
 use crate::thumbs::ThumbKey;
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
+use extras::{extra_zones, paint_pill, paint_similar, paint_year};
 
-/// Size of the clickable areas of the circle and the star.
+/// Size of the clickable areas of the circle and the heart.
 const ZONE: f32 = 34.0;
-/// Radius of the selection circle and of the dark disc behind the star.
-const CIRCLE_RADIUS: f32 = 11.0;
-const STAR_DISC_RADIUS: f32 = 12.0;
-/// Size of the check mark and of the star.
-const CHECK_SIZE: f32 = 16.0;
-const STAR_SIZE: f32 = 18.0;
-/// Opacity (0-255) of the dark discs behind the circle and the star.
-const CIRCLE_DISC_ALPHA: u8 = 70;
-const STAR_DISC_ALPHA: u8 = 90;
-/// The shades at the top and bottom edge while hovered: height and opacity at the edge.
-const SHADE_HEIGHT: f32 = 64.0;
-const SHADE_ALPHA: u8 = 105;
+/// Diameter of the selection circle.
+const CIRCLE_DIAMETER: f32 = 20.0;
+/// Distance of the circle from the tile's corner, unselected and selected (the selected circle
+/// sits on the cell, outside the shrunken photo).
+const CIRCLE_INSET: f32 = 7.0;
+const CIRCLE_INSET_SELECTED: f32 = 4.0;
+/// Size of the check mark and of the heart.
+const CHECK_SIZE: f32 = 14.0;
+const HEART_SIZE: f32 = 16.0;
+/// Distance of the heart's centre from the bottom left corner.
+const HEART_INSET: f32 = 15.0;
+/// Opacity (0-255) of the soft shadow behind the heart.
+const HEART_SHADOW_ALPHA: u8 = 95;
+/// The shade at the top edge while hovered: height and opacity at the edge.
+const SHADE_HEIGHT: f32 = 44.0;
+const SHADE_ALPHA: u8 = 82;
+/// A selected photo is drawn at this share of the tile, centred on the tinted cell.
+const SELECTED_SCALE: f32 = 0.86;
+/// Corner radius of a selected (shrunken) photo.
+const SELECTED_RADIUS: u8 = 3;
 
 /// How a tile takes part in the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -39,18 +51,30 @@ pub(super) struct Tile<'a> {
     pub key: &'a ThumbKey,
     /// Prefix of the accessible name of the tile ("Item", "Result").
     role: &'a str,
-    /// File name (for assistive technology and the hover text); built only when needed.
+    /// File name (for assistive technology); built only when needed.
     name: &'a dyn Fn() -> String,
     /// The hover text if it is not just the name; built only when the tile is hovered.
     tip: Option<&'a dyn Fn() -> String>,
     /// Text of the pill on videos (a time).
     badge: Option<String>,
+    /// The year of the capture date, shown at the bottom right (result tiles).
+    year: Option<i32>,
     favorite: bool,
     mark: TileMark,
-    /// Selection mode: circles stay visible on every tile.
-    picking: bool,
     /// Whether the tile has a selection circle (a tile that only opens has none).
     selectable: bool,
+    extras: Extras,
+}
+
+/// The extra buttons of a result tile.
+#[derive(Clone, Copy, Default)]
+struct Extras {
+    /// Hovering the tile offers "Find similar" (top right).
+    similar: bool,
+    /// The pill is a button that plays the video at the time it shows.
+    plays: bool,
+    /// The user is picking photos: the extra buttons are off and a click selects the tile.
+    selecting: bool,
 }
 
 impl<'a> Tile<'a> {
@@ -62,10 +86,11 @@ impl<'a> Tile<'a> {
             name,
             tip: None,
             badge: None,
+            year: None,
             favorite: false,
             mark: TileMark::None,
-            picking: false,
             selectable: false,
+            extras: Extras::default(),
         }
     }
 
@@ -79,16 +104,39 @@ impl<'a> Tile<'a> {
         self
     }
 
+    /// Shows the year of the capture date at the bottom right (nothing when unknown).
+    pub(super) fn year(mut self, year: Option<i32>) -> Self {
+        self.year = year;
+        self
+    }
+
+    /// Tells the tile whether the user is picking photos, which turns its extra buttons off.
+    pub(super) fn selecting(mut self, selecting: bool) -> Self {
+        self.extras.selecting = selecting;
+        self
+    }
+
+    /// Offers "Find similar" at the top right while hovered.
+    pub(super) fn find_similar(mut self) -> Self {
+        self.extras.similar = true;
+        self
+    }
+
+    /// Makes the pill a button that plays the video at the time it shows.
+    pub(super) fn plays_at_badge(mut self) -> Self {
+        self.extras.plays = true;
+        self
+    }
+
     pub(super) fn favorite(mut self, favorite: bool) -> Self {
         self.favorite = favorite;
         self
     }
 
-    /// Gives the tile a selection circle, in the given selection state.
-    pub(super) fn selectable(mut self, mark: TileMark, picking: bool) -> Self {
+    /// Gives the tile a selection circle (shown on hover), in the given selection state.
+    pub(super) fn selectable(mut self, mark: TileMark) -> Self {
         self.selectable = true;
         self.mark = mark;
-        self.picking = picking;
         self
     }
 
@@ -118,13 +166,23 @@ pub(super) enum TileEvent {
     Click,
     /// Click on the selection circle.
     Circle,
-    /// Click on the star.
-    Star,
+    /// Click on the heart.
+    Heart,
+}
+
+/// A click on one of the extra buttons a result tile can have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TileAction {
+    /// Search for photos like this one.
+    FindSimilar,
+    /// Play the video at the time on the pill.
+    PlayAtBadge,
 }
 
 pub(super) struct TileOut {
     pub resp: egui::Response,
     pub event: Option<(TileEvent, ClickMods)>,
+    pub action: Option<TileAction>,
 }
 
 /// What a tile event means for the selection.
@@ -144,7 +202,7 @@ pub(super) enum ClickPlan {
 /// range.
 pub(super) fn click_plan(event: TileEvent, mods: ClickMods, picking: bool) -> ClickPlan {
     match event {
-        TileEvent::Star => ClickPlan::Favorite,
+        TileEvent::Heart => ClickPlan::Favorite,
         TileEvent::Click if mods.is_plain() && !picking => ClickPlan::Open,
         _ if mods.range => ClickPlan::Select {
             mods: ClickMods {
@@ -164,7 +222,7 @@ pub(super) fn click_plan(event: TileEvent, mods: ClickMods, picking: bool) -> Cl
 }
 
 /// UV rectangle that crops a texture of `size` to its centred square.
-fn square_uv(size: Vec2) -> Rect {
+pub(super) fn square_uv(size: Vec2) -> Rect {
     let (w, h) = (size.x.max(1.0), size.y.max(1.0));
     let (u, v) = if w > h {
         ((1.0 - h / w) / 2.0, 0.0)
@@ -202,30 +260,36 @@ pub(super) fn show(
     let resp = ui.interact(rect, id, Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
     let small = rect.width() < 72.0;
-    let (circle, star) = interact_zones(ui, id, rect, tile, small);
-    describe_zones(tile, small, &resp, &circle, &star);
+    let (circle, heart) = interact_zones(ui, id, rect, tile, small);
+    describe_zones(tile, small, &resp, &circle, &heart);
+    let extra = extra_zones(ui, id, rect, tile, small);
 
     if ui.is_rect_visible(rect) {
         paint(ui, thumbs, rect, tile, hovered, small, &pal);
     }
 
-    let event = click_event(ui, &resp, &circle, &star);
+    let event = click_event(ui, &resp, &circle, &heart);
+    let action = extra.action();
     // The zones of small tiles are not drawn and take no clicks, so they are no controls.
-    let over_control = !small && ((tile.selectable && circle.hovered()) || star.hovered());
+    let over_control =
+        !small && ((tile.selectable && circle.hovered()) || heart.hovered() || extra.hovered());
     if hovered && (over_control || resp.hovered()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let resp = if over_control {
-        resp
-    } else {
-        resp.on_hover_ui(|ui| {
-            ui.label(tile.tip.map_or_else(|| (tile.name)(), |tip| tip()));
-        })
+    let resp = match tile.tip {
+        Some(tip) if !over_control => resp.on_hover_ui(|ui| {
+            ui.label(tip());
+        }),
+        _ => resp,
     };
-    TileOut { resp, event }
+    TileOut {
+        resp,
+        event,
+        action,
+    }
 }
 
-/// The areas of the selection circle and of the star.
+/// The areas of the selection circle and of the heart.
 fn interact_zones(
     ui: &egui::Ui,
     id: egui::Id,
@@ -234,9 +298,13 @@ fn interact_zones(
     small: bool,
 ) -> (egui::Response, egui::Response) {
     let circle_zone = Rect::from_min_size(rect.min, Vec2::splat(ZONE));
-    let star_zone =
-        Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - ZONE), Vec2::splat(ZONE));
-    // The circle and the star are not drawn on small tiles, so their zones must not take
+    // The heart is drawn on the photo, which is smaller than the tile while selected.
+    let photo = picture_area(rect, tile.checked());
+    let heart_zone = Rect::from_min_size(
+        Pos2::new(photo.min.x, photo.max.y - ZONE),
+        Vec2::splat(ZONE),
+    );
+    // The circle and the heart are not drawn on small tiles, so their zones must not take
     // clicks there either: the click then goes to the tile itself.
     let circle_sense = if tile.selectable && !small {
         Sense::click()
@@ -244,23 +312,23 @@ fn interact_zones(
         Sense::hover()
     };
     let circle = ui.interact(circle_zone, id.with("select"), circle_sense);
-    let star_sense = if small {
+    let heart_sense = if small {
         Sense::hover()
     } else {
         Sense::click()
     };
-    let star = ui.interact(star_zone, id.with("favorite"), star_sense);
-    (circle, star)
+    let heart = ui.interact(heart_zone, id.with("favorite"), heart_sense);
+    (circle, heart)
 }
 
-/// What assistive technology reads for the circle, the star and the tile itself. Small tiles
-/// draw neither the circle nor the star, so only the tile is described there.
+/// What assistive technology reads for the circle, the heart and the tile itself. Small tiles
+/// draw neither the circle nor the heart, so only the tile is described there.
 fn describe_zones(
     tile: &Tile<'_>,
     small: bool,
     resp: &egui::Response,
     circle: &egui::Response,
-    star: &egui::Response,
+    heart: &egui::Response,
 ) {
     if tile.selectable && !small {
         circle.widget_info(|| {
@@ -270,7 +338,7 @@ fn describe_zones(
         });
     }
     if !small {
-        star.widget_info(|| {
+        heart.widget_info(|| {
             let name = (tile.name)();
             let label = if tile.favorite {
                 format!("Remove {name} from favorites")
@@ -291,17 +359,17 @@ fn describe_zones(
     });
 }
 
-/// The click on the circle, the star or the picture, if there was one this frame.
+/// The click on the circle, the heart or the picture, if there was one this frame.
 fn click_event(
     ui: &egui::Ui,
     resp: &egui::Response,
     circle: &egui::Response,
-    star: &egui::Response,
+    heart: &egui::Response,
 ) -> Option<(TileEvent, ClickMods)> {
     if circle.clicked() {
         Some((TileEvent::Circle, ClickMods::of_click(ui.ctx())))
-    } else if star.clicked() {
-        Some((TileEvent::Star, ClickMods::default()))
+    } else if heart.clicked() {
+        Some((TileEvent::Heart, ClickMods::default()))
     } else if resp.clicked() {
         Some((TileEvent::Click, ClickMods::of_click(ui.ctx())))
     } else {
@@ -317,8 +385,7 @@ fn paint_placeholder(
     failed: bool,
     pal: &Palette,
 ) {
-    let radius = CornerRadius::same(style::TILE_RADIUS);
-    painter.rect_filled(rect, radius, pal.surface);
+    painter.rect_filled(rect, CornerRadius::ZERO, pal.side);
     if failed {
         // A picture that is not there: the icon alone on small tiles, with a line of
         // text on larger ones.
@@ -329,20 +396,14 @@ fn paint_placeholder(
         } else {
             rect.center()
         };
-        paint_icon(
-            painter,
-            centre,
-            icons::ICON_BROKEN_IMAGE,
-            size,
-            pal.text_secondary,
-        );
+        paint_icon(painter, centre, icons::ICON_BROKEN_IMAGE, size, pal.text2);
         if wide {
             painter.text(
                 rect.center() + Vec2::new(0.0, size / 2.0 + 2.0),
                 egui::Align2::CENTER_CENTER,
                 "Preview unavailable",
                 egui::TextStyle::Small.resolve(ui.style()),
-                pal.text_secondary,
+                pal.text2,
             );
         }
     }
@@ -358,23 +419,54 @@ fn paint(
     pal: &Palette,
 ) {
     let painter = ui.painter_at(rect);
+    let checked = tile.checked();
+    if checked {
+        painter.rect_filled(rect, CornerRadius::ZERO, pal.tint);
+    }
     paint_picture(ui, &painter, thumbs, rect, tile, pal);
-    if hovered {
-        paint_shades(&painter, rect);
+    if hovered && !checked {
+        painter.add(fade(rect, true, SHADE_HEIGHT, SHADE_ALPHA));
     }
-    if tile.selectable && (hovered || tile.picking || tile.checked()) && !small {
-        paint_select_circle(&painter, rect, tile.checked(), pal);
+    if tile.selectable && (hovered || checked) && !small {
+        paint_select_circle(&painter, rect, checked, pal);
     }
+    // The heart and the time sit on the photo, which is smaller than the tile when selected.
+    let photo = picture_area(rect, checked);
     if !small && (tile.favorite || hovered) {
-        paint_star(&painter, rect, tile.favorite, pal);
+        paint_heart(&painter, photo, tile.favorite);
     }
-    if let Some(text) = &tile.badge {
-        paint_pill(&painter, rect, text);
+    if tile.extras.similar && !tile.extras.selecting && hovered && !small {
+        paint_similar(ui, &painter, photo);
     }
-    paint_mark_ring(&painter, rect, tile.mark, pal);
+    let pill_end = tile
+        .badge
+        .as_ref()
+        .and_then(|text| paint_pill(&painter, photo, text, small, tile.extras.plays));
+    if let Some(year) = tile.year {
+        paint_year(&painter, photo, year, pill_end);
+    }
+    if tile.mark == TileMark::Focused {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            CornerRadius::ZERO,
+            Stroke::new(2.0, pal.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
 }
 
-/// The thumbnail, or the placeholder while there is none.
+/// Where the photo is drawn within the tile: all of it, or smaller on the tinted cell while
+/// selected.
+fn picture_area(rect: Rect, checked: bool) -> Rect {
+    if checked {
+        rect.shrink(rect.width() * (1.0 - SELECTED_SCALE) / 2.0)
+    } else {
+        rect
+    }
+}
+
+/// The thumbnail (shrunken onto the tinted cell when checked), or the placeholder while there
+/// is none.
 fn paint_picture(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -383,110 +475,70 @@ fn paint_picture(
     tile: &Tile<'_>,
     pal: &Palette,
 ) {
+    let area = picture_area(rect, tile.checked());
+    let radius = if tile.checked() {
+        CornerRadius::same(SELECTED_RADIUS)
+    } else {
+        CornerRadius::ZERO
+    };
     let failed = thumbs.failed(tile.key);
     if let Some(tex) = thumbs.get(tile.key) {
-        let radius = CornerRadius::same(style::TILE_RADIUS);
-        let shape = egui::epaint::RectShape::filled(rect, radius, Color32::WHITE)
+        let shape = egui::epaint::RectShape::filled(area, radius, Color32::WHITE)
             .with_texture(tex.id(), square_uv(tex.size_vec2()));
         painter.add(shape);
     } else {
-        paint_placeholder(ui, painter, rect, failed, pal);
+        paint_placeholder(ui, painter, area, failed, pal);
     }
 }
 
-/// Soft shades at the top and bottom keep the circle, the star and the time readable on
-/// bright photos, without a visible edge.
-fn paint_shades(painter: &egui::Painter, rect: Rect) {
-    for top in [true, false] {
-        painter.add(fade(
-            rect,
-            top,
-            SHADE_HEIGHT,
-            SHADE_ALPHA,
-            f32::from(style::TILE_RADIUS),
-        ));
-    }
-}
-
-/// The selection circle at the top left: empty, or filled with a check mark.
+/// The selection circle at the top left: an outline, or filled with a check mark.
 fn paint_select_circle(painter: &egui::Painter, rect: Rect, checked: bool, pal: &Palette) {
-    let c = circle_center(rect);
+    let c = circle_center(rect, checked);
+    let r = CIRCLE_DIAMETER / 2.0;
     if checked {
-        painter.circle_filled(c, CIRCLE_RADIUS, pal.accent);
-        paint_icon(painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.on_accent);
+        painter.circle_filled(c, r, pal.accent);
+        paint_icon(painter, c, icons::ICON_CHECK, CHECK_SIZE, pal.onaccent);
     } else {
-        painter.circle_filled(
-            c,
-            CIRCLE_RADIUS,
-            Color32::from_black_alpha(CIRCLE_DISC_ALPHA),
-        );
-        painter.circle_stroke(c, CIRCLE_RADIUS - 1.0, Stroke::new(2.0, Color32::WHITE));
+        painter.circle_stroke(c, r - 0.75, Stroke::new(1.5, style::OVERLAY_WHITE));
     }
 }
 
-/// The star at the bottom left: filled for a favorite, an outline while hovered otherwise.
-fn paint_star(painter: &egui::Painter, rect: Rect, favorite: bool, pal: &Palette) {
-    let c = star_center(rect);
-    painter.circle_filled(
-        c,
-        STAR_DISC_RADIUS,
-        Color32::from_black_alpha(STAR_DISC_ALPHA),
-    );
-    if favorite {
-        paint_icon(painter, c, icons::ICON_STAR, STAR_SIZE, pal.favorite);
+/// The heart at the bottom left: a white heart for a favorite, an outline while hovered
+/// otherwise. A soft shadow keeps it visible on bright photos.
+fn paint_heart(painter: &egui::Painter, rect: Rect, favorite: bool) {
+    let c = heart_center(rect);
+    let icon = if favorite {
+        icons::ICON_FAVORITE
     } else {
+        icons::ICON_FAVORITE.outlined()
+    };
+    let shadow = Color32::from_black_alpha(HEART_SHADOW_ALPHA);
+    for offset in [(0.0, 1.5), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0)] {
         paint_icon(
             painter,
-            c,
-            icons::ICON_STAR.outlined(),
-            STAR_SIZE,
-            Color32::WHITE,
+            c + Vec2::new(offset.0, offset.1),
+            icon,
+            HEART_SIZE,
+            shadow,
         );
     }
-}
-
-/// The ring around a checked tile (thick) or the tile the keyboard is on (thin).
-fn paint_mark_ring(painter: &egui::Painter, rect: Rect, mark: TileMark, pal: &Palette) {
-    let radius = CornerRadius::same(style::TILE_RADIUS);
-    if mark == TileMark::Checked {
-        painter.rect_stroke(
-            rect.shrink(1.5),
-            radius,
-            Stroke::new(3.0, pal.accent),
-            egui::StrokeKind::Inside,
-        );
-    } else if mark == TileMark::Focused {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            radius,
-            Stroke::new(2.0, pal.accent),
-            egui::StrokeKind::Inside,
-        );
-    }
+    paint_icon(painter, c, icon, HEART_SIZE, style::OVERLAY_WHITE);
 }
 
 /// A black fade over the top or bottom edge of `rect`: `alpha` at the edge, falling smoothly to
-/// nothing `height` points inside. The outer corners follow the tile's rounded corners.
-fn fade(rect: Rect, top: bool, height: f32, alpha: u8, radius: f32) -> egui::Shape {
+/// nothing `height` points inside.
+fn fade(rect: Rect, top: bool, height: f32, alpha: u8) -> egui::Shape {
     let height = height.min(rect.height());
     let mut mesh = egui::Mesh::default();
-    // Rows from the edge inwards: a few close together where the corner curves, then the rest.
+    // Rows from the edge inwards, closer together near the edge where the fade is strongest.
     let steps = [0.0, 0.1, 0.25, 0.45, 0.7, 1.0];
-    let mut rows: Vec<f32> = (0..=4).map(|i| radius * i as f32 / 4.0).collect();
-    rows.extend(steps.iter().map(|t| t * height).filter(|&y| y > radius));
-    rows.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-    for (i, &d) in rows.iter().enumerate() {
-        let inset = if d < radius {
-            radius - (radius * radius - (radius - d) * (radius - d)).sqrt()
-        } else {
-            0.0
-        };
-        let t = (d / height).clamp(0.0, 1.0);
+    for (i, t) in steps.iter().enumerate() {
+        let d = t * height;
         let a = (f32::from(alpha) * (1.0 - t) * (1.0 - t)).round() as u8;
         let color = Color32::from_black_alpha(a);
         let y = if top { rect.min.y + d } else { rect.max.y - d };
-        mesh.colored_vertex(Pos2::new(rect.min.x + inset, y), color);
-        mesh.colored_vertex(Pos2::new(rect.max.x - inset, y), color);
+        mesh.colored_vertex(Pos2::new(rect.min.x, y), color);
+        mesh.colored_vertex(Pos2::new(rect.max.x, y), color);
         if i > 0 {
             let k = u32::try_from(i * 2).unwrap_or(u32::MAX);
             mesh.add_triangle(k - 2, k - 1, k);
@@ -496,40 +548,17 @@ fn fade(rect: Rect, top: bool, height: f32, alpha: u8, radius: f32) -> egui::Sha
     egui::Shape::mesh(mesh)
 }
 
-fn circle_center(rect: Rect) -> Pos2 {
-    rect.min + Vec2::splat(ZONE / 2.0)
+fn circle_center(rect: Rect, checked: bool) -> Pos2 {
+    let inset = if checked {
+        CIRCLE_INSET_SELECTED
+    } else {
+        CIRCLE_INSET
+    };
+    rect.min + Vec2::splat(inset + CIRCLE_DIAMETER / 2.0)
 }
 
-fn star_center(rect: Rect) -> Pos2 {
-    Pos2::new(rect.min.x + ZONE / 2.0, rect.max.y - ZONE / 2.0)
-}
-
-/// A dark pill with a play icon and `text` in the bottom right corner.
-fn paint_pill(painter: &egui::Painter, rect: Rect, text: &str) {
-    let font = egui::FontId::new(12.0, egui::FontFamily::Proportional);
-    let galley = painter.layout_no_wrap(text.to_string(), font, Color32::WHITE);
-    let icon = 14.0;
-    let size = Vec2::new(galley.size().x + icon + 14.0, 22.0);
-    let pill = Rect::from_min_size(rect.max - size - Vec2::splat(6.0), size);
-    if pill.width() > rect.width() - 8.0 {
-        return;
-    }
-    painter.rect_filled(pill, 11.0, Color32::from_black_alpha(165));
-    paint_icon(
-        painter,
-        Pos2::new(pill.min.x + 11.0, pill.center().y),
-        icons::ICON_PLAY_ARROW,
-        icon + 2.0,
-        Color32::WHITE,
-    );
-    painter.galley(
-        Pos2::new(
-            pill.min.x + 8.0 + icon,
-            pill.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        Color32::WHITE,
-    );
+fn heart_center(rect: Rect) -> Pos2 {
+    Pos2::new(rect.min.x + HEART_INSET, rect.max.y - HEART_INSET)
 }
 
 #[cfg(test)]
@@ -549,7 +578,7 @@ mod tests {
         };
         assert_eq!(click_plan(TileEvent::Click, plain, false), ClickPlan::Open);
         assert_eq!(
-            click_plan(TileEvent::Star, plain, false),
+            click_plan(TileEvent::Heart, plain, false),
             ClickPlan::Favorite
         );
         // The circle starts a fresh selection, then adds to it.
@@ -605,6 +634,12 @@ mod tests {
 
     /// Clicks the bottom-left corner of a tile of `side` points and returns what it reported.
     fn corner_click(side: f32) -> Option<TileEvent> {
+        corner_click_of(side, TileMark::None)
+    }
+
+    /// Like [`corner_click`], for a tile with `mark`; the click lands on the
+    /// heart as drawn (on the photo, which is smaller than the tile while selected).
+    fn corner_click_of(side: f32, mark: TileMark) -> Option<TileEvent> {
         use egui_kittest::Harness;
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -621,8 +656,12 @@ mod tests {
         let mut h = Harness::builder()
             .with_size(Vec2::new(300.0, 300.0))
             .build_ui(move |ui| {
+                // The fonts of the style are there from the second frame on.
+                if ui.ctx().cumulative_pass_nr() < 3 {
+                    return;
+                }
                 let name = || "a.jpg".to_string();
-                let tile = Tile::new(&key, "Item", &name).selectable(TileMark::None, false);
+                let tile = Tile::new(&key, "Item", &name).selectable(mark);
                 let out = show(ui, &mut thumbs, ui.scope_id().with("tile"), rect, &tile);
                 if let Some((event, _)) = out.event {
                     *sink.borrow_mut() = Some(event);
@@ -634,7 +673,8 @@ mod tests {
             crate::config::TextSize::default(),
         );
         h.run();
-        let pos = Pos2::new(rect.min.x + 6.0, rect.max.y - 6.0);
+        let photo = picture_area(rect, mark == TileMark::Checked);
+        let pos = heart_center(photo);
         h.hover_at(pos);
         h.run_steps(2);
         for pressed in [true, false] {
@@ -656,6 +696,17 @@ mod tests {
 
     #[test]
     fn the_corner_of_a_large_tile_still_clicks_the_star() {
-        assert_eq!(corner_click(120.0), Some(TileEvent::Star));
+        assert_eq!(corner_click(120.0), Some(TileEvent::Heart));
+    }
+
+    #[test]
+    fn the_heart_of_a_selected_tile_is_clicked_where_it_is_drawn() {
+        for side in [120.0, 320.0] {
+            assert_eq!(
+                corner_click_of(side, TileMark::Checked),
+                Some(TileEvent::Heart),
+                "tile of {side} points"
+            );
+        }
     }
 }

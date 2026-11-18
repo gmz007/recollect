@@ -7,11 +7,18 @@
 //! album version moves or a job finishes.
 
 use super::App;
-use super::dialogs::{Confirmation, confirm_dialog, modal_window};
+use super::dialogs::{
+    Confirmation, Tone, confirm_dialog_tone, dialog_buttons, modal_window, secondary_button,
+};
+use super::notices::Undo;
+use super::sidebar::{Leading, Row};
 use super::style::{self, icons};
 use super::timeline::{View, thousands};
+use super::workers::ThumbCache;
 use crate::library::{AlbumOp, AlbumWrite};
+use crate::media::MediaKind;
 use crate::store::db::{self, AlbumInfo};
+use crate::thumbs::ThumbKey;
 use egui::RichText;
 use std::collections::HashSet;
 
@@ -99,7 +106,12 @@ fn items_text(n: usize) -> String {
 }
 
 /// The entries of the "Add to album…" menus: the albums, then "New album…".
-fn album_menu_items(ui: &mut egui::Ui, albums: &[AlbumInfo], choice: &mut Option<AlbumChoice>) {
+pub(super) fn album_menu_items(
+    ui: &mut egui::Ui,
+    albums: &[AlbumInfo],
+    choice: &mut Option<AlbumChoice>,
+) {
+    style::menu_body(ui);
     egui::ScrollArea::vertical()
         .max_height(280.0)
         .show(ui, |ui| {
@@ -129,39 +141,23 @@ pub(super) fn album_menu(ui: &mut egui::Ui, albums: &[AlbumInfo]) -> Option<Albu
     choice
 }
 
-/// The same menu behind a toolbar button: an icon, with `text` next to it when there is room.
-pub(super) fn album_menu_icon(
-    ui: &mut egui::Ui,
-    albums: &[AlbumInfo],
-    text: Option<&str>,
-) -> Option<AlbumChoice> {
-    let mut choice = None;
-    let r = ui.scope(|ui| {
-        // Like the other toolbar icons: no box until hovered.
-        let w = &mut ui.visuals_mut().widgets.inactive;
-        w.weak_bg_fill = egui::Color32::TRANSPARENT;
-        w.bg_stroke = egui::Stroke::NONE;
-        let color = ui.visuals().widgets.inactive.fg_stroke.color;
-        let job = style::icon_label_job(
-            ui,
-            icons::ICON_PLAYLIST_ADD,
-            22.0,
-            color,
-            text.map(|t| (t, color)),
-            6.0,
-        );
-        ui.menu_button(job, |ui| {
-            album_menu_items(ui, albums, &mut choice);
-        })
-    });
-    let r = r.inner.response;
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Add to album…"));
-    r.on_hover_text("Add to album…");
-    choice
+/// The key of the thumbnail that stands for an album: its cover when that is a photo.
+fn cover_key(album: &AlbumInfo) -> Option<ThumbKey> {
+    let c = album.cover.as_ref()?;
+    (c.kind == MediaKind::Image).then(|| ThumbKey {
+        path: c.path.clone(),
+        mtime: c.mtime,
+        t_ms: None,
+    })
 }
 
 /// The sidebar's album rows in a scroll area. Returns the album that was clicked.
-fn album_rows(ui: &mut egui::Ui, albums: &[AlbumInfo], current: View) -> Option<i64> {
+fn album_rows(
+    ui: &mut egui::Ui,
+    thumbs: &mut ThumbCache,
+    albums: &[AlbumInfo],
+    current: View,
+) -> Option<i64> {
     let mut open = None;
     egui::ScrollArea::vertical()
         .id_salt("albums")
@@ -170,16 +166,15 @@ fn album_rows(ui: &mut egui::Ui, albums: &[AlbumInfo], current: View) -> Option<
         .show(ui, |ui| {
             for a in albums {
                 let short = short_name(&a.name, SHORT_NAME_CHARS);
-                let count = thousands(a.count);
-                let (_, r) = super::sidebar::nav_row(
-                    ui,
-                    icons::ICON_PHOTO_ALBUM,
+                let accessible = format!("{short} ({})", thousands(a.count));
+                let key = cover_key(a);
+                let mut row = Row::new(
+                    Leading::Cover(key.as_ref()),
                     &short,
-                    &format!("{short} ({count})"),
-                    Some(&count),
                     current == View::Album(a.id),
-                    0.0,
                 );
+                row.accessible = &accessible;
+                let (_, r) = super::sidebar::nav_row(ui, Some(thumbs), &row);
                 if r.on_hover_text(&a.name).clicked() {
                     open = Some(a.id);
                 }
@@ -225,9 +220,15 @@ impl App {
             self.dialogs.new_album = Some(NewAlbum::default());
         }
         if self.albums.is_empty() {
-            ui.label(RichText::new("No albums yet.").weak());
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("No albums yet.")
+                        .color(super::style::Palette::of(ui.ctx()).muted),
+                );
+            });
         }
-        if let Some(id) = album_rows(ui, &self.albums, self.tl.view) {
+        if let Some(id) = album_rows(ui, &mut self.thumbs, &self.albums, self.tl.view) {
             self.set_view(View::Album(id));
         }
         self.inline_new_album(ui);
@@ -270,6 +271,9 @@ impl App {
             self.dialogs.new_album = Some(na);
             return;
         }
+        if !na.add.is_empty() {
+            self.clear_selection();
+        }
         self.lib.queue_album(AlbumOp::Create { name, add: na.add });
     }
 
@@ -311,9 +315,9 @@ impl App {
         modal_window(ctx, "New album", |ui| {
             ui.label(format!("{} will be added to it.", items_text(na.add.len())));
             create |= name_field(ui, &mut na.name, &mut na.focused, 240.0);
-            ui.horizontal(|ui| {
-                create |= ui.button("Create").clicked();
-                cancel |= ui.button("Cancel").clicked();
+            dialog_buttons(ui, |ui| {
+                create |= style::primary_button(ui, "Create").clicked();
+                cancel |= secondary_button(ui, "Cancel").clicked();
             });
         });
         self.dialogs.new_album = (!cancel).then_some(na);
@@ -329,9 +333,9 @@ impl App {
         let (mut apply, mut cancel) = (false, false);
         modal_window(ctx, "Rename album", |ui| {
             apply |= name_field(ui, &mut r.name, &mut r.focused, 240.0);
-            ui.horizontal(|ui| {
-                apply |= ui.button("Rename").clicked();
-                cancel |= ui.button("Cancel").clicked();
+            dialog_buttons(ui, |ui| {
+                apply |= style::primary_button(ui, "Rename").clicked();
+                cancel |= secondary_button(ui, "Cancel").clicked();
             });
         });
         if apply {
@@ -358,11 +362,19 @@ impl App {
         };
         let (id, pending) = (d.id, d.pending);
         let name = short_name(self.album_name(id).unwrap_or("this album"), 60);
-        let choice = confirm_dialog(ctx, "Delete album", "Delete", "Cancel", !pending, |ui| {
-            ui.label(format!("Delete the album “{name}”?"));
-            ui.label(RichText::new("The photos and videos in it are not deleted.").weak());
-            ui.add_space(6.0);
-        });
+        let choice = confirm_dialog_tone(
+            ctx,
+            "Delete album",
+            ("Delete", Tone::Danger),
+            "Cancel",
+            !pending,
+            |ui| {
+                ui.label(format!(
+                    "Delete the album “{name}”? The photos stay in your library — only the \
+                     album is removed."
+                ));
+            },
+        );
         match choice {
             Some(Confirmation::Confirmed) => {
                 // The view changes once the library has deleted it.
@@ -376,18 +388,78 @@ impl App {
         }
     }
 
-    /// Next to an album's title: renaming and deleting it.
+    /// Right of an album's title: "Add photos" and the "⋯" menu with renaming and deleting. The
+    /// row runs right to left, so the menu is added first.
     pub(super) fn album_actions(&mut self, ui: &mut egui::Ui, id: i64) {
+        let pal = style::Palette::of(ui.ctx());
         let name = self.album_name(id).unwrap_or("Album").to_string();
-        if style::icon_label_button(ui, icons::ICON_EDIT, "Rename…").clicked() {
+        let (mut rename, mut delete) = (false, false);
+        style::icon_only_menu(ui, icons::ICON_MORE_HORIZ, "More actions", |ui| {
+            rename = ui.button("Rename…").clicked();
+            ui.separator();
+            delete = ui
+                .button(RichText::new("Delete album…").color(pal.danger))
+                .clicked();
+            if rename || delete {
+                ui.close();
+            }
+        });
+        if style::icon_label_button(ui, icons::ICON_ADD, "Add photos").clicked() {
+            self.start_adding(id);
+        }
+        if rename {
             self.dialogs.rename_album = Some(RenameAlbum {
                 id,
                 name,
                 focused: false,
             });
         }
-        if style::icon_label_button(ui, icons::ICON_DELETE, "Delete album…").clicked() {
+        if delete {
             self.dialogs.delete_album = Some(DeleteAlbum::new(id));
+        }
+    }
+
+    /// "Add photos": shows Photos in selection mode, to choose photos for album `id`.
+    pub(super) fn start_adding(&mut self, id: i64) {
+        self.clear_selection();
+        self.set_view(View::Timeline);
+        self.tl.grid.choosing_for = Some(id);
+        self.tl.grid.picking = true;
+    }
+
+    /// Ends "Add photos" without adding anything and goes back to the album.
+    pub(super) fn stop_adding(&mut self) {
+        if let Some(id) = self.tl.grid.choosing_for.take() {
+            self.clear_selection();
+            self.set_view(View::Album(id));
+        }
+    }
+
+    /// Adds the chosen photos to the album, then goes back to it. The confirmation (with Undo)
+    /// comes when the library has written the change.
+    pub(super) fn finish_adding(&mut self) {
+        let Some(album) = self.tl.grid.choosing_for else {
+            return;
+        };
+        let files = self.selected_file_ids();
+        if !files.is_empty() {
+            self.lib.queue_album(AlbumOp::Add { album, files });
+        }
+        self.stop_adding();
+    }
+
+    /// The album whose photos are being chosen, while that is going on.
+    pub(super) fn adding_to(&self) -> Option<i64> {
+        self.tl.grid.choosing_for
+    }
+
+    /// Per frame: choosing photos ends when the user leaves Photos for another view or a search.
+    pub(super) fn end_adding_when_left(&mut self) {
+        if self.tl.grid.choosing_for.is_some()
+            && (self.tl.view != View::Timeline || self.searching())
+        {
+            self.tl.grid.choosing_for = None;
+            self.tl.grid.picking = !self.tl.grid.sel.is_empty();
         }
     }
 
@@ -420,6 +492,7 @@ impl App {
     }
 
     fn report_album_write(&mut self, w: &AlbumWrite) {
+        let silent = self.silent_album_writes.remove(&w.ticket);
         if let Some(e) = &w.error {
             let (text, details) = super::guide::album_problem(w.error_kind.as_ref(), e);
             self.notify_problem(text, details.unwrap_or_default(), None);
@@ -438,18 +511,43 @@ impl App {
                     items_text(w.changed)
                 ));
             }
-            AlbumOp::Add { files, .. } => {
+            AlbumOp::Add { album: id, files } if !silent => {
                 let to = album.unwrap_or_else(|| "the album".into());
-                self.notify(added_message(w.changed, files.len(), &to));
+                let text = added_message(w.changed, files.len(), &to);
+                if w.changed_files.is_empty() {
+                    self.notify(text);
+                } else {
+                    let undo = Undo::TakeOutOfAlbum {
+                        album: *id,
+                        files: w.changed_files.clone(),
+                    };
+                    self.notify_undoable(text, undo);
+                }
             }
             AlbumOp::Remove { album: id, files } => {
-                let from = album.unwrap_or_else(|| "the album".into());
-                self.notify(format!("Removed {} from “{from}”", items_text(w.changed)));
+                if !silent {
+                    self.report_removal(*id, w, album);
+                }
                 self.drop_removed_from_view(*id, files);
             }
             AlbumOp::Delete { id } => self.album_deleted(*id),
             _ => {}
         }
+    }
+
+    /// "Removed 3 from X" with Undo, or a plain note when nothing was in the album.
+    fn report_removal(&mut self, id: i64, w: &AlbumWrite, album: Option<String>) {
+        let from = album.unwrap_or_else(|| "the album".into());
+        if w.changed_files.is_empty() {
+            self.notify(format!("Nothing to remove from {from}"));
+            return;
+        }
+        let text = format!("Removed {} from {from}", thousands(w.changed));
+        let undo = Undo::PutBackInAlbum {
+            album: id,
+            files: w.changed_files.clone(),
+        };
+        self.notify_undoable(text, undo);
     }
 
     /// Nothing was changed: puts back what the user was working on.
@@ -510,14 +608,14 @@ impl App {
 /// What was said about adding `requested` items to album `to` when `changed` were new to it.
 fn added_message(changed: usize, requested: usize, to: &str) -> String {
     if changed == requested {
-        format!("Added {} to “{to}”", items_text(changed))
+        format!("Added {} to {to}", thousands(changed))
     } else if changed == 0 {
-        format!("Already in “{to}”")
+        format!("Already in {to}")
     } else {
         format!(
-            "Added {} of {} to “{to}” (the rest were already in it)",
+            "Added {} of {} to {to} (the rest were already in it)",
             thousands(changed),
-            items_text(requested)
+            thousands(requested)
         )
     }
 }
