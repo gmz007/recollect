@@ -341,7 +341,13 @@ fn a_failed_model_switch_at_start_keeps_the_welcome_and_says_so() {
 fn the_buttons_stay_where_they_are_on_every_step() {
     let d = tempfile::tempdir().unwrap();
     let app = fresh_app(d.path());
-    choose_a_folder(&app, d.path());
+    // A long path (as temporary folders have on macOS) must not widen the column.
+    let deep = d
+        .path()
+        .join("a-folder-with-a-rather-long-name")
+        .join("and-another-one-inside-it-that-is-long-too");
+    std::fs::create_dir_all(&deep).unwrap();
+    choose_a_folder(&app, &deep);
     let mut h = album_harness(&app);
     let primary = ["Get started", "Continue", "Turn on", "Start"];
     let mut rects = Vec::new();

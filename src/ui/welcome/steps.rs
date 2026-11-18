@@ -214,7 +214,11 @@ fn welcome_added_folders(ui: &mut Ui, w: &mut Welcome) {
     for (i, p) in w.added.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(style::icon_text(icons::ICON_FOLDER, 18.0).color(pal.text2));
+            // Leave room for the remove button: a long path is cut short here instead of
+            // widening the column (which would move the buttons below).
+            let text_width = (ui.available_width() - REMOVE_BUTTON_ROOM).max(0.0);
             ui.vertical(|ui| {
+                ui.set_max_width(text_width);
                 let name = p.file_name().map_or_else(
                     || p.display().to_string(),
                     |n| n.to_string_lossy().into_owned(),
@@ -236,6 +240,9 @@ fn welcome_added_folders(ui: &mut Ui, w: &mut Welcome) {
         w.added.remove(i);
     }
 }
+
+/// Width kept free for a folder row's remove button (icon, padding and spacing).
+const REMOVE_BUTTON_ROOM: f32 = 40.0;
 
 /// The smart-search screen: the two choices with their sizes, and the privacy note.
 pub(super) fn welcome_search(ui: &mut Ui, w: &mut Welcome) {
