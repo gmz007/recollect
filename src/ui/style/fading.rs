@@ -40,6 +40,9 @@ pub fn pill_chip(
         .interactable(false)
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
+            // A chip is one line. Pinned by its right edge, the area only has the width it had
+            // last frame, so a longer text ("May" → "September") would otherwise wrap.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             let pal = Palette::of(ui.ctx());
             egui::Frame::new()
                 .fill(pal.pill)
@@ -66,5 +69,47 @@ mod tests {
         assert!((at(850) - 0.5).abs() < 1e-3);
         assert!(at(1000).abs() < f32::EPSILON);
         assert!(at(5000).abs() < f32::EPSILON);
+    }
+
+    /// The height of a chip pinned by its right edge near the window's right side after it showed
+    /// `before` for a few frames and then `after`.
+    fn chip_height(before: &str, after: &str) -> f32 {
+        let ctx = egui::Context::default();
+        let id = Id::unique("chip");
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        for text in [before, before, before, after, after, after] {
+            let mut out = ctx.run_ui(input(), |ui| {
+                pill_chip(
+                    ui.ctx(),
+                    id,
+                    egui::pos2(772.0, 300.0),
+                    Align2::RIGHT_CENTER,
+                    1.0,
+                    |ui, _| {
+                        ui.label(egui::RichText::new(text).size(11.5));
+                    },
+                );
+            });
+            out.textures_delta.clear();
+        }
+        ctx.memory(|m| m.area_rect(id))
+            .expect("the chip is shown")
+            .height()
+    }
+
+    #[test]
+    fn a_chip_keeps_its_words_on_one_line_when_they_grow() {
+        let short = chip_height("May 2018", "May 2018");
+        let grown = chip_height("May 2018", "September 2018");
+        assert!(
+            (grown - short).abs() < 1.0,
+            "the longer date wrapped: {grown} high instead of {short}"
+        );
     }
 }
