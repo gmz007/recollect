@@ -142,7 +142,7 @@ more than a few hundred lines of code.
 | `media/` | `scan`, `image`, `metadata` (capture dates), `video/` (`stream`, `convert`, `sample`, `still`) |
 | `model/` | `registry`, `download`, `embedder` |
 | `search.rs` | turning index candidates into hits |
-| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `ruler/` (the timeline ruler that replaces the scroll bar), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/` (the Settings window: one file per section, `rows` for the shared row layout), and one file per remaining screen or widget |
+| `ui/` | `mod.rs` (the app and its frame loop), `notices`, `snapshot`, `dialogs`, `grid` (selection and keyboard moves shared by both grids), `results` (search), `favorites`, `selection_bar`, `folders`, `timeline/` (loading, day sections and layout, the day headings, the "On this day" banner), `ruler/` (the timeline ruler that replaces the scroll bar), `photo_size` (pinch, Ctrl/Cmd keys and the size chip), `viewer/`, `settings/` (the Settings window: one file per section, `rows` for the shared row layout), `welcome/` (the first-run screens: `steps` for what each says, `mosaic` for the photo grid), and one file per remaining screen or widget |
 | `cli.rs`, `bench.rs`, `eval.rs` | command-line entry points |
 
 Functions are kept to 50 lines of code (a clippy threshold); longer scenario tests are the
@@ -180,6 +180,17 @@ height; per frame only the dashes are drawn and one binary search finds the mark
 to scroll the ruler is left out. The dashes at years (or months, with three years or fewer) are
 keyboard stops. The "On this day" banner asks for a large preview through the viewer's preview
 cache and shows the grid thumbnail until it arrives.
+
+The first-run screens (`ui/welcome/`) split the window in two when it is at least 900 points
+wide: a static 4 by 4 mosaic of 16 photographs on one half and the step's content, centred
+vertically, on the other. Narrower windows show the content alone. The photos are bundled
+(`assets/welcome/`: a light and a dark set of 16 JPEGs, 720 px wide, about 1.6 MB, CC0 from
+Unsplash; the folder's README lists them) and compiled in with `include_bytes!`. The set that
+matches the theme is decoded once on a background thread, shrunk to at most 480 px, and
+uploaded as textures on the first frame after it finishes; the textures are dropped with the
+mosaic, which exists only while the window is wide enough and the welcome is showing, and
+cells are cropped to fill. The step body has a fixed height (it scrolls when longer) so Back and
+the main button never move between steps.
 
 ## Incremental scanning and robustness
 

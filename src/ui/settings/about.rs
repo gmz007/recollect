@@ -8,10 +8,11 @@ use egui::RichText;
 /// Side of the app mark, in points.
 const MARK_SIZE: f32 = 44.0;
 
-const LICENSES: [&str; 5] = [
+const LICENSES: [&str; 6] = [
     "Recollect: MIT or Apache License 2.0",
     "Inter typeface: SIL Open Font License 1.1",
     "Material Symbols icons: Apache License 2.0",
+    "Photos on the first screen: Unsplash, public domain (CC0)",
     "ONNX Runtime: MIT License",
     "FFmpeg: GNU LGPL",
 ];

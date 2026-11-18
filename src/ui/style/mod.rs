@@ -243,25 +243,39 @@ pub fn darken(color: Color32, amount: f32) -> Color32 {
 /// Named `label` for assistive technology.
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> Response {
     let pal = Palette::of(ui.ctx());
-    filled_button(ui, label, pal.accent, pal.onaccent)
+    filled_button(ui, label, pal.accent, pal.onaccent, 0.0)
+}
+
+/// [`primary_button`] at least `min_width` wide, so a row of screens keeps the button's edges
+/// in the same place whatever the label.
+pub fn primary_button_wide(ui: &mut egui::Ui, label: &str, min_width: f32) -> Response {
+    let pal = Palette::of(ui.ctx());
+    filled_button(ui, label, pal.accent, pal.onaccent, min_width)
 }
 
 /// Like [`primary_button`] but in the warning colour, for the button that confirms something
 /// that cannot be undone.
 pub fn danger_button(ui: &mut egui::Ui, label: &str) -> Response {
     let pal = Palette::of(ui.ctx());
-    filled_button(ui, label, pal.danger, pal.onaccent)
+    filled_button(ui, label, pal.danger, pal.onaccent, 0.0)
 }
 
 /// A 32 point button filled with `fill`, a little darker on hover, named `label`.
-fn filled_button(ui: &mut egui::Ui, label: &str, fill: Color32, text: Color32) -> Response {
+fn filled_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    fill: Color32,
+    text: Color32,
+    min_width: f32,
+) -> Response {
     let r = ui
         .scope(|ui| {
             let w = &mut ui.visuals_mut().widgets;
             w.inactive.weak_bg_fill = fill;
             w.hovered.weak_bg_fill = darken(fill, 0.12);
             w.active.weak_bg_fill = darken(fill, 0.22);
-            let b = egui::Button::new(medium(label).color(text)).min_size(Vec2::new(0.0, 32.0));
+            let b =
+                egui::Button::new(medium(label).color(text)).min_size(Vec2::new(min_width, 32.0));
             ui.add(b)
         })
         .inner

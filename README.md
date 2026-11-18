@@ -291,6 +291,8 @@ Your numbers will vary with hardware, photo size and codecs.
   `assets/fonts/Inter-OFL.txt`).
 - Icons are [Material Symbols](https://fonts.google.com/icons) (Apache License 2.0), via the
   `egui_material_icons` crate.
+- The photos on the first-run screen are 32 CC0 (public domain) photographs from Unsplash; see
+  `assets/welcome/README.md` for the list and sources.
 
 ## License
 

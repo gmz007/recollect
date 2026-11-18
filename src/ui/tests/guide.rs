@@ -348,12 +348,17 @@ fn the_main_screens_use_no_technical_words() {
     {
         let d = tempfile::tempdir().unwrap();
         let app = fresh_app(d.path());
+        app.borrow_mut()
+            .welcome
+            .as_mut()
+            .unwrap()
+            .add_folder_for_test(d.path().to_path_buf());
         let mut h = album_harness(&app);
         check("welcome: first screen", &h);
         h.get_by_label("Get started").click();
         h.run_steps(3);
         check("welcome: folders", &h);
-        h.get_by_label("Continue without folders").click();
+        h.get_by_label("Continue").click();
         h.run_steps(3);
         check("welcome: smart search", &h);
         h.get_by_label("Not now").click();

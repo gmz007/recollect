@@ -344,6 +344,7 @@ fn about_states_the_privacy_promise_and_the_version() {
     h.run_steps(3);
     h.get_by_label("Inter typeface: SIL Open Font License 1.1");
     h.get_by_label("Material Symbols icons: Apache License 2.0");
+    h.get_by_label("Photos on the first screen: Unsplash, public domain (CC0)");
     h.get_by_label("ONNX Runtime: MIT License");
     h.get_by_label("FFmpeg: GNU LGPL");
 }
