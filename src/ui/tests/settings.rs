@@ -292,10 +292,13 @@ fn library_settings_show_counts_and_retry_unreadable_files() {
             .collect::<Vec<_>>()
             .is_empty()
     );
-    // Stopping a folder asks in its own row, inside Settings.
+    // Stopping a folder asks in its own row, inside Settings. The retry's background work
+    // shows above the folders while it runs: wait until it is gone and the page is still, so
+    // the click lands on the button where it now is.
+    settle(&mut h, || !lib.is_busy());
+    h.run();
     h.get_by_label("Stop showing “nowhere”…").click();
-    h.run_steps(3);
-    h.get_by_label("Stop showing “nowhere”?");
+    settle_until_shown(&mut h, "Stop showing “nowhere”?");
     h.get_by_label("Your files stay where they are.");
     assert_eq!(lib.folders().unwrap().len(), 1);
     assert!(
@@ -465,4 +468,16 @@ fn the_theme_and_text_size_settings_apply() {
     assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 20.0);
     assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 12.0);
     assert_eq!(style.text_styles[&crate::ui::style::section()].size, 14.0);
+}
+
+/// Runs frames until `label` is on screen (a slow machine may need more than a few).
+fn settle_until_shown(h: &mut Harness<'_>, label: &str) {
+    for _ in 0..500 {
+        h.run_steps(1);
+        if h.query_by_label(label).is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("{label:?} not shown in time");
 }
